@@ -115,21 +115,20 @@ end
 """
     add_scene!(screen::Screen, scene::Scene) -> String
 
-Register `scene` with `screen` (idempotently) and return its scope path.
+Register `scene` with `screen` (idempotently) and return its USD scope path.
 
-M2.1 is bookkeeping-only: plots attach directly at `/World/plot_<objectid(plot)>`
-(children of the root `/World` Xform), so a per-scene USD `Scope` prim is not
-required for them to render — authoring one would be an orphan prim on the open
-stage.  We record the scene (so `insert!`/`insertplots!` are idempotent) and
-reserve a `scene_listeners` slot for M2.4 teardown.  Camera/light changes are
-detected by snapshot-compare in `colorbuffer` (not observable listeners), so no
-redraw listeners are registered here.
+M2.3: `scene2scope` is authored authoritatively by `author_root_from_scene!` (it
+emits a nested `def Scope "Scene_<id>"` per subscene INTO the root layer and records
+`objectid(scene) => scope path`).  So this returns that scene's scope path —
+`/World` for the root scene, `/World/Scene_<id>/…` for a subscene — and a plot
+inserted under `scene` nests at `<scope>/plot_<id>` (`plot_prim_path`).  A scene not
+in the map (e.g. a subscene added live AFTER authoring) falls back to `/World` so its
+plots still render flat.  We also reserve a `scene_listeners` slot for M2.4 teardown.
 """
 function add_scene!(screen::Screen, scene::Makie.Scene)
-    return get!(screen.scene2scope, objectid(scene)) do
-        screen.scene_listeners[objectid(scene)] = Any[]
-        "/World"   # logical scope: where this scene's plot references live
-    end
+    haskey(screen.scene_listeners, objectid(scene)) ||
+        (screen.scene_listeners[objectid(scene)] = Any[])
+    return get(screen.scene2scope, objectid(scene), "/World")
 end
 
 """
@@ -138,8 +137,9 @@ end
 Open-stage plot insert.  Registers `scene` (`add_scene!`) first.  Idempotent via
 `screen.plot2robj`.  An atomic plot (`isempty(plot.plots)`) is registered via
 `register_ovrtx_robj!` (its `:ovrtx_renderobject` diff node builds the USD reference
-at `/World/plot_<id>` and records the `OvrtxRObj`); a composite plot recurses over
-its children.
+at the scene's nested scope path `/World/Scene_<id>/plot_<id>` — M2.3 — and records
+the `OvrtxRObj`); a composite plot recurses over its children, threading the same
+`scene` so all its atomic pieces nest together.
 
 Before the stage is authored (open), this is a no-op: the plot is already in
 `scene.plots` and will be added by `insertplots!` at the first `colorbuffer`

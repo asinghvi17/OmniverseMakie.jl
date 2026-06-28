@@ -1,10 +1,15 @@
 # Primitive translations for OmniverseMakie (M1.7): scatter / meshscatter / lines / surface.
 #
-# Each `to_ovrtx_object(screen, scene, plot::T)` reads the plot's data, authors a
-# self-contained USDA reference layer (defaultPrim, NO `upAxis` — M1.2 finding),
-# adds it under `/World/plot_<objectid(plot)>` via `OV.add_usd_reference!`, and
-# returns the `ovrtx_usd_handle_t` — exactly the M1.5 Mesh pattern.  `Base.insert!`
-# dispatches here; unknown plot types hit the generic `to_ovrtx_object(...) = nothing`.
+# These emit self-contained USDA reference layers (defaultPrim, NO `upAxis` — M1.2),
+# added under the plot's nested scope path (`/World/Scene_<id>/plot_<id>`, M2.3) via
+# `OV.add_usd_reference!`.
+#
+# M2.3 dead-path consolidation: the scatter/meshscatter/lines/linesegments USDA EMITTERS
+# below (`_usda_pointinstancer`, `_sphere_proto_body`, `_mesh_proto_body`,
+# `_usda_basiscurves`, `_curve_width`, …) are LIVE — `author_usd_prim!` (compute.jl)
+# calls them fed from resolved compute outputs.  Only their old `to_ovrtx_object(::T)`
+# build wrappers were dead (non-empty `consumed_inputs`) and were removed.  `Surface`
+# (empty `consumed_inputs`) is the ONE plot still built via `to_ovrtx_object` here.
 #
 # USD schemas — all VALIDATED at render time by test/m1_primitives_test.jl (M1.7),
 # each producing a non-black render through ovrtx RT2:
@@ -162,69 +167,11 @@ $(proto_body)
 """
 end
 
-# ------------------------------------------------------------------
-# Scatter → UsdGeomPointInstancer (UsdGeomSphere prototype)
-# ------------------------------------------------------------------
-
-"""
-    to_ovrtx_object(screen, scene, plot::Makie.Scatter) -> UInt64
-
-Author the scatter as a `UsdGeomPointInstancer` whose single prototype is a unit
-`UsdGeomSphere`, one instance per `plot[1][]` position, scaled by `plot.markersize`
-(treated as a data-unit radius for M1) and coloured via `displaycolor_for`.
-A constant colour rides on the prototype; per-point colours ride on the instancer.
-"""
-function to_ovrtx_object(screen, scene, plot::Makie.Scatter)
-    pos = plot[1][]
-    n   = length(pos)
-    n == 0 && return nothing
-
-    scales = _scales_for(plot.markersize[], n)
-    values, interp = displaycolor_for(plot, n)
-
-    proto_color     = interp == "constant" ? values  : nothing
-    instancer_color = interp == "constant" ? nothing : values
-
-    usda = _usda_pointinstancer(pos, scales, nothing, instancer_color,
-                                _sphere_proto_body(proto_color); model = plot.model[])
-    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-end
-
-# ------------------------------------------------------------------
-# MeshScatter → UsdGeomPointInstancer (UsdGeomMesh prototype = plot.marker)
-# ------------------------------------------------------------------
-
-"""
-    to_ovrtx_object(screen, scene, plot::Makie.MeshScatter) -> UInt64
-
-Author the meshscatter as a `UsdGeomPointInstancer` whose prototype is the marker
-mesh (`plot.marker[]`, converted via `GeometryBasics.mesh` if needed), instanced at
-each `plot[1][]` position, scaled by `plot.markersize` and (when non-identity)
-oriented by `plot.rotation`.  Colour handling matches `Scatter`.
-"""
-function to_ovrtx_object(screen, scene, plot::Makie.MeshScatter)
-    pos = plot[1][]
-    n   = length(pos)
-    n == 0 && return nothing
-
-    marker = plot.marker[]
-    gm     = marker isa GeometryBasics.Mesh ? marker : GeometryBasics.mesh(marker)
-    mpts   = GeometryBasics.coordinates(gm)
-    mnrm   = GeometryBasics.normals(gm)
-    mfaces = [Int[Int(GeometryBasics.raw(i)) for i in f] for f in GeometryBasics.faces(gm)]
-
-    scales       = _scales_for(plot.markersize[], n)
-    orientations = _orientations_for(plot.rotation[], n)
-    values, interp = displaycolor_for(plot, n)
-
-    proto_color     = interp == "constant" ? values  : nothing
-    instancer_color = interp == "constant" ? nothing : values
-
-    proto = _mesh_proto_body(mpts, mfaces, mnrm, proto_color)
-    usda  = _usda_pointinstancer(pos, scales, orientations, instancer_color, proto;
-                                 model = plot.model[])
-    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-end
+# NOTE (M2.3 dead-path consolidation): the live Scatter/MeshScatter BUILD is
+# `author_usd_prim!(::Makie.Scatter/::Makie.MeshScatter)` in compute.jl (fed from
+# resolved compute outputs), which reuses `_usda_pointinstancer` / `_sphere_proto_body`
+# / `_mesh_proto_body` above.  The old `to_ovrtx_object(::Scatter/::MeshScatter)` build
+# methods were UNREACHABLE (both types have non-empty `consumed_inputs`) and were removed.
 
 # ------------------------------------------------------------------
 # UsdGeomBasisCurves authoring (Lines / LineSegments primary)
@@ -262,40 +209,19 @@ $(col_block)    matrix4d xformOp:transform = $(usda_matrix4d(model))
 """
 end
 
-"""
-    to_ovrtx_object(screen, scene, plot::Makie.Lines) -> Union{UInt64,Nothing}
-
-Author one polyline as a linear `UsdGeomBasisCurves` (single curve of `N` vertices).
-"""
-function to_ovrtx_object(screen, scene, plot::Makie.Lines)
-    pts = plot[1][]
-    n   = length(pts)
-    n < 2 && return nothing
-    values, interp = displaycolor_for(plot, n)
-    width = _curve_width(pts, plot.linewidth[])
-    usda  = _usda_basiscurves(pts, [n], width, values, interp; model = plot.model[])
-    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-end
-
-"""
-    to_ovrtx_object(screen, scene, plot::Makie.LineSegments) -> Union{UInt64,Nothing}
-
-Author independent 2-vertex segments as a linear `UsdGeomBasisCurves`
-(`curveVertexCounts = [2, 2, ...]`, one entry per consecutive point pair).
-"""
-function to_ovrtx_object(screen, scene, plot::Makie.LineSegments)
-    pts  = plot[1][]
-    nseg = length(pts) ÷ 2
-    nseg < 1 && return nothing
-    pts2 = pts[1:2*nseg]
-    values, interp = displaycolor_for(plot, length(pts2))
-    width  = _curve_width(pts, plot.linewidth[])
-    usda   = _usda_basiscurves(pts2, fill(2, nseg), width, values, interp; model = plot.model[])
-    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-end
+# NOTE (M2.3 dead-path consolidation): the live Lines/LineSegments BUILD is
+# `author_usd_prim!(::Makie.Lines/::Makie.LineSegments)` in compute.jl, reusing
+# `_usda_basiscurves` / `_curve_width` above.  The old `to_ovrtx_object(::Lines/
+# ::LineSegments)` build methods were UNREACHABLE (non-empty `consumed_inputs`) and
+# were removed.
 
 # ------------------------------------------------------------------
 # Surface → UsdGeomMesh (grid re-meshed; reuses usda_mesh)
+#
+# Surface has NO `*_f32c`/`faces` compute outputs ⇒ empty `consumed_inputs` ⇒ it is
+# the ONE live plot type still built here, via the `register_ovrtx_robj!`
+# empty-inputs branch.  `scene` is threaded so its reference nests under the scene's
+# `def Scope` like every other plot (M2.3).
 # ------------------------------------------------------------------
 
 # Build (points, 0-based quad faces, per-vertex normals) for a grid surface.
@@ -375,5 +301,6 @@ function to_ovrtx_object(screen, scene, plot::Makie.Surface)
                      model                = plot.model[],
                      normal_interpolation = "vertex",
                      color_interpolation  = interp)
-    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
+    return OV.add_usd_reference!(screen.renderer, usda,
+                                 plot_prim_path(screen.scene2scope, scene, plot))
 end

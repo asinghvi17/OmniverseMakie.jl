@@ -36,3 +36,6 @@ include("m2_rendercfg_test.jl")
 
 # M2.2 — :ovrtx_renderobject diff node + push_to_ovrtx! minimal edits
 include("m2_diffnode_test.jl")
+
+# M2.3 — USD subscene grouping (def Scope hierarchy mirroring the Makie scene tree)
+include("m2_subscene_test.jl")

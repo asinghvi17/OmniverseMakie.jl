@@ -125,6 +125,58 @@ function _displaycolor_str(dc)
 end
 
 # ------------------------------------------------------------------
+# scene_scopes_usda — nested `def Scope` skeleton mirroring the scene tree
+# ------------------------------------------------------------------
+
+"""
+    scene_scopes_usda(root_scene) -> (usda::String, scene2scope::Dict{UInt64,String})
+
+Walk `root_scene` and its `.children` recursively and emit a nested `def Scope`
+skeleton mirroring the Makie scene tree, for embedding inside the root layer's
+`def Xform "World"` block (M2.3 subscene grouping — the open USD prim hierarchy then
+mirrors the Makie `Scene` graph).
+
+- `root_scene` maps to `/World` (the existing root Xform — NO extra `Scene_` scope).
+- each non-root subscene becomes a `def Scope "Scene_<objectid(scene)>"` nested under
+  its parent scene's scope, so the prim hierarchy mirrors `scene.children`.
+
+Returns the USDA fragment (scope blocks, 4-space-indented as direct children of
+`/World`; `""` when `root_scene` has no children) and `scene2scope`, mapping every
+scene's `objectid` to its full scope path.
+
+Purely organizational: scopes carry NO transform (plots keep their composed-world
+`:model_f32c`) and the fragment OMITS `upAxis` (only the root governs — M1.2).  Paths
+derive from stable `objectid`s, so they are identical across screens (consistent with
+the M2.2 `:ovrtx_screen` rebuild, which re-authors on a new screen).
+"""
+function scene_scopes_usda(root_scene)
+    scene2scope = Dict{UInt64,String}()
+    scene2scope[objectid(root_scene)] = "/World"
+    buf = IOBuffer()
+    for child in root_scene.children
+        _emit_scene_scope!(buf, scene2scope, child, "/World", 1)
+    end
+    return (String(take!(buf)), scene2scope)
+end
+
+# Emit one `def Scope "Scene_<id>" { … }` block (children recursively nested) and
+# record its full path in `scene2scope`.  `depth` sets the indent (1 = direct child
+# of /World → 4 spaces, matching the camera/light blocks).
+function _emit_scene_scope!(buf::IO, scene2scope::Dict{UInt64,String}, scene,
+                            parent_path::AbstractString, depth::Int)
+    name = "Scene_$(objectid(scene))"
+    path = "$(parent_path)/$(name)"
+    scene2scope[objectid(scene)] = path
+    indent = "    "^depth
+    print(buf, indent, "def Scope \"", name, "\"\n", indent, "{\n")
+    for child in scene.children
+        _emit_scene_scope!(buf, scene2scope, child, path, depth + 1)
+    end
+    print(buf, indent, "}\n")
+    return
+end
+
+# ------------------------------------------------------------------
 # author_render_root! — open a self-renderable USD stage in the renderer
 # ------------------------------------------------------------------
 
@@ -141,6 +193,10 @@ via `OV.open_usd_string!`.  The stage contains:
 - The full render-config hierarchy: `/Render/OVMakie/RenderProduct` with the
   `OmniRtxSettings*` / `OmniRtxPost*` apiSchemas proven by the M1.2 spike,
   `/Render/GlobalRenderSettings`, and `/Render/Vars/LdrColor`.
+- `scopes_str` (M2.3): an optional nested `def Scope` skeleton (from
+  `scene_scopes_usda`) embedded inside `def Xform "World"` as a sibling of the
+  camera, so plot references can nest at `/World/Scene_<id>/plot_<id>`.  Defaults
+  to `""` (no subscene scopes — the M1 flat layout).
 
 The RenderProduct path is fixed at `/Render/OVMakie/RenderProduct` (matching
 `Screen.product`).
@@ -180,7 +236,8 @@ function author_render_root!(screen;
                               focal_length::Float64 = 18.147562,
                               h_aperture::Float64   = 20.955,
                               v_aperture::Float64   = 15.2908,
-                              lights_str::String    = _DEFAULT_LIGHTS_STR)
+                              lights_str::String    = _DEFAULT_LIGHTS_STR,
+                              scopes_str::String    = "")
     W, H       = resolution
     cam_name   = split(camera_path, "/")[end]   # last segment → prim name under /World
     rtx_lines  = rtx_settings_usda(screen.config)
@@ -210,7 +267,7 @@ $(lights_str)    def Camera "$(cam_name)" (
         matrix4d xformOp:transform = $(camera_xform_str)
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }
-}
+$(scopes_str)}
 
 def "Render" (
     hide_in_stage_window = true
@@ -305,7 +362,17 @@ function author_root_from_scene!(screen, scene;
     # Translate scene lights to USDA, passing camera matrix for camera-relative lights.
     lstr = lights_usda(scene; cam_to_world = M)
 
-    # Bake camera + lights into root in ONE open_usd_string! call.
+    # M2.3: author a `def Scope` per Makie subscene, nested to mirror the scene tree,
+    # so plot references nest at /World/Scene_<id>/plot_<id>.  The hierarchy is rooted
+    # at the scene that `insertplots!` walks — `screen.scene` (the figure ROOT when
+    # `save(fig)`, or the LScene scene when `colorbuffer(ax.scene)`), NOT the camera
+    # scene (a descendant).  Store the map on the screen so `add_scene!` /
+    # `plot_prim_path` resolve each plot's nested path before any reference is added.
+    root_scene = something(screen.scene, scene)
+    scopes_str, scene2scope = scene_scopes_usda(root_scene)
+    screen.scene2scope = scene2scope
+
+    # Bake camera + lights + scope skeleton into root in ONE open_usd_string! call.
     author_render_root!(screen;
         resolution       = resolution,
         camera_path      = camera_path,
@@ -313,6 +380,7 @@ function author_root_from_scene!(screen, scene;
         focal_length     = intr.focal_length,
         h_aperture       = intr.h_aperture,
         v_aperture       = intr.v_aperture,
-        lights_str       = lstr)
+        lights_str       = lstr,
+        scopes_str       = scopes_str)
     return nothing
 end

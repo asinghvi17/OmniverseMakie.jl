@@ -51,7 +51,16 @@ OvrtxRObj(prim_path::AbstractString, usd_handle::Integer) =
 
 # Single source of truth for a plot's USD prim path (was reconstructed in 6 emitters
 # + insert! before M2.2).  `author_usd_prim!`/`register_ovrtx_robj!` own it.
-plot_prim_path(plot) = "/World/plot_$(objectid(plot))"
+#
+# M2.3: scope-aware.  The plot nests under its owning scene's `def Scope`, looked up
+# in the screen's `scene2scope` map (authored into the root by `author_root_from_scene!`,
+# before any reference is added).  `scene2scope[objectid(scene)]` is `/World` for the
+# root scene and `/World/Scene_<id>/…` for subscenes — derived from stable `objectid`s,
+# so it is identical across screens (a rebuild on a new screen recomputes the same
+# path).  A scene not yet in the map (e.g. a subscene added live after authoring) falls
+# back to `/World`, so the plot still renders flat.
+plot_prim_path(scene2scope::AbstractDict, scene, plot) =
+    string(get(scene2scope, objectid(scene), "/World"), "/plot_", objectid(plot))
 
 # ------------------------------------------------------------------
 # consumed_inputs — per-type Makie compute outputs the diff node tracks
@@ -87,7 +96,7 @@ _displaycolor_from_scaled(c, _n) = (_rgb(Makie.to_color(c)), "constant")
 # ------------------------------------------------------------------
 
 """
-    author_usd_prim!(screen, plot, args) -> Union{OvrtxRObj,Nothing}
+    author_usd_prim!(screen, scene, plot, args) -> Union{OvrtxRObj,Nothing}
 
 Build a plot's USD reference on the OPEN stage from its RESOLVED compute outputs
 (`args`), returning the recording `OvrtxRObj` (or `nothing` for an empty plot).
@@ -97,8 +106,12 @@ transform from `:model_f32c` (the COMPOSED world transform — closing the M1
 scene-transform gap), so world = `model_f32c · positions`.  Colour comes from
 `:scaled_color`.  The emitters are M1's (`usda_mesh` / `_usda_pointinstancer` /
 `_usda_basiscurves`), reused verbatim but fed from `args` instead of the plot.
+
+`scene` (the plot's owning Makie scene) is threaded through so the reference is added
+at the NESTED scope path `plot_prim_path(screen.scene2scope, scene, plot)`
+(`/World/Scene_<id>/plot_<id>` for a subscene) — M2.3 subscene grouping.
 """
-function author_usd_prim!(screen, plot::Makie.Mesh, args)
+function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
     points  = args[:positions_transformed_f32c]
     isempty(points) && return nothing
     normals = args[:normals]
@@ -108,11 +121,12 @@ function author_usd_prim!(screen, plot::Makie.Mesh, args)
                      model                = args[:model_f32c],
                      normal_interpolation = "vertex",
                      color_interpolation  = interp)
-    h = OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-    return OvrtxRObj(plot_prim_path(plot), h)
+    path = plot_prim_path(screen.scene2scope, scene, plot)
+    h = OV.add_usd_reference!(screen.renderer, usda, path)
+    return OvrtxRObj(path, h)
 end
 
-function author_usd_prim!(screen, plot::Makie.Scatter, args)
+function author_usd_prim!(screen, scene, plot::Makie.Scatter, args)
     pos = args[:positions_transformed_f32c]
     n   = length(pos)
     n == 0 && return nothing
@@ -122,11 +136,12 @@ function author_usd_prim!(screen, plot::Makie.Scatter, args)
     instancer_color = interp == "constant" ? nothing : values
     usda = _usda_pointinstancer(pos, scales, nothing, instancer_color,
                                 _sphere_proto_body(proto_color); model = args[:model_f32c])
-    h = OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-    return OvrtxRObj(plot_prim_path(plot), h)
+    path = plot_prim_path(screen.scene2scope, scene, plot)
+    h = OV.add_usd_reference!(screen.renderer, usda, path)
+    return OvrtxRObj(path, h)
 end
 
-function author_usd_prim!(screen, plot::Makie.MeshScatter, args)
+function author_usd_prim!(screen, scene, plot::Makie.MeshScatter, args)
     pos = args[:positions_transformed_f32c]
     n   = length(pos)
     n == 0 && return nothing
@@ -143,22 +158,24 @@ function author_usd_prim!(screen, plot::Makie.MeshScatter, args)
     proto = _mesh_proto_body(mpts, mfaces, mnrm, proto_color)
     usda  = _usda_pointinstancer(pos, scales, orientations, instancer_color, proto;
                                  model = args[:model_f32c])
-    h = OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-    return OvrtxRObj(plot_prim_path(plot), h)
+    path = plot_prim_path(screen.scene2scope, scene, plot)
+    h = OV.add_usd_reference!(screen.renderer, usda, path)
+    return OvrtxRObj(path, h)
 end
 
-function author_usd_prim!(screen, plot::Makie.Lines, args)
+function author_usd_prim!(screen, scene, plot::Makie.Lines, args)
     pts = args[:positions_transformed_f32c]
     n   = length(pts)
     n < 2 && return nothing
     values, interp = _displaycolor_from_scaled(args[:scaled_color], n)
     width = _curve_width(pts, plot.linewidth[])
     usda  = _usda_basiscurves(pts, [n], width, values, interp; model = args[:model_f32c])
-    h = OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-    return OvrtxRObj(plot_prim_path(plot), h)
+    path = plot_prim_path(screen.scene2scope, scene, plot)
+    h = OV.add_usd_reference!(screen.renderer, usda, path)
+    return OvrtxRObj(path, h)
 end
 
-function author_usd_prim!(screen, plot::Makie.LineSegments, args)
+function author_usd_prim!(screen, scene, plot::Makie.LineSegments, args)
     pts  = args[:positions_transformed_f32c]
     nseg = length(pts) ÷ 2
     nseg < 1 && return nothing
@@ -166,8 +183,9 @@ function author_usd_prim!(screen, plot::Makie.LineSegments, args)
     values, interp = _displaycolor_from_scaled(args[:scaled_color], length(pts2))
     width = _curve_width(pts, plot.linewidth[])
     usda  = _usda_basiscurves(pts2, fill(2, nseg), width, values, interp; model = args[:model_f32c])
-    h = OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
-    return OvrtxRObj(plot_prim_path(plot), h)
+    path = plot_prim_path(screen.scene2scope, scene, plot)
+    h = OV.add_usd_reference!(screen.renderer, usda, path)
+    return OvrtxRObj(path, h)
 end
 
 # ------------------------------------------------------------------
@@ -291,7 +309,7 @@ function register_ovrtx_robj!(screen, scene, plot)
     if isempty(inputs)
         h = to_ovrtx_object(screen, scene, plot)
         h === nothing && return nothing
-        robj = OvrtxRObj(plot_prim_path(plot), h)
+        robj = OvrtxRObj(plot_prim_path(screen.scene2scope, scene, plot), h)
         screen.plot2robj[objectid(plot)] = robj
         return robj
     end
@@ -311,7 +329,10 @@ function register_ovrtx_robj!(screen, scene, plot)
             scr = args[:ovrtx_screen]
             local robj
             if isnothing(last) || changed[:ovrtx_screen]
-                robj = author_usd_prim!(scr, plot, args)             # (RE)BUILD on the active screen
+                # `scene` is captured from register_ovrtx_robj!'s arg; on a rebuild for
+                # a NEW screen, scr.scene2scope (same objectids) yields the same nested
+                # path — so the reference re-nests identically on the fresh stage.
+                robj = author_usd_prim!(scr, scene, plot, args)      # (RE)BUILD on the active screen
             else
                 robj = last.ovrtx_renderobject
                 if robj !== nothing
