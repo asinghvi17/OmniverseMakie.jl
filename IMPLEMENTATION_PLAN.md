@@ -21,9 +21,9 @@
 
 Every task's requirements implicitly include these (exact values copied from the spec/spikes):
 
-- **Julia ≥ 1.12.** Backends pin Makie exactly: `Makie = "=0.24.12"`, `ComputePipeline = "=0.1.8"`, `GLMakie = "=0.13.12"`. Dev-link from `references/Makie.jl/` via `[sources]`.
-- **No Python, no PythonCall, no JLL, no wheel discovery.** The native lib is found by `Libdl.dlopen`; resolution order is `ENV["OVRTX_LIBRARY_PATH"]` → default soname.
-- **`libOpenGL.so.0` must be `dlopen`ed `RTLD_GLOBAL` *before* `libovrtx-dynamic.so`** (ovrtx's `usd_resolver` plugin needs it). Path override: `ENV["OVRTX_LIBOPENGL_PATH"]`, default `/home/juliahub/temp/extra-libs/libOpenGL.so.0`. `LD_LIBRARY_PATH` is **not** required when this dlopen is done.
+- **Julia ≥ 1.12.** Backends pin Makie exactly via `[compat]`: `Makie = "=0.24.12"`, `ComputePipeline = "=0.1.8"`, `GLMakie = "=0.13.12"` — all three are **registered at exactly these versions** (verified), so they are ordinary registry deps added with `Pkg.add`. **Do NOT `[sources]`-link them to `references/Makie.jl/`** — those paths won't exist for a user who clones the package. To hack on the local Makie clone, `Pkg.develop(path="…/references/Makie.jl/Makie")` into your *local manifest only* (never the committed `Project.toml`).
+- **No Python, no PythonCall, no wheel discovery, and no JLL for ovrtx itself.** The native lib is found by `Libdl.dlopen`; resolution order is `ENV["OVRTX_LIBRARY_PATH"]` → default soname. (A JLL *is* used for the libOpenGL dependency — next bullet — just not for ovrtx, which the user installs.)
+- **`libOpenGL.so.0` must be `dlopen`ed `RTLD_GLOBAL` *before* `libovrtx-dynamic.so`** (ovrtx's `usd_resolver` plugin needs it; ovrtx does **not** ship it). Source it from the **`Libglvnd_jll`** dependency — verified to provide `libOpenGL.so` with SONAME `libOpenGL.so.0`, so ovrtx's later by-soname `dlopen` resolves to the already-loaded image — via `dlopen(Libglvnd_jll.libOpenGL_path, RTLD_GLOBAL)`. Override with `ENV["OVRTX_LIBOPENGL_PATH"]`. Self-contained: no system `libglvnd`, no hardcoded path, no `LD_LIBRARY_PATH`.
 - **The generated bindings are used verbatim** — never hand-edit a generated `@ccall`/struct/`@cenum`. All additions (loader, helpers, static-inline reimplementations) live in the hand-written module shell.
 - **The carb breakpad crash reporter must be neutralized before any renderer is created in-process** (it hijacks SIGSEGV/SIGABRT and crashes Julia at exit — see Task M0.4). No `_exit` hacks in shipped code.
 - **C zero-copy hot path is mandatory for animation:** per-frame updates use `map_attribute` (fixed-size attrs like `omni:xform`) or `bind_array_attribute`+`write` (arrays like `points`); **never** re-author USDA per frame.
@@ -33,6 +33,17 @@ Every task's requirements implicitly include these (exact values copied from the
 - Render-product path for the validation scene: `/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0`; render var `LdrColor` (RGBA8, `[H,W,4]`, top-left origin).
 - **NVIDIA binaries are never vendored** — the user installs ovrtx; we only `dlopen`.
 - **TDD throughout:** write the failing test, watch it fail, minimal implementation, watch it pass, commit. Every renderer-touching test runs in its **own Julia process** (`run(\`julia ...\`)` + assert on exit code/output) so a renderer crash can't poison the test session and so the signal-handler fix is exercised honestly.
+- **Manage dependencies and `Project.toml` via Pkg.jl** — `Pkg.generate`/`Pkg.add`/`Pkg.develop`/`Pkg.compat`/`Pkg.test`, run inside the package env (the `julia` MCP's `env_path`). Do **not** hand-edit `[deps]`/`[compat]` UUIDs or versions; the `Project.toml` blocks shown in this plan are the **expected result** of those Pkg operations, not text to type by hand. The only hand-written committed TOML is the declarative `[sources]`/`[workspace]` for the in-repo `lib/LibOVRTX` subpackage (Pkg has no CLI for those two sections yet).
+
+---
+
+## Development workflow (the `julia` MCP)
+
+Iterate with the **`julia` MCP** (`julia_eval`, `env_path="…/OmniverseMakie.jl"`) rather than cold `julia` runs — a warm session in the package env persists state across calls, so Julia startup/compile (TTFX) is paid once. Project-specific caveats:
+
+- **Revise can't reload `struct`/`@cenum` redefinitions** — and M0 defines many (`Renderer`, `StepResult`, the generated ABI). After editing a struct/enum, `julia_restart(env_path=…)`; function-body edits reload live.
+- **Renderer-touching *tests* still spawn their own `julia` subprocess** (per the TDD constraint above) — the carb crash reporter + signal handling can crash or poison a long-lived session. Use `julia_eval` to author/explore; spawn fresh processes for the test assertions on exit code.
+- **A persistent renderer in an MCP session pins GPU resources** — `julia_restart` to reclaim them if a session accumulates renderers or wedges.
 
 ---
 
@@ -45,17 +56,21 @@ Every task's requirements implicitly include these (exact values copied from the
 | **M2** | `:ovrtx_renderobject` diff node + hot-path bindings + dynamic add/delete; live attribute/transform/color edits | benchmark meets interactive rates; add/delete leak-free |
 | **M3** | Interactive GLMakie window: CPU-blit display, event injection, `cam3d!` orbit/zoom, on-demand loop + RT2 progressive refinement | orbit a live RTX viewport |
 | **M4** | Depth: GPU-direct CUDA-GL blit, materials (OmniPBR/MaterialX), AOV picking, subscene hardening | no-CPU-roundtrip display; pick + materials |
+| **M5** | Examples gallery: adapt RPRMakieNotes + raydemo scenes into `examples/` (originals untouched) | a real scene gallery renders through OmniverseMakie |
 
-M0 is fully detailed below (TDD steps + complete code from the spikes). **M1–M4 are specified at task granularity** — each task names exact files, the interfaces it consumes/produces, the novel code in full, and its test. Per writing-plans guidance for a multi-phase backend, **M1–M4 tasks are expanded into their own bite-sized step lists just before each milestone is executed**, because their concrete signatures depend on what the previous milestone surfaces (e.g. the exact `OV` wrapper API M1 consumes is produced by M0). Do not start a milestone before its predecessor's gate is green.
+M0 is fully detailed below (TDD steps + complete code from the spikes). **M1–M5 are specified at task granularity** — each task names exact files, the interfaces it consumes/produces, the novel code in full, and its test. Per writing-plans guidance for a multi-phase backend, **M1–M5 tasks are expanded into their own bite-sized step lists just before each milestone is executed**, because their concrete signatures depend on what the previous milestone surfaces (e.g. the exact `OV` wrapper API M1 consumes is produced by M0). Do not start a milestone before its predecessor's gate is green.
 
 ---
 
 ## File structure
 
+> Task file paths below use `OmniverseMakie/…` as shorthand for the **package root, which is the repo root** `OmniverseMakie.jl/` (e.g. `OmniverseMakie/src/screen.jl` = `OmniverseMakie.jl/src/screen.jl`).
+
 ```
-omniverse-makie/                         # repo root (ARCHITECTURE.md, IMPLEMENTATION_PLAN.md live here)
-└── OmniverseMakie/                       # the package
-    ├── Project.toml                      # deps + [sources] + [workspace]  (Task M0.1)
+omniverse-makie/                         # working dir (holds the repo + references/ clones)
+└── OmniverseMakie.jl/                    # THE GIT REPO (github.com/asinghvi17/OmniverseMakie.jl); package lives at its root
+    ├── ARCHITECTURE.md  IMPLEMENTATION_PLAN.md   # design docs (committed)
+    ├── Project.toml                      # registry deps via Pkg; [sources]+[workspace] only for lib/LibOVRTX  (Task M0.1)
     ├── src/
     │   ├── OmniverseMakie.jl             # module, __init__, activate!, re-export Makie   (M1.1)
     │   ├── binding/
@@ -73,12 +88,13 @@ omniverse-makie/                         # repo root (ARCHITECTURE.md, IMPLEMENT
     │   ├── display.jl                     # GLMakie image! target; CPU blit + CUDA-GL blit        (M3.1,M4.1)
     │   └── settings.jl                    # RT2/PathTracing/Minimal, samples, bounces             (M1.2,M3.3)
     ├── lib/LibOVRTX/                      # subpackage (raw bindings)
-    │   ├── Project.toml                   # name=LibOVRTX; deps CEnum, Libdl                       (M0.1)
+    │   ├── Project.toml                   # name=LibOVRTX; deps CEnum, Libdl, Libglvnd_jll          (M0.1)
     │   ├── src/
     │   │   ├── LibOVRTX.jl                # hand-written shell: loader + helpers + include          (M0.3)
     │   │   └── libovrtx_api.jl            # GENERATED 1:1 ccalls (verbatim)                         (M0.2)
     │   └── gen/  generator.jl  generator.toml  ovrtx_umbrella.h  Project.toml                       (M0.2)
     ├── test/   runtests.jl + per-milestone test files
+    ├── examples/   ported scene gallery — RPRMakieNotes + raydemo               (M5)
     └── ext/    (future: CUDA interop extension)
 ```
 
@@ -110,7 +126,15 @@ using Test
 end
 ```
 
-- [ ] **Step 2: Create `lib/LibOVRTX/Project.toml`:**
+- [ ] **Step 2: Generate `LibOVRTX` and add its deps via Pkg** (don't hand-write the TOML):
+```julia
+using Pkg
+Pkg.generate("OmniverseMakie/lib/LibOVRTX")              # creates Project.toml (name+uuid) + src stub
+Pkg.activate("OmniverseMakie/lib/LibOVRTX")
+Pkg.add(["CEnum", "Libdl", "Libglvnd_jll"])              # Libglvnd_jll ships libOpenGL.so.0 (M0.3 loader)
+Pkg.compat("CEnum", "0.5"); Pkg.compat("Libglvnd_jll", "1"); Pkg.compat("julia", "1.12")
+```
+Resulting `lib/LibOVRTX/Project.toml`:
 ```toml
 name = "LibOVRTX"
 uuid = "48e69356-47aa-4e0c-8089-4409475c3dd9"
@@ -119,13 +143,21 @@ version = "0.1.0"
 [deps]
 CEnum = "fa961155-64e5-5f13-b03f-caf6b980ea82"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+Libglvnd_jll = "7e76a0d4-f3c7-5321-8279-8d96eeed0f29"
 
 [compat]
 CEnum = "0.5"
+Libglvnd_jll = "1"
 julia = "1.12"
 ```
 
-- [ ] **Step 3: Create `OmniverseMakie/Project.toml`** (workspace root; deps grow per milestone — start minimal):
+- [ ] **Step 3: Generate `OmniverseMakie` and link the subpackage via Pkg** (deps grow per milestone — M0 needs only `LibOVRTX`):
+```julia
+Pkg.generate("OmniverseMakie")
+Pkg.activate("OmniverseMakie")
+Pkg.develop(path="OmniverseMakie/lib/LibOVRTX")          # links the in-repo subpackage
+```
+Then hand-add **only** the declarative `[sources]`/`[workspace]` for the in-repo subpackage (Pkg has no CLI for these two). Resulting `OmniverseMakie/Project.toml`:
 ```toml
 name = "OmniverseMakie"
 uuid = "d60c73f4-20f1-48ea-a3b4-a683962494cb"
@@ -136,9 +168,7 @@ LibOVRTX = "48e69356-47aa-4e0c-8089-4409475c3dd9"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 
 [sources]
-LibOVRTX = { path = "lib/LibOVRTX" }
-Makie = { path = "../references/Makie.jl/Makie" }
-ComputePipeline = { path = "../references/Makie.jl/ComputePipeline" }
+LibOVRTX = { path = "lib/LibOVRTX" }   # in-repo, ships with the package — correct to commit
 
 [workspace]
 projects = ["lib/LibOVRTX"]
@@ -147,7 +177,7 @@ projects = ["lib/LibOVRTX"]
 LibOVRTX = "0.1"
 julia = "1.12"
 ```
-> Makie/ComputePipeline/GLMakie/GeometryBasics are added to `[deps]` + `[sources]` in Task M1.1 — M0 needs only `LibOVRTX`.
+> **No `[sources]` for Makie/ComputePipeline/GLMakie** — they're registry deps added with `Pkg.add` (at the pinned versions) in Task M1.1. Only the in-repo `lib/LibOVRTX` is sourced/workspaced.
 
 - [ ] **Step 4: Create stub modules.** `lib/LibOVRTX/src/LibOVRTX.jl`: `module LibOVRTX end`. `src/OmniverseMakie.jl`: `module OmniverseMakie end`.
 
@@ -233,6 +263,7 @@ end
 module LibOVRTX
 using CEnum
 import Libdl
+import Libglvnd_jll
 
 # Resolved at RUNTIME in __init__ so OVRTX_LIBRARY_PATH is honored, not baked at precompile.
 # The generated `@ccall libovrtx.sym(...)` lines reference this binding unchanged.
@@ -241,8 +272,10 @@ const _OVRTX_HANDLE  = Ref{Ptr{Cvoid}}(C_NULL)
 const _OPENGL_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
 function __init__()
-    libgl = get(ENV, "OVRTX_LIBOPENGL_PATH", "/home/juliahub/temp/extra-libs/libOpenGL.so.0")
     # libOpenGL FIRST + GLOBAL so ovrtx's usd_resolver plugin resolves GL symbols by soname.
+    # Libglvnd_jll.libOpenGL_path has SONAME libOpenGL.so.0, so ovrtx's later by-soname dlopen
+    # finds this already-loaded image. Env override allows a system/driver libOpenGL if desired.
+    libgl = get(ENV, "OVRTX_LIBOPENGL_PATH", Libglvnd_jll.libOpenGL_path)
     _OPENGL_HANDLE[] = Libdl.dlopen(libgl, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
     global libovrtx = get(ENV, "OVRTX_LIBRARY_PATH", "libovrtx-dynamic.so")
     _OVRTX_HANDLE[] = Libdl.dlopen(libovrtx, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
@@ -558,7 +591,7 @@ end
 Each task below carries Files / Interfaces / key code / Test / Acceptance. Expand to bite-sized steps at execution.
 
 ### Task M1.1: `Screen` struct, `ScreenConfig`, `activate!`, module wiring
-- **Files:** `src/OmniverseMakie.jl`, `src/screen.jl`, `src/settings.jl`; deps update in `Project.toml` (add Makie/ComputePipeline/GeometryBasics/Colors/ColorTypes/FixedPointNumbers + `[sources]` for Makie/ComputePipeline). Test: `test/m1_screen_test.jl`.
+- **Files:** `src/OmniverseMakie.jl`, `src/screen.jl`, `src/settings.jl`; add deps via `Pkg.add(["Makie","ComputePipeline","GeometryBasics","Colors","ColorTypes","FixedPointNumbers"])` then `Pkg.compat` the exact pins (`Makie="=0.24.12"`, `ComputePipeline="=0.1.8"`) — **registry deps, no `[sources]`**. Test: `test/m1_screen_test.jl`.
 - **Interfaces — produces:**
   ```julia
   mutable struct OvrtxRObj
@@ -785,6 +818,47 @@ Each task below carries Files / Interfaces / key code / Test / Acceptance. Expan
 **M4 GATE:** GPU-direct display + materials + picking + leak-free subscenes. ✅ → v1 complete.
 
 (Deferred beyond v1: 2D/text/axes parity; remote streaming — `references/notes/wire-protocol-and-webrtc.md`.)
+
+---
+
+# Milestone M5 — Examples gallery
+
+**Outcome:** a set of real, recognizable path-traced scenes rendering through OmniverseMakie, adapted from two existing Makie ray-tracing galleries into `OmniverseMakie.jl/examples/`. **The original repos are never edited** — they live read-only under `references/`; we copy/adapt out of them. This is the end-to-end validation that the backend handles real-world scenes, and the project's showcase.
+
+Source galleries (both are Makie backends, so the *plotting* code ports closely; only backend-specific bits — `activate!`, materials, camera/lights — are translated):
+- **RPRMakieNotes** (`references/RPRMakieNotes/scripts/`, ~19 scripts): earth/earthquakes, glass & material balls, transparent + uber materials, volumes, sphere+light studies, freetype text, point fonts, submarine cables. RPRMakie API → OmniverseMakie.
+- **raydemo** (`references/raydemo/`, ~20 scene folders): Crown, KillerooGold, BlackHole, Materials, Plants, ProtPlot (proteins), Volumes (bunny cloud, clouds, terrain), GLTF (drone, spacecraft), Waterlily smoke sims, Trixi/koeln flooding. RayMakie/Hikari API → OmniverseMakie.
+
+### Task M5.1: Inventory + triage
+- **Files:** `examples/README.md` (gallery index + port-status table).
+- **Interfaces — produces:** a table classifying every source scene as **port-now** (uses only the M1–M4 3D core: mesh/meshscatter/scatter/surface/lines/volume + materials/lights/camera), **needs-deferred-feature** (2D/text/axes — e.g. `freetype_text`, `pointsfont`), or **drop** (backend-internal/benchmark scaffolding). Note per-scene asset needs (`.obj`, `.mtlx`, `.hdr`, GLTF).
+- **Test:** a script asserts every `*.jl` scene in both source repos appears in the table (no silent omissions).
+- **Acceptance:** a complete, justified port list.
+
+### Task M5.2: Examples harness + assets
+- **Files:** `examples/common/` (shared `activate!`, camera/light helpers, asset loader), `examples/Project.toml` (its own env — OmniverseMakie + GeometryBasics/Colors/FileIO/MeshIO/… via `Pkg`), `examples/assets/`.
+- **Interfaces — produces:** `run_example(path)` + a shared scene scaffold so each ported script is small; assets (meshes, HDRIs, MaterialX) copied into `examples/assets/` (no network at render time).
+- **Test:** a trivial example (one mesh + light + camera) renders to PNG via the harness.
+- **Acceptance:** harness renders a minimal scene; assets resolve locally.
+
+### Task M5.3: Port the RPRMakieNotes gallery
+- **Files:** `examples/<scene>.jl` per port-now RPRMakieNotes script.
+- **Interfaces — produces:** each script adapted — `RPRMakie.activate!()` → `OmniverseMakie.activate!()`; RPR material objects/NamedTuples (`RPR.Glass`, uber-material params) → OmniverseMakie's `material=` escape hatch (MDL `OmniGlass`/`OmniPBR`/MaterialX) or `displayColor`; `EnvironmentLight`/HDRIs → `DomeLight`; camera unchanged (reads `cameracontrols`). Plot calls (`mesh!`, `meshscatter!`, `surface!`, `volume!`) stay as-is.
+- **Test:** each ported scene renders to a non-black PNG at a fixed sample count; a CI script renders all and assembles a contact sheet.
+- **Acceptance:** RPRMakieNotes 3D scenes reproduce recognizably under OmniverseMakie.
+
+### Task M5.4: Port selected raydemo scenes
+- **Files:** `examples/<scene>.jl` per chosen raydemo scene (e.g. Crown, Killeroo, Materials, BlackHole, a Volumes cloud, a ProtPlot protein, a GLTF model).
+- **Interfaces — produces:** RayMakie/Hikari scene scripts adapted to OmniverseMakie (same translation pattern as M5.3; GLTF/mesh import via MeshIO → USD mesh; volumes → `UsdVol`). Prefer scenes exercising distinct features (instancing, volumes, glass, large meshes).
+- **Test:** each renders to a non-black PNG; volume + glass + instancing scenes each covered.
+- **Acceptance:** a cross-section of raydemo scenes renders, exercising the full primitive/material set.
+
+### Task M5.5: Gallery doc + render CI
+- **Files:** `examples/README.md` (final gallery with thumbnails), `examples/render_all.jl`.
+- **Interfaces — produces:** a one-command render of the whole gallery → thumbnails; optional docs page.
+- **Acceptance:** `julia examples/render_all.jl` renders the gallery; README shows the results.
+
+**M5 GATE:** the adapted RPRMakieNotes + raydemo galleries render through OmniverseMakie from `examples/`, originals untouched. ✅ → showcase-ready.
 
 ---
 

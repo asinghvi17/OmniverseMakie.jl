@@ -155,10 +155,12 @@ Package name: **`OmniverseMakie`**. Subpackage: **`LibOVRTX`** at `lib/LibOVRTX/
   `.so` (or `OMNI_USD_PLUGINS_BASE_PATH` / the `binary_package_root_path` config). **We do
   not replicate any Python env logic.** If the install splits the `bin/` tree, pass
   `ovrtx_config_entry_binary_package_root_path`.
-- **`libOpenGL.so.0`:** ovrtx's `usd_resolver` plugin needs it. Module `__init__` will
-  `Libdl.dlopen(libOpenGL, RTLD_GLOBAL)` from a detected path (the GL artifact GLMakie
-  already pulls in, or `$OVRTX_EXTRA_LIB_PATH`), so ovrtx's later plugin `dlopen` finds it
-  by soname. v1 fallback: document `LD_LIBRARY_PATH` (as used in validation).
+- **`libOpenGL.so.0`:** ovrtx's `usd_resolver` plugin needs it (ovrtx does **not** ship it).
+  Module `__init__` does `Libdl.dlopen(Libglvnd_jll.libOpenGL_path, RTLD_GLOBAL)` **before**
+  loading libovrtx — `Libglvnd_jll` is a dep of `LibOVRTX` and provides `libOpenGL.so` with
+  SONAME `libOpenGL.so.0` (verified), so ovrtx's later by-soname plugin `dlopen` resolves to
+  the already-loaded image. Override via `$OVRTX_LIBOPENGL_PATH`. Self-contained — no system
+  `libglvnd`, no `LD_LIBRARY_PATH` (the validation used `LD_LIBRARY_PATH` before the JLL fix).
 - **Headless renderer lifecycle:** create with `keep_system_alive=true` and call
   `ovrtx_initialize()` once before the first `Renderer` to avoid the libEGL teardown crash
   when screens open/close repeatedly. Pair `initialize`/`shutdown`.
@@ -373,6 +375,9 @@ code**; camera change → update camera `omni:xform` + `reset()`.
   orbit/zoom; on-demand loop + progressive refinement; dynamic add/delete end-to-end.
 - **M4 — depth.** GPU-direct CUDA-GL blit; materials (OmniPBR/MaterialX); AOVs
   (Depth/Normal/ID) → picking (`scene.events`); subscene-leak fixes.
+- **M5 — examples gallery.** Adapt the [RPRMakieNotes](https://github.com/lazarusA/RPRMakieNotes)
+  and [raydemo](https://github.com/simondanisch/raydemo) scenes into `examples/` (originals
+  untouched) — the end-to-end showcase that the backend handles real-world scenes.
 
 (Deferred: 2D/text/axes parity; remote streaming — WGLMakie-style websocket then GStreamer
 `webrtcsink` sidecar — see `references/notes/wire-protocol-and-webrtc.md`.)
