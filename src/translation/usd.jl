@@ -145,7 +145,6 @@ precomputed for eye=(500,500,500), target=origin, Z-up (row-vector convention).
 
 # Notes
 - Calling this function more than once replaces the stage (ovrtx re-opens).
-- After this call, `screen.setup` is set to `true`.
 """
 # Default camera-to-world xform string (eye=(500,500,500), lookat=origin, Z-up).
 # Used as the placeholder when author_render_root! is called without a scene camera.
@@ -248,6 +247,5 @@ $(rtx_lines)
 }
 """
     OV.open_usd_string!(screen.renderer, usda)
-    screen.setup = true
     return nothing
 end

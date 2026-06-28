@@ -9,7 +9,6 @@ mutable struct Screen <: Makie.MakieScreen
     scene::Union{Nothing,Makie.Scene}
     plot2usd::Dict{UInt64,UInt64}        # objectid(plot) => ovrtx_usd_handle_t (M1.5 fills)
     open_results::Vector{OV.StepResult}  # closed before renderer (teardown order)
-    setup::Bool                          # lazy USD-author flag; M1.2 sets to true
 end
 
 # ------------------------------------------------------------------
@@ -33,7 +32,6 @@ function Screen(scene::Makie.Scene, config::ScreenConfig)
         scene,
         Dict{UInt64,UInt64}(),
         OV.StepResult[],
-        false,
     )
 end
 
@@ -81,7 +79,7 @@ function Base.close(s::Screen)
 end
 
 # ------------------------------------------------------------------
-# Scene → USD setup (lazy; runs once on the first colorbuffer)
+# Scene → USD setup (always runs per colorbuffer call)
 # ------------------------------------------------------------------
 
 # Depth-first search for the first descendant scene with a 3-D camera controller.
@@ -129,7 +127,6 @@ function setup_scene!(screen::Screen)
     author_root_from_scene!(screen, cam_scene; resolution = screen.fb_size)
     # 2. THEN add each plot's USD reference (recurse over scene.plots + children).
     Makie.insertplots!(screen, scene)
-    screen.setup = true
     return screen
 end
 
@@ -154,7 +151,7 @@ function Base.insert!(screen::Screen, scene::Makie.Scene, plot::Makie.Plot)
 end
 
 # ------------------------------------------------------------------
-# colorbuffer — lazy setup + RT2 render → Matrix{RGBA{N0f8}}
+# colorbuffer — re-author per call + RT2 render → Matrix{RGBA{N0f8}}
 # ------------------------------------------------------------------
 
 """

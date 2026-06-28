@@ -79,7 +79,7 @@ println("JPEG_SHOWABLE_OK")
 # With fix: stage re-authored each call → cube shifts in image → centroid diff > 30px.
 #
 # Camera change: 180° horizontal orbit ((x,y,z) → (-x,-y,z)) guarantees a large
-# shift (cube appears on opposite side of image).  Centroid diff expected ~50-150px.
+# shift (cube appears on opposite side of image).  expected ≥30px in practice; threshold is 20px.
 # -----------------------------------------------------------------------
 screen = OmniverseMakie.Screen(ax.scene)
 cam    = Makie.cameracontrols(ax.scene)
