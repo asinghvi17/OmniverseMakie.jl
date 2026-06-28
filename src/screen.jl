@@ -183,6 +183,120 @@ function Makie.insertplots!(screen::Screen, scene::Makie.Scene)
 end
 
 # ------------------------------------------------------------------
+# delete! / delete!(scene) / empty! — leak-free imperative teardown (M2.5)
+# ------------------------------------------------------------------
+
+# Tear down ONE atomic plot's render object, leaving zero GPU/USD/graph residue.
+# Order mirrors `close(Screen)` (screen.jl): destroy the persistent hot-path
+# bindings FIRST (they are GPU resources owned by the live Renderer — M2.4), THEN
+# remove the USD reference (this closes the M1.6 per-reference handle leak), THEN
+# drop `plot2robj`.  Finally drop the `:ovrtx_renderobject` diff node: per Spike B,
+# `empty!(graph)` does NOT clear nodes, so without an explicit `delete!` the node
+# both leaks and would re-fire on a later re-add.  Deleting the node is gated on
+# presence so a node-less plot (empty geometry, or an unknown type) is a no-op.
+function _delete_atomic_plot!(screen::Screen, plot::Makie.AbstractPlot)
+    id   = objectid(plot)
+    robj = get(screen.plot2robj, id, nothing)
+    if robj !== nothing
+        destroy_bindings!(robj)
+        screen.renderer.alive && OV.remove_usd!(screen.renderer, robj.usd_handle)
+        delete!(screen.plot2robj, id)
+    end
+    attr = plot.attributes
+    haskey(attr, :ovrtx_renderobject) && delete!(attr, :ovrtx_renderobject)
+    return
+end
+
+"""
+    delete!(screen::Screen, scene::Scene, plot::AbstractPlot) -> Screen
+
+Imperatively remove `plot` from the OPEN stage, leaving zero residual GPU bindings,
+USD reference, or diff node.  A composite plot is flattened to its atomic children
+(`plot.plots`, exactly like `insert!`); each atomic is torn down via
+`_delete_atomic_plot!`.  Sets `requires_update` so the next `colorbuffer` issues one
+`OV.reset!` (the live stage no longer contains the prim).
+
+Typed signature (Spike B): an UNtyped `delete!(screen, scene, plot)` would be
+ambiguous with Makie's no-op `delete!(::MakieScreen, ::Scene, ::AbstractPlot)`
+fallback; `::Screen` is strictly more specific, so this wins dispatch cleanly.
+"""
+function Base.delete!(screen::Screen, scene::Makie.Scene, plot::Makie.AbstractPlot)
+    if isempty(plot.plots)
+        _delete_atomic_plot!(screen, plot)
+    else
+        foreach(p -> delete!(screen, scene, p), plot.plots)
+    end
+    screen.requires_update = true
+    return screen
+end
+
+"""
+    delete!(screen::Screen, scene::Scene) -> Screen
+
+Remove an entire (sub)scene from the OPEN stage: recurse `scene.children`, delete
+every plot in `scene.plots`, detach every redraw listener (`Observables.off` on each
+`scene_listeners[objectid(scene)]` entry), then drop the scene's `scene_listeners` and
+`scene2scope` entries.  The listener loop is vestigial TODAY (camera/lights use
+snapshot-compare, not observable listeners, so the vector is empty) but is kept
+correct for when listeners are wired.
+
+Scope-prim design call (M2.5): a subscene's `def Scope` is authored INTO the root
+layer by `author_root_from_scene!` (`scene_scopes_usda`), NOT as a removable
+`add_usd_reference!`, so there is no `remove_usd!` handle for it.  Removing all the
+scene's plot references + bindings + nodes is the leak-free core; the leftover EMPTY
+`def Scope` prim renders nothing and holds no GPU resource, so it is left in place.  A
+structural re-author to physically drop the scope is the heavier alternative and is
+unnecessary for leak-freedom.
+"""
+function Base.delete!(screen::Screen, scene::Makie.Scene)
+    foreach(child -> delete!(screen, child), scene.children)
+    for plot in scene.plots
+        delete!(screen, scene, plot)
+    end
+    id = objectid(scene)
+    for l in get(screen.scene_listeners, id, ())
+        Makie.Observables.off(l)
+    end
+    delete!(screen.scene_listeners, id)
+    delete!(screen.scene2scope, id)
+    screen.requires_update = true
+    return screen
+end
+
+"""
+    empty!(screen::Screen) -> Screen
+
+Tear down every plot and subscene the screen has authored, leaving `plot2robj`,
+`scene2scope`, and `scene_listeners` all empty and every persistent binding destroyed
+— on the OPEN stage (no re-author).  Walks `screen.scene` via `delete!(screen, scene)`
+to reach each plot OBJECT (needed to drop its `:ovrtx_renderobject` node — `plot2robj`
+alone is keyed by `objectid` and cannot recover it), then sweeps any orphaned render
+object (a plot no longer in the tree) and force-clears the three registries as a final
+guarantee.
+
+Structural-re-open carry (M2.2 Minor #5): `empty!` does targeted `remove_usd!` per
+plot — it does NOT re-open the stage — so the `:ovrtx_renderobject` nodes are never
+left stale against a wiped stage.  A plot added afterwards builds a fresh reference on
+the still-open stage and renders correctly; the `requires_update` set here makes the
+next `colorbuffer` reset accumulation once.
+"""
+function Base.empty!(screen::Screen)
+    screen.scene === nothing || delete!(screen, screen.scene)
+    # Belt-and-suspenders: tear down any robj still cached (a plot no longer reachable
+    # from screen.scene) so no GPU binding or USD handle leaks, then guarantee empty.
+    for (id, robj) in collect(screen.plot2robj)
+        destroy_bindings!(robj)
+        screen.renderer.alive && OV.remove_usd!(screen.renderer, robj.usd_handle)
+        delete!(screen.plot2robj, id)
+    end
+    empty!(screen.plot2robj)
+    empty!(screen.scene2scope)
+    empty!(screen.scene_listeners)
+    screen.requires_update = true
+    return screen
+end
+
+# ------------------------------------------------------------------
 # colorbuffer — open-once + live render-config sync + RT2 render
 # ------------------------------------------------------------------
 
@@ -230,10 +344,16 @@ function Makie.colorbuffer(screen::Screen; kw...)
 
     # Pull every plot's :ovrtx_renderobject diff node (M2.2): a clean graph is a
     # no-op; any changed attribute pushes one minimal C write and flips
-    # `requires_update`.  Fold that into the single per-frame RT2 reset.
+    # `requires_update`.  Fold that into the single per-frame RT2 reset.  A
+    # `requires_update` set BEFORE this frame (an imperative `delete!`/`empty!`
+    # teardown — M2.5) is captured as `pending` so its reset is honored too, then the
+    # flag is cleared so it never carries over to a later frame.
+    pending = screen.requires_update
     screen.requires_update = false
     pull_ovrtx_nodes!(screen, scene)
-    (cam_changed || light_changed || screen.requires_update) && OV.reset!(screen.renderer)
+    need_reset = cam_changed || light_changed || screen.requires_update || pending
+    screen.requires_update = false
+    need_reset && OV.reset!(screen.renderer)
 
     return OV.render_to_matrix(screen.renderer, screen.product; warmup = screen.config.warmup)
 end

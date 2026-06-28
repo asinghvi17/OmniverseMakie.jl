@@ -42,3 +42,6 @@ include("m2_subscene_test.jl")
 
 # M2.4 — persistent hot-path bindings (map_attribute / bind_array_attribute)
 include("m2_binding_test.jl")
+
+# M2.5 — leak-free delete! / delete!(scene) / empty! teardown
+include("m2_delete_test.jl")
