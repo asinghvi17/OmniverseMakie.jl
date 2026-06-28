@@ -29,7 +29,10 @@ Base.unsafe_convert(::Type{Ptr{L.ovrtx_renderer_t}}, r::Renderer) = r.ptr
 
 function Base.close(r::Renderer)
     r.alive || return
-    L.ovrtx_destroy_renderer(r.ptr); r.alive = false; return
+    L.ovrtx_destroy_renderer(r.ptr)
+    r.ptr = Ptr{L.ovrtx_renderer_t}(C_NULL)   # avoid a dangling pointer via unsafe_convert after close
+    r.alive = false
+    return
 end
 
 # ------------------------------------------------------------------
@@ -37,6 +40,7 @@ end
 # ------------------------------------------------------------------
 
 function enqueue_wait(r::Renderer, enq, op::AbstractString)
+    r.alive || error("enqueue_wait called on a closed Renderer")
     L.check(enq, op)
     wr = Ref{L.ovrtx_op_wait_result_t}()
     L.check(L.ovrtx_wait_op(r.ptr, enq.op_index, L.OVRTX_TIMEOUT_INFINITE, wr), op * ":wait")

@@ -26,6 +26,8 @@ const OVRTX_TIMEOUT_INFINITE = ovrtx_timeout_t(typemax(UInt64))
 const NOSYNC = ovrtx_cuda_sync_t(0, 0)
 
 # --- ovx_string_t surfacing (caller GC.@preserve the backing String) --------------
+# Accepts String / SubString{String} only — Base.unsafe_convert(Cstring, ⋅) requires
+# contiguous, NUL-terminated bytes. Convert other AbstractString subtypes to String first.
 ovx_string(s::Union{String,SubString{String}}) =
     ovx_string_t(Base.unsafe_convert(Cstring, s), ncodeunits(s))
 function Base.String(s::ovx_string_t)

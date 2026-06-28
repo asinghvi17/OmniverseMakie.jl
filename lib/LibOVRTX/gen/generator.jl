@@ -1,6 +1,8 @@
 using Clang
 using Clang.Generators
 
+# To regenerate the bindings on another machine, set OVRTX_INCLUDE to your ovrtx
+# headers directory; the default below is this development machine's path.
 const OVRTX_INCLUDE = get(ENV, "OVRTX_INCLUDE",
     "/home/juliahub/temp/omniverse-makie/references/ovrtx/include")
 

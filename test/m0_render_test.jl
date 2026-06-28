@@ -5,7 +5,8 @@ const _RENDER_OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH",
     "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/python/minimal/.venv/lib/python3.13/site-packages/ovrtx/bin/libovrtx-dynamic.so")
 const _RENDER_REPO_ROOT  = joinpath(@__DIR__, "..")
 const _RENDER_OV_JL      = joinpath(_RENDER_REPO_ROOT, "src", "binding", "OV.jl")
-const _RENDER_USDA       = "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda"
+const _RENDER_USDA       = get(ENV, "OM_USDA",
+    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda")
 const _RENDER_PRODUCT    = "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
 const _RENDER_WARMUP     = 64
 
@@ -21,7 +22,7 @@ using LibOVRTX
 include($(repr(_RENDER_OV_JL)))
 using ColorTypes
 
-const USDA    = $(repr(_RENDER_USDA))
+const USDA    = ENV["OM_USDA"]
 const PRODUCT = $(repr(_RENDER_PRODUCT))
 const WARMUP  = $(_RENDER_WARMUP)
 
@@ -55,6 +56,7 @@ ccall(:_exit, Cvoid, (Cint,), 0)
         cmd = setenv(
             `julia --project=$(_RENDER_REPO_ROOT) $script`,
             "OVRTX_LIBRARY_PATH" => _RENDER_OVRTX_LIB,
+            "OM_USDA"            => _RENDER_USDA,
             "PATH"               => get(ENV, "PATH", ""),
             "HOME"               => get(ENV, "HOME", ""),
         )
