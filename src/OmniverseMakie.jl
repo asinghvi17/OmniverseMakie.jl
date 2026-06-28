@@ -7,8 +7,9 @@ import LibOVRTX
 # `..LibOVRTX` resolve to OmniverseMakie.LibOVRTX (the M0 parent-module fix).
 include("binding/OV.jl")        # defines module OV with Renderer, StepResult, etc.
 include("settings.jl")          # ScreenConfig, rtx_settings_usda
-include("translation/usd.jl")   # author_render_root!, usda_mesh, usda_matrix4d
-include("screen.jl")            # Screen, activate!
+include("translation/usd.jl")    # author_render_root!, usda_mesh, usda_matrix4d
+include("translation/camera.jl") # camera_to_world, author_camera!
+include("screen.jl")             # Screen, activate!
 
 # Re-export every Makie name verbatim (GLMakie/src/GLMakie.jl:36-41).
 for name in names(Makie, all = true)

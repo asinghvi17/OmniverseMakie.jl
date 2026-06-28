@@ -122,9 +122,15 @@ precomputed for eye=(500,500,500), target=origin, Z-up (row-vector convention).
 - Calling this function more than once replaces the stage (ovrtx re-opens).
 - After this call, `screen.setup` is set to `true`.
 """
+# Default camera-to-world xform string (eye=(500,500,500), lookat=origin, Z-up).
+# Used as the placeholder when author_render_root! is called without a scene camera.
+# Matches the M1.2 spike-verified matrix exactly.
+const _DEFAULT_CAMERA_XFORM_STR = "( (-0.70711, 0.70711, 0.0, 0.0), (-0.40825, -0.40825, 0.81650, 0.0), (0.57735, 0.57735, 0.57735, 0.0), (500.0, 500.0, 500.0, 1.0) )"
+
 function author_render_root!(screen;
                               resolution = screen.fb_size,
-                              camera_path::String = "/World/Camera")
+                              camera_path::String = "/World/Camera",
+                              camera_xform_str::String = _DEFAULT_CAMERA_XFORM_STR)
     W, H       = resolution
     cam_name   = split(camera_path, "/")[end]   # last segment → prim name under /World
     rtx_lines  = rtx_settings_usda(screen.config)
@@ -161,7 +167,7 @@ def Xform "World"
         float horizontalAperture = 20.955
         float verticalAperture = 15.2908
         token projection = "perspective"
-        matrix4d xformOp:transform = ( (-0.70711, 0.70711, 0.0, 0.0), (-0.40825, -0.40825, 0.81650, 0.0), (0.57735, 0.57735, 0.57735, 0.0), (500.0, 500.0, 500.0, 1.0) )
+        matrix4d xformOp:transform = $(camera_xform_str)
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }
 }
