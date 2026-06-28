@@ -52,3 +52,6 @@ include("m2_bench_test.jl")
 # M3.1 — OmniPBR material authoring (usda_omnipbr_material/looks_scope_usda) +
 # runtime material:binding (OV.bind_material!), validated metallic-vs-diffuse render.
 include("m3_material_test.jl")
+
+# M3.3 — image textures (color=img → diffuse_texture + st UV primvar) + *_texture maps.
+include("m3_texture_test.jl")

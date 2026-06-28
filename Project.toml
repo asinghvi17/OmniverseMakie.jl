@@ -15,6 +15,7 @@ GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 LibOVRTX = "48e69356-47aa-4e0c-8089-4409475c3dd9"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+PNGFiles = "f57f5aa1-a3ce-4bc8-8ab9-96f992907883"
 
 [sources]
 LibOVRTX = {path = "lib/LibOVRTX"}
@@ -28,4 +29,5 @@ GeometryBasics = "0.5.11"
 LibOVRTX = "0.1"
 LinearAlgebra = "1.12.0"
 Makie = "=0.24.12"
+PNGFiles = "0.4.5"
 julia = "1.12"

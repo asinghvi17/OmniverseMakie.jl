@@ -93,6 +93,24 @@ _displaycolor_from_scaled(cs::AbstractArray{<:Colorant}, _n)  = ([_rgb(c) for c 
 _displaycolor_from_scaled(c, _n) = (_rgb(Makie.to_color(c)), "constant")
 
 # ------------------------------------------------------------------
+# texcoords (`st` UV primvar) for a textured materialized mesh (M3.3)
+# ------------------------------------------------------------------
+
+# Per-vertex UVs for an image-/texture-materialized mesh, read DIRECTLY off the plot's
+# `:texturecoordinates` compute output (`Vector{Vec2f}` — Makie's `decompose_uv`); NOT a
+# tracked `consumed_inputs` diff output (it has no push route).  Returns `nothing` (→
+# `usda_mesh` OMITS `st`) when the material samples no texture, the plot exposes no
+# texcoords, or their count != the vertex count (so only a clean per-vertex `st` is
+# authored; a mismatch is skipped rather than mis-authored).
+function _texcoords_for(plot, npoints::Int)
+    _needs_texcoords(plot)              || return nothing
+    haskey(plot, :texturecoordinates)  || return nothing
+    tc = Makie.to_value(plot[:texturecoordinates])
+    (tc isa AbstractVector && length(tc) == npoints) || return nothing
+    return tc
+end
+
+# ------------------------------------------------------------------
 # author_usd_prim! — BUILD branch: M1 emitters fed from resolved `args`
 # ------------------------------------------------------------------
 
@@ -124,9 +142,14 @@ function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
         # PRE-AUTHORED at open-time (`materialized_looks_usda` →
         # `material_prim_path(plot)`).  The material was composed into /World/Looks before
         # the stage opened, so this runtime `bind_material!` takes (M3.1-validated).
+        # M3.3: a textured material (image `color` / `*_texture`) samples the mesh's `st`
+        # UV primvar, so author it from Makie's per-vertex `:texturecoordinates` (read
+        # DIRECTLY off the plot — it is NOT a tracked `consumed_inputs` diff output).
+        texcoords = _texcoords_for(plot, length(points))
         usda = usda_mesh(points, faces0, normals, nothing;
                          model                = args[:model_f32c],
-                         normal_interpolation = "vertex")
+                         normal_interpolation = "vertex",
+                         texcoords            = texcoords)
         h = OV.add_usd_reference!(screen.renderer, usda, path)
         OV.bind_material!(screen.renderer, path, material_prim_path(plot))
         return OvrtxRObj(path, h)

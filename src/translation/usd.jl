@@ -67,11 +67,19 @@ Emit a self-contained USDA layer containing a single `UsdGeomMesh` prim at the
   `"vertex"` (Makie supplies per-vertex normals).
 - `color_interpolation::AbstractString = "constant"` — M1.5 passes `"constant"`
   (single colour) or `"vertex"` (per-vertex `displaycolor` vector).
+- `texcoords = nothing` — optional per-vertex UVs (a `Vector` of 2-component
+  `(u, v)` tuples / `Vec2f`); emits a `texCoord2f[] primvars:st` block consumed by
+  an OmniPBR `*_texture` input (M3.3).  **`nothing` OMITS** the `st` primvar, so a
+  non-textured mesh's emit is byte-for-byte unchanged.
+- `texcoord_interpolation::AbstractString = "vertex"` — Makie supplies per-vertex
+  UVs (one `st` per point), so M3.3 passes `"vertex"`.
 """
 function usda_mesh(points, faces, normals, displaycolor;
                    model = Matrix{Float64}(LinearAlgebra.I, 4, 4),
                    normal_interpolation::AbstractString = "faceVarying",
-                   color_interpolation::AbstractString  = "constant")
+                   color_interpolation::AbstractString  = "constant",
+                   texcoords = nothing,
+                   texcoord_interpolation::AbstractString = "vertex")
     # Format points
     pts_str = join(
         ["($(Float32(p[1])), $(Float32(p[2])), $(Float32(p[3])))" for p in points], ", ")
@@ -95,6 +103,16 @@ function usda_mesh(points, faces, normals, displaycolor;
         "        interpolation = \"$(color_interpolation)\"\n" *
         "    )\n"
 
+    # UV (`st`) primvar block.  M3.3: an OmniPBR `*_texture` input samples the mesh's
+    # `texCoord2f[] primvars:st`, so an image-materialized mesh authors it from Makie's
+    # per-vertex `:texturecoordinates`.  `texcoords === nothing` (every non-textured
+    # mesh — the default) OMITS it, keeping the emit byte-for-byte the M2 output (the
+    # regression guard).  Mirrors `col_block`.
+    st_block = texcoords === nothing ? "" :
+        "    texCoord2f[] primvars:st = [$(_texcoords_str(texcoords))] (\n" *
+        "        interpolation = \"$(texcoord_interpolation)\"\n" *
+        "    )\n"
+
     xform_str = usda_matrix4d(model)
 
     # NOTE: no upAxis in reference layers — the root stage's upAxis governs.
@@ -109,7 +127,7 @@ def Mesh "mesh"
         interpolation = "$(normal_interpolation)"
     )
     point3f[] points = [$(pts_str)]
-$(col_block)    uniform token subdivisionScheme = "none"
+$(col_block)$(st_block)    uniform token subdivisionScheme = "none"
     matrix4d xformOp:transform = $(xform_str)
     uniform token[] xformOpOrder = ["xformOp:transform"]
 }
@@ -128,6 +146,10 @@ function _displaycolor_str(dc)
         return "($(Float32(dc[1])), $(Float32(dc[2])), $(Float32(dc[3])))"
     end
 end
+
+# Format a per-vertex texcoord payload as the inner text of `primvars:st = [...]`.
+# Each element is a 2-component `(u, v)` Float32 tuple/`Vec2f` (M3.3 UV mapping).
+_texcoords_str(tc) = join(["($(Float32(t[1])), $(Float32(t[2])))" for t in tc], ", ")
 
 # ------------------------------------------------------------------
 # scene_scopes_usda — nested `def Scope` skeleton mirroring the scene tree

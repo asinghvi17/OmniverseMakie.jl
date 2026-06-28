@@ -103,6 +103,7 @@ shader-input name (e.g. `"metallic_constant"`, `"diffuse_color_constant"`,
 USD attribute kind emitted:
 
 - `NTuple{3}` (`(r,g,b)` Float32) → `color3f inputs:<name> = (r, g, b)`
+- `Bool` (e.g. `project_uvw`)     → `bool inputs:<name> = <0|1>`
 - `AbstractString`               → `asset inputs:<name> = @<value>@` (a texture asset)
 - otherwise (a real)             → `float inputs:<name> = <Float32(value)>`
 
@@ -122,6 +123,8 @@ function usda_omnipbr_material(name::AbstractString, inputs::AbstractDict)
     for (k, v) in inputs
         if v isa NTuple{3}                     # color3f
             push!(lines, "                color3f inputs:$k = ($(v[1]), $(v[2]), $(v[3]))")
+        elseif v isa Bool                      # bool (e.g. project_uvw) — must precede the
+            push!(lines, "                bool inputs:$k = $(v ? 1 : 0)")   # Real/float branch
         elseif v isa AbstractString            # asset (texture)
             push!(lines, "                asset inputs:$k = @$(v)@")
         else                                   # float
@@ -161,8 +164,9 @@ The thin DOCUMENTED map from a user-facing `material=` escape-hatch key to its O
 shader-input name.  `base_color`, `emissive`, and `opacity` are handled specially in
 `material_inputs_from` (they emit companion inputs, e.g. `enable_emission`); the entries
 here give their direct rename.  `*_texture` keys map to OmniPBR texture inputs (their
-VALUE handling — building the texture asset — is M3.3; the map is defined now so the
-escape hatch is documented in one place).  An unknown key is `@warn`ed and skipped.
+VALUE — an asset path, or an image written to a temp PNG — is resolved by
+`_texture_asset_for` in `_merge_material_input!`, M3.3).  An unknown key is `@warn`ed
+and skipped.
 """
 const _OMNIPBR_KEY_MAP = Dict{Symbol,String}(
     :metallic           => "metallic_constant",
@@ -177,6 +181,51 @@ const _OMNIPBR_KEY_MAP = Dict{Symbol,String}(
     :metallic_texture   => "metallic_texture",
 )
 
+# ==================================================================
+# M3.3 — the temp-texture writer + `_texture_asset_for`
+#
+# An image `color` (a `Matrix{<:Colorant}`) is resolved to an on-disk asset PATH at
+# OPEN-time (inside the pre-authoring walk), referenced by the OmniPBR `diffuse_texture`
+# input.  The texture is written as a real PNG with `PNGFiles.save` — a small, focused
+# libpng wrapper (the USER-APPROVED imaging dep, added via Pkg; it's what ImageIO uses for
+# PNG under the hood).  ovrtx loads PNG natively (the bundled test data uses
+# `@checkerboard.png@`), so this is the robust route.  The file lives in a STABLE session
+# temp dir (not a deleted-on-return tempname) so it persists until ovrtx reads it during
+# RT2.
+# ==================================================================
+
+# The stable per-process session dir holding written textures.  Created lazily on the
+# first write and NOT auto-cleaned on return, so the asset persists until ovrtx reads it
+# during the render (it is reaped by the OS / at process exit).
+const _TEXTURE_DIR = Ref{String}("")
+function _texture_dir()
+    if isempty(_TEXTURE_DIR[]) || !isdir(_TEXTURE_DIR[])
+        _TEXTURE_DIR[] = mktempdir(; prefix = "omniversemakie_tex_", cleanup = false)
+    end
+    return _TEXTURE_DIR[]
+end
+
+"""
+    _texture_asset_for(img_or_path, plot) -> String
+
+Resolve an image `color` (or an explicit `*_texture` value) to an on-disk asset PATH for
+an OmniPBR texture input, at OPEN-time:
+
+- an `AbstractString` is a path the user already supplied → returned AS-IS (no write).
+- a `Matrix{<:Colorant}` (an in-memory image) is written to a stable session-temp PNG with
+  `PNGFiles.save` (converted to `RGBA{N0f8}`; PNGFiles maps `img[row, col]` to the pixel
+  at that row from the TOP / that column, so the matrix orientation is preserved) named by
+  `objectid(plot)` (one material per plot, so the name is unique) → its ABSOLUTE path is
+  returned (USD resolves absolute `@…@` asset paths directly; the root stage is an
+  in-memory string with no anchor for a relative path).
+"""
+_texture_asset_for(path::AbstractString, plot) = String(path)
+function _texture_asset_for(img::AbstractMatrix{<:Colorant}, plot)
+    path = joinpath(_texture_dir(), "tex_$(objectid(plot)).png")
+    PNGFiles.save(path, convert.(RGBA{N0f8}, img))
+    return path
+end
+
 # Read a plot's raw `material` escape-hatch value SAFELY.  Most non-Mesh plots have a
 # built-in `material` attribute defaulting to `nothing`; passing `material=(; …)` to
 # `mesh!` round-trips as a Makie `Attributes` (NamedTuple) or a `Dict` (Makie 0.24.12 —
@@ -186,6 +235,18 @@ _plot_material(plot) = haskey(plot, :material) ? plot.material[] : nothing
 
 # Read a plot's resolved `color` SAFELY (`nothing` if the plot has no `color`).
 _plot_color(plot) = haskey(plot, :color) ? plot.color[] : nothing
+
+# Whether a materialized plot's OmniPBR material samples a texture (so the mesh must
+# author the `st` UV primvar — M3.3): an image `color`, OR any `*_texture` material key.
+function _needs_texcoords(plot)
+    _plot_color(plot) isa AbstractMatrix && return true
+    mat = _plot_material(plot)
+    mat === nothing && return false
+    for k in keys(mat)
+        endswith(String(k), "_texture") && return true
+    end
+    return false
+end
 
 """
     is_materialized(plot) -> Bool
@@ -211,25 +272,30 @@ parameters into ONE `Dict` keyed by OmniPBR shader-input name, ready for
 emitter `Float32`-converts at write time); colours are `(r,g,b)` `Float32` tuples.
 
 Composition:
-- `color` → `"diffuse_color_constant"`: a scalar `Colorant` becomes the base colour; a
+- `color` → a scalar `Colorant` becomes `"diffuse_color_constant"` (the base colour); a
   per-vertex colour collapses to a constant AVERAGE base (+ `@warn`, the spec's stretch
-  fallback — OmniPBR has no per-vertex base); an IMAGE colour is deferred to the M3.3
-  texture path (`@warn`, no base colour authored here — do NOT build the temp-PNG path).
-- `material=` keys are merged via `_OMNIPBR_KEY_MAP`; `emissive`/`opacity` also emit
-  their `enable_*` companion; an unknown key is `@warn`ed and skipped.
-- Precedence: `material=(; base_color=…)` OVERRIDES `color` (`@warn` on the conflict).
+  fallback — OmniPBR has no per-vertex base); an IMAGE colour (`Matrix{<:Colorant}`)
+  becomes a `"diffuse_texture"` asset (written at OPEN-time by `_texture_asset_for`) plus
+  `"project_uvw" => false` so OmniPBR samples the mesh's `st` UV primvar (M3.3).
+- `material=` keys are merged via `_OMNIPBR_KEY_MAP`; `*_texture` keys resolve their value
+  to an asset path (`_texture_asset_for`); `emissive`/`opacity` also emit their `enable_*`
+  companion; an unknown key is `@warn`ed and skipped.
+- Precedence: `material=(; base_color=…)` OVERRIDES `color` (`@warn`); an explicit
+  `base_color_texture` OVERRIDES an image `color` texture (`@warn`).
 """
 function material_inputs_from(plot)
     inputs = Dict{String,Any}()
 
     color = _plot_color(plot)
-    have_base = false
+    have_base    = false
+    have_texture = false
     if color isa AbstractMatrix
-        # IMAGE colour → a texture; the asset mapping is M3.3.  Mark-only here: leave the
-        # base colour at the OmniPBR default and warn.  (NO temp-PNG path in M3.2.)
-        @warn "OmniverseMakie M3.2: image `color` (texture) on a materialized plot is not \
-               yet mapped to an OmniPBR texture input (M3.3); the material uses its \
-               default base colour for now."
+        # IMAGE colour → an OmniPBR `diffuse_texture` (M3.3).  Resolve the asset PATH at
+        # OPEN-time (write the temp PNG) and use the mesh's `st` UV primvar (NOT world-space
+        # triplanar) — `project_uvw = false` — so the texture follows the geometry's UVs.
+        inputs["diffuse_texture"] = _texture_asset_for(color, plot)
+        inputs["project_uvw"]     = false
+        have_texture = true
     elseif color isa AbstractVector
         # Per-vertex colour + a material → OmniPBR has no per-vertex base, so collapse to
         # a constant average (the spec's documented stretch fallback).
@@ -245,18 +311,28 @@ function material_inputs_from(plot)
     mat = _plot_material(plot)
     if mat !== nothing
         for k in keys(mat)
-            _merge_material_input!(inputs, Symbol(k), Makie.to_value(mat[k]), have_base)
+            _merge_material_input!(inputs, Symbol(k), Makie.to_value(mat[k]),
+                                   have_base, have_texture)
         end
     end
     return inputs
 end
 
 # Merge ONE `material=` key/value into `inputs` (mapped to its OmniPBR input name).
-function _merge_material_input!(inputs::AbstractDict, key::Symbol, value, have_base::Bool)
+function _merge_material_input!(inputs::AbstractDict, key::Symbol, value,
+                                have_base::Bool, have_texture::Bool = false)
     if key === :base_color
         have_base && @warn "OmniverseMakie: `material=(; base_color=…)` overrides the \
                             plot `color` for this material."
         inputs["diffuse_color_constant"] = _rgb(Makie.to_color(value))
+    elseif key === :base_color_texture
+        # Explicit base-colour texture path OVERRIDES an image `color` (M3.3 precedence).
+        have_texture && @warn "OmniverseMakie: `material=(; base_color_texture=…)` \
+                              overrides the image `color` texture for this material."
+        inputs["diffuse_texture"] = _texture_asset_for(value, nothing)
+    elseif key in (:normal_texture, :roughness_texture, :metallic_texture)
+        # Other `*_texture` maps — paths used AS-IS (no temp write; already asset paths).
+        inputs[_OMNIPBR_KEY_MAP[key]] = _texture_asset_for(value, nothing)
     elseif key === :emissive
         inputs["emissive_color"]  = _rgb(Makie.to_color(value))
         inputs["enable_emission"] = 1          # companion flag (OmniPBR gate)
@@ -264,7 +340,7 @@ function _merge_material_input!(inputs::AbstractDict, key::Symbol, value, have_b
         inputs["opacity_constant"] = value
         inputs["enable_opacity"]   = 1          # companion flag (OmniPBR gate)
     elseif haskey(_OMNIPBR_KEY_MAP, key)
-        inputs[_OMNIPBR_KEY_MAP[key]] = value   # metallic, roughness, *_texture, …
+        inputs[_OMNIPBR_KEY_MAP[key]] = value   # metallic, roughness, …
     else
         @warn "OmniverseMakie: unknown `material=` key `$(key)` — skipped (not an OmniPBR \
                escape-hatch input)."
