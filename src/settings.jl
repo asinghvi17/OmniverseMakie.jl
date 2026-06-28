@@ -16,21 +16,22 @@ end
 """
     rtx_settings_usda(cfg::ScreenConfig) -> String
 
-Emit a USDA snippet for the `RenderSettings` prim encoding the render mode and
-max bounces selected by `cfg`.  Consumed by M1.2 USD stage authoring.
+Emit the `omni:rtx:*` attribute lines that belong on the **RenderProduct** prim
+(rendermode, maxBounces, ambient).  Consumed by `author_render_root!` which
+injects them into the RenderProduct body.
+
+RECONCILIATION (M1.2): the spike proved that `omni:rtx:rendermode` and
+`maxBounces` must live on the RenderProduct, not in a separate RenderSettings
+prim.  Only `"RealTimePathTracing"` (RT2 path-tracing) is spike-verified;
+`:pathtracing` is mapped to it as well until the `PathTracing` token is tested.
 """
 function rtx_settings_usda(cfg::ScreenConfig)
-    rendermode = if cfg.mode === :rt2
-        "RealTimePathTracing"
-    elseif cfg.mode === :pathtracing
-        "PathTracing"
-    else
-        "RealTimePathTracing"
-    end
-    return """def RenderSettings "RenderSettings"
-{
-    uniform token omni:rtx:rendermode = "$(rendermode)"
-    uniform int omni:rtx:rtpt:maxBounces = $(cfg.max_bounces)
-}
-"""
+    # Only "RealTimePathTracing" is spike-verified.  Both :rt2 and :pathtracing
+    # map to it until an explicit PathTracing-mode spike confirms the token.
+    rendermode = "RealTimePathTracing"
+    ind = "            "   # 12-space indent to match RenderProduct body
+    # Avoid triple-quoted string dedentation by using explicit concatenation.
+    return "$(ind)token omni:rtx:rendermode = \"$(rendermode)\"\n" *
+           "$(ind)int omni:rtx:rtpt:maxBounces = $(cfg.max_bounces)\n" *
+           "$(ind)color3f omni:rtx:rt:ambientLight:color = (0.2, 0.2, 0.2)"
 end

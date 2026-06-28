@@ -352,4 +352,43 @@ function write_array_attribute!(r::Renderer, prim::AbstractString,
     return nothing
 end
 
+
+# ------------------------------------------------------------------
+# add_usd_reference! / remove_usd! — per-plot USD layer management
+# ------------------------------------------------------------------
+
+"""
+    add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::AbstractString)
+        -> ovrtx_usd_handle_t
+
+Add a USD layer (given as an in-memory USDA string) to the running stage under the
+prefix `prim_path`.  Returns an opaque handle for later `remove_usd!` calls.
+
+Both strings are converted to owned `String`s and preserved across the FFI call and
+the wait (the `ovx_string_t` structs reference Julia heap memory).
+"""
+function add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::AbstractString)
+    r.alive || error("add_usd_reference! on a closed Renderer")
+    layer_s = String(usda)
+    path_s  = String(prim_path)
+    h = Ref{L.ovrtx_usd_handle_t}(0)
+    GC.@preserve layer_s path_s begin
+        enqueue_wait(r,
+            L.ovrtx_add_usd_reference_from_string(
+                r.ptr, L.ovx_string(layer_s), L.ovx_string(path_s), h),
+            "add_usd_reference")
+    end
+    return h[]
+end
+
+"""
+    remove_usd!(r::Renderer, handle::ovrtx_usd_handle_t) -> Nothing
+
+Remove the USD layer previously added via `add_usd_reference!`.
+"""
+function remove_usd!(r::Renderer, handle::L.ovrtx_usd_handle_t)
+    enqueue_wait(r, L.ovrtx_remove_usd(r.ptr, handle), "remove_usd")
+    return nothing
+end
+
 end # module OV
