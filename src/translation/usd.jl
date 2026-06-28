@@ -56,7 +56,9 @@ Emit a self-contained USDA layer containing a single `UsdGeomMesh` prim at the
                    (`vertex`), per `normal_interpolation`.
 - `displaycolor` — a single `(r, g, b)` colour (constant interpolation) **or** a
                    `Vector` of `(r, g, b)` colours (per-vertex interpolation),
-                   per `color_interpolation`.
+                   per `color_interpolation`; **`nothing` OMITS** the
+                   `primvars:displayColor` entirely (a MATERIALIZED plot whose bound
+                   OmniPBR material governs shading — M3.2).
 - `model`        — optional 4×4 transform matrix applied via `xformOp:transform`
                    (defaults to identity; Makie `Mat4f` accepted directly).
 
@@ -84,8 +86,14 @@ function usda_mesh(points, faces, normals, displaycolor;
     nrm_str = join(
         ["($(Float32(n[1])), $(Float32(n[2])), $(Float32(n[3])))" for n in normals], ", ")
 
-    # Display colour: single (r,g,b) → constant; Vector of (r,g,b) → per-vertex.
-    col_str = _displaycolor_str(displaycolor)
+    # Display colour block.  A real colour → single (r,g,b) constant or per-vertex
+    # vector.  `displaycolor === nothing` (a MATERIALIZED plot — M3.2) OMITS the
+    # `primvars:displayColor` entirely, so the bound OmniPBR material fully governs
+    # shading.  The non-`nothing` branch is byte-for-byte the M1 emit (regression guard).
+    col_block = displaycolor === nothing ? "" :
+        "    color3f[] primvars:displayColor = [$(_displaycolor_str(displaycolor))] (\n" *
+        "        interpolation = \"$(color_interpolation)\"\n" *
+        "    )\n"
 
     xform_str = usda_matrix4d(model)
 
@@ -101,10 +109,7 @@ def Mesh "mesh"
         interpolation = "$(normal_interpolation)"
     )
     point3f[] points = [$(pts_str)]
-    color3f[] primvars:displayColor = [$(col_str)] (
-        interpolation = "$(color_interpolation)"
-    )
-    uniform token subdivisionScheme = "none"
+$(col_block)    uniform token subdivisionScheme = "none"
     matrix4d xformOp:transform = $(xform_str)
     uniform token[] xformOpOrder = ["xformOp:transform"]
 }
@@ -401,13 +406,13 @@ function author_root_from_scene!(screen, scene;
     scopes_str, scene2scope = scene_scopes_usda(root_scene)
     screen.scene2scope = scene2scope
 
-    # M3.1: author a `/World/Looks` scope alongside the scene scopes to hold OmniPBR
-    # materials.  Empty here (no materialized plots in M3.1); the M3.2 build branch
-    # composes each materialized plot's `usda_omnipbr_material` fragment INTO this
-    # scope's body at author-time.  Materials MUST be pre-authored (open-time) — a
+    # M3.2: author a `/World/Looks` scope alongside the scene scopes, PRE-AUTHORING one
+    # OmniPBR material per materialized plot (walks every atomic plot in `root_scene`;
+    # see `materialized_looks_usda`).  Materials MUST be pre-authored at open-time — a
     # Material added to the OPEN stage via `add_usd_reference!` is not bindable
-    # (M3.1-validated); `OV.bind_material!` then binds at runtime.
-    scopes_str = scopes_str * looks_scope_usda()
+    # (M3.1-validated); the per-plot build branch then binds at runtime with
+    # `OV.bind_material!`.  Empty scope when no plot is materialized.
+    scopes_str = scopes_str * materialized_looks_usda(root_scene)
 
     # Bake camera + lights + scope skeleton into root in ONE open_usd_string! call.
     author_render_root!(screen;

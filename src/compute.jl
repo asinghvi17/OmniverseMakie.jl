@@ -117,12 +117,27 @@ function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
     isempty(points) && return nothing
     normals = args[:normals]
     faces0  = [Int[Int(GeometryBasics.raw(i)) for i in f] for f in args[:faces]]
+    path    = plot_prim_path(screen.scene2scope, scene, plot)
+
+    if is_materialized(plot)
+        # M3.2: emit the geometry WITHOUT `displayColor` and BIND the OmniPBR material
+        # PRE-AUTHORED at open-time (`materialized_looks_usda` →
+        # `material_prim_path(plot)`).  The material was composed into /World/Looks before
+        # the stage opened, so this runtime `bind_material!` takes (M3.1-validated).
+        usda = usda_mesh(points, faces0, normals, nothing;
+                         model                = args[:model_f32c],
+                         normal_interpolation = "vertex")
+        h = OV.add_usd_reference!(screen.renderer, usda, path)
+        OV.bind_material!(screen.renderer, path, material_prim_path(plot))
+        return OvrtxRObj(path, h)
+    end
+
+    # Non-materialized: the M1 USD-native `displayColor` path, byte-unchanged.
     values, interp = _displaycolor_from_scaled(args[:scaled_color], length(points))
     usda = usda_mesh(points, faces0, normals, values;
                      model                = args[:model_f32c],
                      normal_interpolation = "vertex",
                      color_interpolation  = interp)
-    path = plot_prim_path(screen.scene2scope, scene, plot)
     h = OV.add_usd_reference!(screen.renderer, usda, path)
     return OvrtxRObj(path, h)
 end

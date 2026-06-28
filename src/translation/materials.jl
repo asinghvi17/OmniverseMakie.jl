@@ -143,3 +143,181 @@ $(join(lines, "\n"))
         }
 """
 end
+
+# ==================================================================
+# M3.2 — the `material=` escape hatch + `color`→base composition
+#
+# A plot is MATERIALIZED (gets an OmniPBR material instead of a USD-native
+# `displayColor`) when EITHER the user set the `material=` escape hatch OR `color`
+# is an image (`Matrix{<:Colorant}` — a texture; texture mapping itself is M3.3).
+# `material_inputs_from` composes BOTH into one `Dict` of OmniPBR shader-input names,
+# applying precedence (`material=(; base_color=…)` overrides `color`).
+# ==================================================================
+
+"""
+    _OMNIPBR_KEY_MAP :: Dict{Symbol,String}
+
+The thin DOCUMENTED map from a user-facing `material=` escape-hatch key to its OmniPBR
+shader-input name.  `base_color`, `emissive`, and `opacity` are handled specially in
+`material_inputs_from` (they emit companion inputs, e.g. `enable_emission`); the entries
+here give their direct rename.  `*_texture` keys map to OmniPBR texture inputs (their
+VALUE handling — building the texture asset — is M3.3; the map is defined now so the
+escape hatch is documented in one place).  An unknown key is `@warn`ed and skipped.
+"""
+const _OMNIPBR_KEY_MAP = Dict{Symbol,String}(
+    :metallic           => "metallic_constant",
+    :roughness          => "reflection_roughness_constant",
+    :opacity            => "opacity_constant",
+    :base_color         => "diffuse_color_constant",
+    :emissive           => "emissive_color",
+    # texture inputs — M3.3 populates the VALUES (asset paths); mapping defined now.
+    :base_color_texture => "diffuse_texture",
+    :normal_texture     => "normalmap_texture",
+    :roughness_texture  => "reflectionroughness_texture",
+    :metallic_texture   => "metallic_texture",
+)
+
+# Read a plot's raw `material` escape-hatch value SAFELY.  Most non-Mesh plots have a
+# built-in `material` attribute defaulting to `nothing`; passing `material=(; …)` to
+# `mesh!` round-trips as a Makie `Attributes` (NamedTuple) or a `Dict` (Makie 0.24.12 —
+# MCP-verified).  Returns `nothing` when the plot has no `material` attribute or it is
+# unset.  Guarded with `haskey` so a plot lacking the attribute never errors.
+_plot_material(plot) = haskey(plot, :material) ? plot.material[] : nothing
+
+# Read a plot's resolved `color` SAFELY (`nothing` if the plot has no `color`).
+_plot_color(plot) = haskey(plot, :color) ? plot.color[] : nothing
+
+"""
+    is_materialized(plot) -> Bool
+
+Whether `plot` should be rendered with an OmniPBR `UsdShade Material` (the M3 material
+path) rather than a USD-native `primvars:displayColor`.  `true` when the `material=`
+escape hatch is set (`plot.material[] !== nothing`) OR `color` is an image
+(`plot.color[] isa AbstractMatrix` — a texture).  Reads both attributes through `haskey`
+guards, so it returns `false` cleanly for an ordinary `mesh!(…; color=:red)` and never
+errors on a plot lacking either attribute.
+"""
+function is_materialized(plot)
+    _plot_material(plot) === nothing || return true
+    return _plot_color(plot) isa AbstractMatrix
+end
+
+"""
+    material_inputs_from(plot) -> Dict{String,Any}
+
+Compose a materialized plot's `color` (base colour) and `material=` escape-hatch
+parameters into ONE `Dict` keyed by OmniPBR shader-input name, ready for
+`usda_omnipbr_material`.  Scalar values are kept in their RAW numeric type (the USDA
+emitter `Float32`-converts at write time); colours are `(r,g,b)` `Float32` tuples.
+
+Composition:
+- `color` → `"diffuse_color_constant"`: a scalar `Colorant` becomes the base colour; a
+  per-vertex colour collapses to a constant AVERAGE base (+ `@warn`, the spec's stretch
+  fallback — OmniPBR has no per-vertex base); an IMAGE colour is deferred to the M3.3
+  texture path (`@warn`, no base colour authored here — do NOT build the temp-PNG path).
+- `material=` keys are merged via `_OMNIPBR_KEY_MAP`; `emissive`/`opacity` also emit
+  their `enable_*` companion; an unknown key is `@warn`ed and skipped.
+- Precedence: `material=(; base_color=…)` OVERRIDES `color` (`@warn` on the conflict).
+"""
+function material_inputs_from(plot)
+    inputs = Dict{String,Any}()
+
+    color = _plot_color(plot)
+    have_base = false
+    if color isa AbstractMatrix
+        # IMAGE colour → a texture; the asset mapping is M3.3.  Mark-only here: leave the
+        # base colour at the OmniPBR default and warn.  (NO temp-PNG path in M3.2.)
+        @warn "OmniverseMakie M3.2: image `color` (texture) on a materialized plot is not \
+               yet mapped to an OmniPBR texture input (M3.3); the material uses its \
+               default base colour for now."
+    elseif color isa AbstractVector
+        # Per-vertex colour + a material → OmniPBR has no per-vertex base, so collapse to
+        # a constant average (the spec's documented stretch fallback).
+        @warn "OmniverseMakie: per-vertex `color` with `material=` → using a constant \
+               average base colour for the OmniPBR material."
+        inputs["diffuse_color_constant"] = _average_rgb(plot, color)
+        have_base = true
+    elseif color !== nothing
+        inputs["diffuse_color_constant"] = _rgb(Makie.to_color(color))
+        have_base = true
+    end
+
+    mat = _plot_material(plot)
+    if mat !== nothing
+        for k in keys(mat)
+            _merge_material_input!(inputs, Symbol(k), Makie.to_value(mat[k]), have_base)
+        end
+    end
+    return inputs
+end
+
+# Merge ONE `material=` key/value into `inputs` (mapped to its OmniPBR input name).
+function _merge_material_input!(inputs::AbstractDict, key::Symbol, value, have_base::Bool)
+    if key === :base_color
+        have_base && @warn "OmniverseMakie: `material=(; base_color=…)` overrides the \
+                            plot `color` for this material."
+        inputs["diffuse_color_constant"] = _rgb(Makie.to_color(value))
+    elseif key === :emissive
+        inputs["emissive_color"]  = _rgb(Makie.to_color(value))
+        inputs["enable_emission"] = 1          # companion flag (OmniPBR gate)
+    elseif key === :opacity
+        inputs["opacity_constant"] = value
+        inputs["enable_opacity"]   = 1          # companion flag (OmniPBR gate)
+    elseif haskey(_OMNIPBR_KEY_MAP, key)
+        inputs[_OMNIPBR_KEY_MAP[key]] = value   # metallic, roughness, *_texture, …
+    else
+        @warn "OmniverseMakie: unknown `material=` key `$(key)` — skipped (not an OmniPBR \
+               escape-hatch input)."
+    end
+    return inputs
+end
+
+# Constant average `(r,g,b)` Float32 base colour from a per-vertex `color` (Colorant
+# vector OR numeric vector mapped through the colormap) — reuses `_displaycolor`.
+function _average_rgb(plot, color::AbstractVector)
+    vals, _ = _displaycolor(color, plot, length(color))
+    if vals isa AbstractVector && !isempty(vals)
+        n = length(vals)
+        return (Float32(sum(v[1] for v in vals) / n),
+                Float32(sum(v[2] for v in vals) / n),
+                Float32(sum(v[3] for v in vals) / n))
+    end
+    return vals  # `_displaycolor` already collapsed to a constant tuple
+end
+
+"""
+    materialized_looks_usda(root_scene) -> String
+
+Compose the `/World/Looks` scope body for `root_scene`: walk every ATOMIC plot in the
+scene tree (mirroring `pull_ovrtx_nodes!`), and for each `is_materialized` plot emit its
+`usda_omnipbr_material("Mat_<objectid(plot)>", material_inputs_from(plot))` fragment.
+The joined fragments are wrapped by `looks_scope_usda`.  Called by
+`author_root_from_scene!` so every materialized plot's OmniPBR material is PRE-AUTHORED
+into the stage at open-time (M3.1-validated: a Material added to the OPEN stage is not
+bindable); the per-plot build branch then binds at runtime with `OV.bind_material!`.
+"""
+function materialized_looks_usda(root_scene)
+    frags = String[]
+    _collect_materialized!(frags, root_scene)
+    return looks_scope_usda(join(frags))
+end
+
+function _collect_materialized!(frags::Vector{String}, scene)
+    for plot in scene.plots
+        _collect_materialized_plot!(frags, plot)
+    end
+    foreach(child -> _collect_materialized!(frags, child), scene.children)
+    return
+end
+
+function _collect_materialized_plot!(frags::Vector{String}, plot)
+    if isempty(plot.plots)                       # atomic plot
+        if is_materialized(plot)
+            name = "Mat_$(objectid(plot))"
+            push!(frags, usda_omnipbr_material(name, material_inputs_from(plot)))
+        end
+    else                                         # composite → recurse into children
+        foreach(p -> _collect_materialized_plot!(frags, p), plot.plots)
+    end
+    return
+end
