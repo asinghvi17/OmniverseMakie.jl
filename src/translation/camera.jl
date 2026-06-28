@@ -5,19 +5,21 @@
 #   _usda_row_vector_matrix(M)          — format a row-vector matrix as USD matrix4d text
 #   _validate_camera_path(path)         — guard: must be /World/<name> (closes M1.2 Minor #2)
 #   author_camera!(screen, scene)       — bake Makie 3-D camera pose into the root stage
+#   sync_camera!(screen, scene)         — live: write_xform!("/World/Camera", …) on a pose change
 #
-# Design (M1.3 diagnostic):
-#   PRIMARY mechanism (write_xform! on the UsdGeomCamera prim) was tested first.
-#   Result: only ~7177/160000 pixels changed — consistent with RT2 noise, not a reframe.
-#   Conclusion: write_xform! / omni:xform is ignored on camera prims.
-#
-#   FALLBACK (used here): bake the camera pose into the root USDA string via
-#   author_render_root!(screen; camera_xform_str=...).  This re-opens the stage,
-#   so callers must re-add any USD references after each author_camera! call.
-#   The differential test (pose A vs B) uses this path and achieves ≥20_000 changed px.
+# Camera update mechanism (CORRECTED in M2.1 — supersedes the M1.3 diagnostic):
+#   The M1.3 note claimed `write_xform!`/`omni:xform` is "ignored on camera prims"
+#   (it saw only ~7177/160000 px change and read that as RT2 noise).  That finding is
+#   DISPROVEN.  An open-stage spike drove the camera purely with
+#       OV.write_xform!(r, "/World/Camera", camera_to_world(eye, target, up)); OV.reset!(r)
+#   and an A→B→A round-trip returned to the original within 8/270000 px — a clean
+#   reframe, exactly how the NVIDIA vulkan-interop C example drives its camera.  So in
+#   M2.1 the camera is BAKED once at author time (author_render_root!) and thereafter
+#   UPDATED LIVE via `sync_camera!`'s `write_xform!` — NO stage re-open on a pose change.
+#   (A rare FOV change is a `float focalLength` scalar write; orbit/pan/zoom is the xform.)
 #
 # NOTE: included inside OmniverseMakie module, after usd.jl.
-#       OV, Makie, LinearAlgebra, author_render_root! are all in scope.
+#       OV, LibOVRTX, Makie, LinearAlgebra, author_render_root! are all in scope.
 
 import LinearAlgebra: cross, normalize, norm
 
@@ -141,14 +143,10 @@ end
 Bake `scene`'s 3-D camera pose (and lights) into the USD render-root and re-open
 the stage.
 
-Delegates to `author_root_from_scene!` (defined in lights.jl, included after this
-file), which reads both the scene camera AND `scene.compute[:lights][]` and opens
-the stage once with both baked in.  Camera and lights are always authored together —
-baking them separately would require two stage re-opens, and the second would wipe
-the first.
-
-This function is an intent-named entry point for callers that are conceptually
-updating the camera.  M2 will specialize it to live diffing if needed.
+Delegates to `author_root_from_scene!` (usd.jl), which reads both the scene camera
+AND `scene.compute[:lights][]` and opens the stage once with both baked in.  This
+is the INITIAL bake; after it, live pose changes go through `sync_camera!`
+(`write_xform!`), NOT a re-bake.
 
 # Side effect: stage re-open
 Every call re-opens the stage.  All previously added USD references are lost and
@@ -164,7 +162,62 @@ Must be a direct `/World/<name>` child (default `"/World/Camera"`).
 Call `OV.reset!(screen.renderer)` before rendering to restart RT2 accumulation.
 """
 function author_camera!(screen, scene; camera_path::String = "/World/Camera")
-    # Delegate to the canonical combined authorer (lights.jl).
+    # Delegate to the canonical combined authorer (usd.jl).
     # camera_path validation happens inside author_root_from_scene!.
     return author_root_from_scene!(screen, scene; camera_path = camera_path)
+end
+
+# ------------------------------------------------------------------
+# sync_camera! — live: push a camera pose / FOV change to the open stage
+# ------------------------------------------------------------------
+
+# Snapshot of the scene's 3-D camera pose + FOV, or `nothing` if the scene has no
+# 3-D camera controller (a 2-D / pixel camera has no eyeposition/lookat/up/fov).
+function _camera_snapshot(scene)
+    cam = Makie.cameracontrols(scene)
+    cam isa Makie.Camera3D || return nothing
+    return (eye = cam.eyeposition[], target = cam.lookat[],
+            up = cam.upvector[], fov = cam.fov[])
+end
+
+# Scalar Float32 write of `focalLength` on a camera prim (rare FOV-change path).
+function _write_camera_focal_length!(r, prim, fl::Real)
+    dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(1))
+    OV._write_attribute!(r, prim, "focalLength", dtype, false, LibOVRTX.OVRTX_SEMANTIC_NONE,
+                         Float32[fl], Int64[1])
+    return nothing
+end
+
+"""
+    sync_camera!(screen, scene; camera_path="/World/Camera") -> Bool
+
+Compare the scene's current 3-D camera pose/FOV to `screen.last_camera` (the
+snapshot last written/baked).  On a pose change (`eyeposition`/`lookat`/`upvector`)
+push `OV.write_xform!(camera_path, camera_to_world(eye, target, up))`; on a FOV
+change push a `focalLength` scalar write.  Updates `screen.last_camera` and returns
+`true` iff anything was written (so `colorbuffer` knows to `OV.reset!`).
+
+Returns `false` (no-op) when the scene has no 3-D camera or nothing changed — a
+static scene keeps accumulating without a reset.
+"""
+function sync_camera!(screen, scene; camera_path::String = "/World/Camera")
+    snap = _camera_snapshot(scene)
+    snap === nothing && return false
+    old = screen.last_camera
+    r   = screen.renderer
+    changed = false
+
+    if old === nothing || snap.eye != old.eye || snap.target != old.target || snap.up != old.up
+        OV.write_xform!(r, camera_path, camera_to_world(snap.eye, snap.target, snap.up))
+        changed = true
+    end
+    if old === nothing || snap.fov != old.fov
+        W, H = screen.fb_size
+        fl = camera_intrinsics(snap.fov, W, H).focal_length
+        _write_camera_focal_length!(r, camera_path, fl)
+        changed = true
+    end
+
+    screen.last_camera = snap
+    return changed
 end

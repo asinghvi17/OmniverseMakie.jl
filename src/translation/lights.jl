@@ -3,8 +3,9 @@
 # Provides:
 #   lights_usda(scene; cam_to_world)       — all scene lights as UsdLux USDA prim blocks
 #   usda_light(l, index)                   — per-type USDA prim block
-#   _direction_to_xform(dir)               — orientation matrix string for directional lights
-#   author_root_from_scene!(screen, scene) — canonical bake: camera + lights in ONE open
+#   light_prim_path(light, index)          — SINGLE SOURCE for /World/<Type>_<index>
+#   _direction_to_xform_matrix(dir)        — orientation matrix (Matrix{Float64})
+#   sync_lights!(screen, scene)            — live diff: push changed intensity/color/xform
 #   author_lights!(screen, scene)          — intent-named delegator to author_root_from_scene!
 #
 # Type mapping (fully tested: DirectionalLight, PointLight, AmbientLight;
@@ -16,42 +17,88 @@
 #   SpotLight        → UsdLuxSphereLight   + ShapingAPI [best-effort]
 #   EnvironmentLight → UsdLuxDomeLight     [best-effort; texture image deferred to M4]
 #
-# Composition architecture (M1.4):
-#   `author_root_from_scene!` is the canonical single-pass root authorer.
-#   Both `author_camera!` (camera.jl) and `author_lights!` (this file) delegate to it.
-#   They are intent-named entry points over the same combined authoring — callers that
-#   conceptually update just the camera or just the lights both re-bake the full root.
-#   M2 will specialize live diffing here if needed.
+# Open-stage live updates (M2.1):
+#   `author_root_from_scene!` (usd.jl) BAKES camera + lights once at author time.
+#   Afterwards, `sync_lights!` pushes minimal live writes for changed lights —
+#   `inputs:intensity` (lanes=1), `inputs:color` (lanes=3), and `omni:xform` —
+#   exactly as proven by the lights spike (clean A→B→A round-trips).  Light prim
+#   paths are derived from the shared `light_prim_path` helper so the authored path
+#   EQUALS the path written to.  Only the fully-tested light types get live sync;
+#   exotic types remain baked (their live `_light_render_state` returns `nothing`).
 #
 # NOTE: included inside OmniverseMakie module, after camera.jl.
-#       All of: OV, Makie, LinearAlgebra, camera_to_world, camera_intrinsics,
+#       All of: OV, LibOVRTX, Makie, LinearAlgebra, camera_to_world, camera_intrinsics,
 #       _usda_row_vector_matrix, _validate_camera_path, author_render_root! are in scope.
 
 # ------------------------------------------------------------------
-# _direction_to_xform — orientation matrix string for directional lights
+# light_prim_path — SINGLE SOURCE for a light's prim name + path
+# ------------------------------------------------------------------
+
+# A light's prim NAME is "<MakieType>_<index>" (DirectionalLight_0, PointLight_1,
+# AmbientLight_0, ...), matching what `usda_light` authors; the prim is a direct
+# child of /World.  BOTH the USDA authoring (`usda_light`) AND the live writer
+# (`sync_lights!`) derive paths from here, so authored path == written path.
+# `nameof(typeof(l))` yields exactly the legacy hard-coded names for every standard
+# Makie light type (DirectionalLight/PointLight/AmbientLight/RectLight/SpotLight/
+# EnvironmentLight).
+light_prim_name(light, index::Int) = "$(nameof(typeof(light)))_$(index)"
+
+"""
+    light_prim_path(light, index) -> String
+
+The `/World/<Type>_<index>` USD prim path for a Makie light.  Shared single source
+of truth used by both `usda_light` authoring and `sync_lights!` live writes.
+"""
+light_prim_path(light, index::Int) = "/World/" * light_prim_name(light, index)
+
+# Intensity scale factor (max-channel × scale) per Makie light type — kept in ONE
+# place so `usda_light` (bake) and `_light_render_state` (live sync) never drift.
+_light_intensity_scale(::Makie.DirectionalLight) = 3000.0
+_light_intensity_scale(::Makie.PointLight)       = 10000.0
+_light_intensity_scale(::Makie.AmbientLight)     = 1000.0
+_light_intensity_scale(::Makie.RectLight)        = 3000.0
+_light_intensity_scale(::Makie.SpotLight)        = 10000.0
+_light_intensity_scale(_)                        = 1000.0
+
+# ------------------------------------------------------------------
+# _direction_to_xform — orientation matrix for directional lights
 # ------------------------------------------------------------------
 
 """
-    _direction_to_xform(dir) -> String
+    _direction_to_xform_matrix(dir) -> Matrix{Float64}
 
-Build a USD `matrix4d` orientation transform for a light whose emission axis is `dir`.
-
-USD DistantLights (and RectLights) emit along local −Z.  The returned transform
-rotates the light so that local −Z aligns with `dir` in world space, i.e. local +Z
-points opposite to the emission direction.
-
-Returns a USDA `matrix4d` literal (row-vector convention) via `_usda_row_vector_matrix`.
+Build a 4×4 USD `matrix4d` (row-vector convention) that orients a light whose
+emission axis is `dir`.  USD DistantLights (and RectLights) emit along local −Z,
+so local +Z points opposite to the emission direction.  Returned as a plain
+`Matrix{Float64}` so both the USDA emitter and the live `write_xform!` path can
+consume it.
 """
-function _direction_to_xform(dir)
+function _direction_to_xform_matrix(dir)
     z = -normalize(Float64[dir[1], dir[2], dir[3]])   # local +Z = −emission direction
     a = abs(z[3]) < 0.99 ? Float64[0, 0, 1] : Float64[1, 0, 0]
     x = normalize(cross(a, z))
     y = cross(z, x)
-    M = Float64[x[1] x[2] x[3] 0.0
-                y[1] y[2] y[3] 0.0
-                z[1] z[2] z[3] 0.0
-                0.0  0.0  0.0  1.0]
-    return _usda_row_vector_matrix(M)
+    return Float64[x[1] x[2] x[3] 0.0
+                   y[1] y[2] y[3] 0.0
+                   z[1] z[2] z[3] 0.0
+                   0.0  0.0  0.0  1.0]
+end
+
+"""
+    _direction_to_xform(dir) -> String
+
+USDA `matrix4d` literal (row-vector convention) for a directional light's
+orientation — `_usda_row_vector_matrix ∘ _direction_to_xform_matrix`.
+"""
+_direction_to_xform(dir) = _usda_row_vector_matrix(_direction_to_xform_matrix(dir))
+
+# 4×4 pure-translation matrix (USD row-vector convention: translation in the last ROW)
+# for a light positioned at `p` (Sphere/Spot lights).
+function _translation_xform(p)
+    return Float64[1.0 0.0 0.0 0.0
+                   0.0 1.0 0.0 0.0
+                   0.0 0.0 1.0 0.0
+                   Float64(p[1]) Float64(p[2]) Float64(p[3]) 1.0]
 end
 
 # ------------------------------------------------------------------
@@ -94,9 +141,9 @@ Type mapping summary:
   EnvironmentLight → UsdLuxDomeLight      (texture image deferred to M4) [best-effort]
 """
 function usda_light(l::Makie.DirectionalLight, index::Int)
-    intensity, cr, cg, cb = _intensity_and_color(l.color, 3000.0)
+    intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
     xform = _direction_to_xform(l.direction)
-    return """    def DistantLight "DirectionalLight_$(index)" (
+    return """    def DistantLight "$(light_prim_name(l, index))" (
         prepend apiSchemas = ["ShapingAPI"]
     )
     {
@@ -111,15 +158,10 @@ function usda_light(l::Makie.DirectionalLight, index::Int)
 end
 
 function usda_light(l::Makie.PointLight, index::Int)
-    intensity, cr, cg, cb = _intensity_and_color(l.color, 10000.0)
+    intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
     p = l.position
-    xform_str = _usda_row_vector_matrix(Float64[
-        1.0 0.0 0.0 0.0
-        0.0 1.0 0.0 0.0
-        0.0 0.0 1.0 0.0
-        Float64(p[1]) Float64(p[2]) Float64(p[3]) 1.0
-    ])
-    return """    def SphereLight "PointLight_$(index)"
+    xform_str = _usda_row_vector_matrix(_translation_xform(p))
+    return """    def SphereLight "$(light_prim_name(l, index))"
     {
         float inputs:radius = 1
         float inputs:intensity = $(intensity)
@@ -132,8 +174,8 @@ function usda_light(l::Makie.PointLight, index::Int)
 end
 
 function usda_light(l::Makie.AmbientLight, index::Int)
-    intensity, cr, cg, cb = _intensity_and_color(l.color, 1000.0)
-    return """    def DomeLight "AmbientLight_$(index)"
+    intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
+    return """    def DomeLight "$(light_prim_name(l, index))"
     {
         float inputs:intensity = $(intensity)
         color3f inputs:color = ($(cr), $(cg), $(cb))
@@ -145,7 +187,7 @@ end
 function usda_light(l::Makie.RectLight, index::Int)
     # Best-effort: UsdLuxRectLight with width=norm(u1), height=norm(u2).
     # Orientation from direction; translation from position.
-    intensity, cr, cg, cb = _intensity_and_color(l.color, 3000.0)
+    intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
     w = norm(Float64[l.u1[1], l.u1[2], l.u1[3]])
     h = norm(Float64[l.u2[1], l.u2[2], l.u2[3]])
     # Build combined rotation+translation matrix.
@@ -160,7 +202,7 @@ function usda_light(l::Makie.RectLight, index::Int)
                 z[1]    z[2]    z[3]    0.0
                 Float64(p[1]) Float64(p[2]) Float64(p[3]) 1.0]
     xform_str = _usda_row_vector_matrix(M)
-    return """    def RectLight "RectLight_$(index)"
+    return """    def RectLight "$(light_prim_name(l, index))"
     {
         float inputs:width = $(w)
         float inputs:height = $(h)
@@ -176,18 +218,13 @@ end
 function usda_light(l::Makie.SpotLight, index::Int)
     # Best-effort: UsdLuxSphereLight + ShapingAPI cone from l.angles.
     # l.angles = (inner_cutoff_radians, outer_cutoff_radians).
-    intensity, cr, cg, cb = _intensity_and_color(l.color, 10000.0)
+    intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
     p = l.position
-    xform_str = _usda_row_vector_matrix(Float64[
-        1.0 0.0 0.0 0.0
-        0.0 1.0 0.0 0.0
-        0.0 0.0 1.0 0.0
-        Float64(p[1]) Float64(p[2]) Float64(p[3]) 1.0
-    ])
+    xform_str = _usda_row_vector_matrix(_translation_xform(p))
     inner_deg = Float64(l.angles[1]) * (180.0 / π)
     outer_deg = Float64(l.angles[2]) * (180.0 / π)
     softness  = max(0.0, (outer_deg - inner_deg) / max(outer_deg, 1e-6))
-    return """    def SphereLight "SpotLight_$(index)" (
+    return """    def SphereLight "$(light_prim_name(l, index))" (
         prepend apiSchemas = ["ShapingAPI"]
     )
     {
@@ -207,7 +244,7 @@ function usda_light(l::Makie.EnvironmentLight, index::Int)
     # Best-effort: DomeLight with l.intensity scaled to USD range.
     # Texture image (l.image) is deferred to M4 — HDR environment map loading.
     intensity = Float64(l.intensity) * 1000.0
-    return """    def DomeLight "EnvironmentLight_$(index)"
+    return """    def DomeLight "$(light_prim_name(l, index))"
     {
         float inputs:intensity = $(intensity)
     }
@@ -272,68 +309,106 @@ function lights_usda(scene; cam_to_world = nothing)
 end
 
 # ------------------------------------------------------------------
-# author_root_from_scene! — canonical bake: camera + lights in ONE open
+# Live light sync (M2.1) — push minimal writes for changed lights
 # ------------------------------------------------------------------
 
-"""
-    author_root_from_scene!(screen, scene; resolution=screen.fb_size,
-                             camera_path="/World/Camera") -> Nothing
+# Per-light live render-state used for BOTH the snapshot and the writes:
+#   (intensity::Float64, color::NTuple{3,Float64}, xform::Union{Nothing,Matrix{Float64}})
+# Only the fully-tested light types get live sync; exotic types return `nothing`
+# (they stay baked from author time).  Uses the SAME scale/intensity/xform math as
+# `usda_light`, so the snapshot taken at author time matches the baked USDA exactly.
+function _light_render_state(l::Makie.DirectionalLight)
+    intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
+    return (intensity = intensity, color = (cr, cg, cb),
+            xform = _direction_to_xform_matrix(l.direction))
+end
+function _light_render_state(l::Makie.PointLight)
+    intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
+    return (intensity = intensity, color = (cr, cg, cb),
+            xform = _translation_xform(l.position))
+end
+function _light_render_state(l::Makie.AmbientLight)
+    intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
+    return (intensity = intensity, color = (cr, cg, cb), xform = nothing)  # DomeLight: no xform
+end
+_light_render_state(_) = nothing   # exotic light type → no live sync (stays baked)
 
-Canonical single-pass root authorer: reads the scene's 3-D camera AND all lights
-from `scene.compute[:lights][]`, then calls `author_render_root!` exactly ONCE
-(one `open_usd_string!`) with both baked in.
+# Walk the scene lights exactly as `lights_usda` does (per-concrete-type 0-based
+# counter) so each light's prim path here EQUALS the authored path.
+function _light_paths(lights)
+    counts = Dict{DataType,Int}()
+    out = Tuple{Any,String}[]
+    for l in lights
+        T = typeof(l)
+        idx = get(counts, T, 0)
+        counts[T] = idx + 1
+        push!(out, (l, light_prim_path(l, idx)))
+    end
+    return out
+end
 
-This is the function M1.5's `display` will call, then add plot USD references after.
+# Snapshot of every light's (path, render-state); render-state may be `nothing`.
+_lights_snapshot(lights) = Any[(path, _light_render_state(l)) for (l, path) in _light_paths(lights)]
 
-Design note (why combined):
-- Re-opening the stage wipes all added USD references (M1.3 diagnostic finding).
-- `omni:xform` live-writes are ignored on non-geometry prims (camera, lights).
-- Therefore camera and lights must be baked together in the same root USDA.
-- `author_camera!` and `author_lights!` both delegate here; they are intent-named
-  entry points so callers read naturally.  M2 can specialize each for live diffing
-  without breaking callers.
-
-# Side effect
-Calls `author_render_root!` → the stage is re-opened.  All previously added USD
-references (`OV.add_usd_reference!`) are lost and must be re-added by the caller.
-
-# Precondition
-`scene` must have a 3-D camera controller (`cam3d!(scene)` or `LScene`).
-"""
-function author_root_from_scene!(screen, scene;
-                                  resolution  = screen.fb_size,
-                                  camera_path::String = "/World/Camera")
-    _validate_camera_path(camera_path)
-
-    # Read 3-D camera controls from the Makie scene.
-    cam    = Makie.cameracontrols(scene)
-    eye    = cam.eyeposition[]
-    target = cam.lookat[]
-    up     = cam.upvector[]
-    fov    = cam.fov[]
-
-    W, H = resolution
-
-    # Compute camera-to-world (USD row-vector convention).
-    M = camera_to_world(eye, target, up)
-    xform_str = _usda_row_vector_matrix(M)
-
-    # Derive intrinsics from vertical FOV and image aspect ratio.
-    intr = camera_intrinsics(fov, W, H)
-
-    # Translate scene lights to USDA, passing camera matrix for camera-relative lights.
-    lstr = lights_usda(scene; cam_to_world = M)
-
-    # Bake camera + lights into root in ONE open_usd_string! call.
-    author_render_root!(screen;
-        resolution       = resolution,
-        camera_path      = camera_path,
-        camera_xform_str = xform_str,
-        focal_length     = intr.focal_length,
-        h_aperture       = intr.h_aperture,
-        v_aperture       = intr.v_aperture,
-        lights_str       = lstr)
+# Scalar Float32 attribute write (e.g. inputs:intensity) — lanes=1.
+function _write_light_intensity!(r, prim, val)
+    dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(1))
+    OV._write_attribute!(r, prim, "inputs:intensity", dtype, false,
+                         LibOVRTX.OVRTX_SEMANTIC_NONE, Float32[val], Int64[1])
     return nothing
+end
+
+# color3f attribute write (inputs:color) — one element with 3 float32 lanes.
+function _write_light_color!(r, prim, color)
+    dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(3))
+    OV._write_attribute!(r, prim, "inputs:color", dtype, false, LibOVRTX.OVRTX_SEMANTIC_NONE,
+                         Float32[color[1], color[2], color[3]], Int64[1])
+    return nothing
+end
+
+"""
+    sync_lights!(screen, scene) -> Bool
+
+Compare the scene's current lights to `screen.last_lights` (the snapshot last
+written/baked) and push a MINIMAL live write for each changed attribute:
+`inputs:intensity`, `inputs:color`, and/or `omni:xform` (per the proven lights
+spike).  Updates `screen.last_lights` and returns `true` iff anything was written
+(so `colorbuffer` knows to `OV.reset!` before rendering).
+
+A structural change (the light *set*: count or per-position type differs from the
+snapshot) is NOT a live edit — it requires a stage re-open (a later-M2 concern);
+this function refreshes the snapshot and returns `false` in that case.
+"""
+function sync_lights!(screen, scene)
+    lights   = scene.compute[:lights][]
+    new_snap = _lights_snapshot(lights)
+    old_snap = screen.last_lights
+
+    # Structural mismatch (or first call without a baked snapshot): don't try to
+    # write to prims that may not exist — just record the current snapshot.
+    if old_snap === nothing || length(old_snap) != length(new_snap)
+        screen.last_lights = new_snap
+        return false
+    end
+
+    changed = false
+    r = screen.renderer
+    for i in eachindex(new_snap)
+        path, st  = new_snap[i]
+        _, ost    = old_snap[i]
+        st === nothing && continue          # exotic light: no live sync
+        if ost === nothing || st.intensity != ost.intensity
+            _write_light_intensity!(r, path, st.intensity); changed = true
+        end
+        if ost === nothing || st.color != ost.color
+            _write_light_color!(r, path, st.color); changed = true
+        end
+        if st.xform !== nothing && (ost === nothing || st.xform != ost.xform)
+            OV.write_xform!(r, path, st.xform); changed = true
+        end
+    end
+    screen.last_lights = new_snap
+    return changed
 end
 
 # ------------------------------------------------------------------
@@ -343,14 +418,10 @@ end
 """
     author_lights!(screen, scene; camera_path="/World/Camera") -> Nothing
 
-Bake `scene`'s lights (and camera) into the USD render-root.
-
-Delegates to `author_root_from_scene!` — camera and lights are always authored
-together in one `open_usd_string!`.  This is intentional: baking them separately
-would require two stage re-opens, and the second would wipe the first.
-
-This function is an intent-named entry point for callers that are conceptually
-updating the lights.  M2 will specialize it for live diffing if needed.
+Bake `scene`'s lights (and camera) into the USD render-root via
+`author_root_from_scene!` (usd.jl).  Camera and lights are baked together in one
+`open_usd_string!`.  After the initial bake, live light changes go through
+`sync_lights!`, not a re-bake.
 """
 function author_lights!(screen, scene; camera_path::String = "/World/Camera")
     return author_root_from_scene!(screen, scene; camera_path = camera_path)

@@ -28,3 +28,8 @@ include("m1_mesh_render_test.jl")
 include("m1_orientation_test.jl")
 include("m1_save_record_test.jl")
 include("m1_primitives_test.jl")
+
+# M2.1 — open-stage Screen + live camera/lights + imperative insert!
+include("m2_openstage_test.jl")
+include("m2_insert_test.jl")
+include("m2_rendercfg_test.jl")

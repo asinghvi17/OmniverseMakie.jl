@@ -9,6 +9,12 @@
 # settings.jl, before screen.jl).  `screen` arguments are duck-typed so the
 # Screen type does not need to be in scope at compile time.
 
+# Number of times the render-root stage has been (re-)opened in THIS process.
+# Incremented by `author_render_root!` (the sole `OV.open_usd_string!` for the root).
+# Used by the M2.1 open-stage test to assert the stage is authored exactly ONCE
+# across multiple `colorbuffer` calls (M1 re-authored per call → 2; M2.1 → 1).
+const _ROOT_OPEN_COUNT = Ref(0)
+
 # ------------------------------------------------------------------
 # usda_matrix4d — convert a Makie model matrix to USD matrix4d text
 # ------------------------------------------------------------------
@@ -247,5 +253,66 @@ $(rtx_lines)
 }
 """
     OV.open_usd_string!(screen.renderer, usda)
+    _ROOT_OPEN_COUNT[] += 1
+    return nothing
+end
+
+# ------------------------------------------------------------------
+# author_root_from_scene! — canonical bake: camera + lights in ONE open
+# (relocated from lights.jl in M2.1 — composition lives with USD authoring)
+# ------------------------------------------------------------------
+
+"""
+    author_root_from_scene!(screen, scene; resolution=screen.fb_size,
+                             camera_path="/World/Camera") -> Nothing
+
+Canonical single-pass root authorer: reads the scene's 3-D camera AND all lights
+from `scene.compute[:lights][]`, then calls `author_render_root!` exactly ONCE
+(one `open_usd_string!`) with both baked in.
+
+Open-stage model (M2.1): the root is baked ONCE on the first `colorbuffer`; later
+camera/light *attribute* changes are pushed as live writes (`sync_camera!` /
+`sync_lights!`), NOT a re-bake.  A re-open happens only on a structural change.
+
+# Side effect
+Calls `author_render_root!` → the stage is (re-)opened.  All previously added USD
+references (`OV.add_usd_reference!`) are lost and must be re-added by the caller.
+
+# Precondition
+`scene` must have a 3-D camera controller (`cam3d!(scene)` or `LScene`).
+"""
+function author_root_from_scene!(screen, scene;
+                                  resolution  = screen.fb_size,
+                                  camera_path::String = "/World/Camera")
+    _validate_camera_path(camera_path)
+
+    # Read 3-D camera controls from the Makie scene.
+    cam    = Makie.cameracontrols(scene)
+    eye    = cam.eyeposition[]
+    target = cam.lookat[]
+    up     = cam.upvector[]
+    fov    = cam.fov[]
+
+    W, H = resolution
+
+    # Compute camera-to-world (USD row-vector convention).
+    M = camera_to_world(eye, target, up)
+    xform_str = _usda_row_vector_matrix(M)
+
+    # Derive intrinsics from vertical FOV and image aspect ratio.
+    intr = camera_intrinsics(fov, W, H)
+
+    # Translate scene lights to USDA, passing camera matrix for camera-relative lights.
+    lstr = lights_usda(scene; cam_to_world = M)
+
+    # Bake camera + lights into root in ONE open_usd_string! call.
+    author_render_root!(screen;
+        resolution       = resolution,
+        camera_path      = camera_path,
+        camera_xform_str = xform_str,
+        focal_length     = intr.focal_length,
+        h_aperture       = intr.h_aperture,
+        v_aperture       = intr.v_aperture,
+        lights_str       = lstr)
     return nothing
 end

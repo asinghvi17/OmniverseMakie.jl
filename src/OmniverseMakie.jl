@@ -7,13 +7,14 @@ import LibOVRTX
 # `..LibOVRTX` resolve to OmniverseMakie.LibOVRTX (the M0 parent-module fix).
 include("binding/OV.jl")         # defines module OV with Renderer, StepResult, etc.
 include("settings.jl")           # ScreenConfig, rtx_settings_usda
-include("translation/usd.jl")    # author_render_root!, usda_mesh, usda_matrix4d
-include("translation/camera.jl") # camera_to_world, author_camera!, camera_intrinsics
-include("translation/lights.jl") # lights_usda, author_root_from_scene!, author_lights!
+include("translation/usd.jl")    # author_render_root!, author_root_from_scene!, usda_mesh
+include("translation/camera.jl") # camera_to_world, author_camera!, sync_camera!, intrinsics
+include("translation/lights.jl") # lights_usda, light_prim_path, sync_lights!, author_lights!
 include("translation/materials.jl") # displaycolor_for (plot.color → primvars:displayColor)
 include("translation/meshes.jl")    # to_ovrtx_object (Makie.Mesh → UsdGeomMesh reference)
 include("translation/primitives.jl") # to_ovrtx_object (scatter/meshscatter/lines/surface)
-include("screen.jl")             # Screen, setup_scene!, insert!, colorbuffer, activate!
+include("compute.jl")            # OvrtxRObj (Screen.plot2robj references it) — before screen.jl
+include("screen.jl")             # Screen, open-stage colorbuffer, insert!/insertplots!, activate!
 
 # Re-export every Makie name verbatim (GLMakie/src/GLMakie.jl:36-41).
 for name in names(Makie, all = true)
