@@ -51,9 +51,11 @@ renderer-creation time.
 """
 function with_restored_signals(f)
     saved = snapshot()
-    result = f()
-    restore(saved)
-    return result
+    try
+        return f()
+    finally
+        restore(saved)
+    end
 end
 
 # -- internals ------------------------------------------------------------------

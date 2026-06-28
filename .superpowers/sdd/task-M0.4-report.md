@@ -76,6 +76,71 @@ The spike's `render.jl` (no SignalGuard, ends with `_exit(0)`) exits 0/termsigna
 
 ---
 
+## Fix pass 1
+
+Two Important issues from code review were addressed in a follow-up commit.
+
+### Fix 1 — exception-safe `with_restored_signals`
+
+**Problem:** If `f()` throws, `restore(saved)` was never called, leaving SIGILL/SIGABRT/SIGBUS/SIGFPE/SIGSEGV at SIG_DFL for the rest of the session.
+
+**Fix:** Wrapped with `try/finally` so `restore` is guaranteed even on exception:
+
+```julia
+function with_restored_signals(f)
+    saved = snapshot()
+    try
+        return f()
+    finally
+        restore(saved)
+    end
+end
+```
+
+File: `src/binding/signals.jl` lines 52–59.
+
+### Fix 2 — remove unused `CEnum` root dependency
+
+**Problem:** `CEnum` was listed in root `Project.toml` `[deps]` and `[compat]`, but `src/` never uses it. It is a test-only dependency and already lives correctly in `test/Project.toml`.
+
+**Fix:** Removed via `Pkg.rm("CEnum")` (which also cleaned the compat entry automatically). `test/Project.toml` was not touched — CEnum remains there for the probe test.
+
+Root `[deps]` after fix:
+```toml
+[deps]
+LibOVRTX = "48e69356-47aa-4e0c-8089-4409475c3dd9"
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+```
+
+### Test run after fixes
+
+Command: `using Pkg; Pkg.activate("/home/juliahub/temp/omniverse-makie/OmniverseMakie.jl"); Pkg.test()`
+
+Full output:
+```
+  Activating project at `~/temp/omniverse-makie/OmniverseMakie.jl`
+     Testing OmniverseMakie
+      Status `/tmp/jl_DDwA8G/Project.toml`
+  [fa961155] CEnum v0.5.0
+  [48e69356] LibOVRTX v0.1.0 `~/temp/omniverse-makie/OmniverseMakie.jl/lib/LibOVRTX`
+  [d60c73f4] OmniverseMakie v0.1.0 `~/temp/omniverse-makie/OmniverseMakie.jl`
+  [8dfed614] Test v1.11.0
+     Testing Running tests...
+Test Summary:        | Pass  Total  Time
+M0.1 workspace loads |    2      2  0.0s
+Test Summary:      | Pass  Total  Time
+M0.2 generated ABI |    5      5  0.0s
+Test Summary:               | Pass  Total  Time
+M0.3 LibOVRTX loads + links |    2      2  0.0s
+Test Summary:                       | Pass  Total  Time
+M0.4 renderer process exits cleanly |    2      2  4.0s
+     Testing OmniverseMakie tests passed
+```
+
+All 11 tests pass (2+5+2+2). No warnings. M0.4 subprocess exitcode = 0 with "OK".
+
+---
+
 ## Interface Delivered
 
 ```julia
