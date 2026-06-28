@@ -353,6 +353,49 @@ function bind_material!(r::Renderer, geom_prim::AbstractString, material_prim::A
 end
 
 # ------------------------------------------------------------------
+# write_shader_input! — live re-write of an OmniPBR shader input (M3.4)
+# ------------------------------------------------------------------
+
+"""
+    write_shader_input!(r::Renderer, shader_prim::AbstractString, name::AbstractString,
+                        value::Union{Float32,NTuple{3,Float32}})
+
+Live re-write of an OmniPBR shader input `inputs:<name>` on the OPEN stage `shader_prim`
+(e.g. `/World/Looks/Mat_<id>/Shader`) — the M3.4 material-edit diff path.  Mirrors the
+M0 `_write_attribute!`/`write_xform!` fixed-size pattern:
+
+- a `Float32` scalar (`metallic_constant`, `reflection_roughness_constant`,
+  `opacity_constant`, …) → `dtype = {kDLFloat,32,1}`, `is_array=false`, `data=[v]`,
+  `shape=[1]`.
+- a `color3f` `NTuple{3,Float32}` (`diffuse_color_constant`, `emissive_color`) →
+  `dtype = {kDLFloat,32,3}` (3 lanes, like the xform's 16), `is_array=false`,
+  `data=[r,g,b]`, `shape=[1]`.
+
+The backing `Float32` vector is `GC.@preserve`d across the write + wait.  The
+material-editor render-test proves `inputs:diffuse_color_constant` (and shader inputs
+generally) are live-writable on an OPEN stage.  As with every open-stage edit, the
+caller restarts RT2 accumulation (one `OV.reset!` per changed frame — the M2 contract);
+this function does NOT reset.
+"""
+function write_shader_input!(r::Renderer, shader_prim::AbstractString, name::AbstractString,
+                             value::Union{Float32,NTuple{3,Float32}})
+    r.alive || error("write_shader_input! on a closed Renderer")
+    attr_name = "inputs:" * String(name)
+    if value isa Float32
+        dtype = L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(1))
+        data  = Float32[value]
+    else
+        dtype = L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(3))
+        data  = Float32[value[1], value[2], value[3]]
+    end
+    GC.@preserve data begin
+        _write_attribute!(r, shader_prim, attr_name, dtype, false, L.OVRTX_SEMANTIC_NONE,
+                          data, Int64[1])
+    end
+    return nothing
+end
+
+# ------------------------------------------------------------------
 # write_array_attribute! — write an array attribute (e.g. points)
 # ------------------------------------------------------------------
 

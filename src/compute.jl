@@ -21,15 +21,21 @@ open stage.  Records:
 - `bindings`   — persistent attribute bindings keyed by the driving compute-output
                  name; empty until M2.4's `bind_hot_attributes!` fills it (the hot
                  path), destroyed by `destroy_bindings!`.
+- `material_shader` — for a MATERIALIZED plot (M3), the PRE-AUTHORED OmniPBR shader prim
+                 path (`/World/Looks/Mat_<id>/Shader`); `nothing` for a non-materialized
+                 plot.  Set in `author_usd_prim!`'s materialized branch and read by
+                 `push_to_ovrtx!` to route a live `color`/`material` edit to a
+                 `write_shader_input!` on the open stage (M3.4) instead of `displayColor`.
 """
 mutable struct OvrtxRObj
     prim_path::String
     usd_handle::UInt64
     bindings::Dict{Symbol,Any}
+    material_shader::Union{String,Nothing}
 end
 
 OvrtxRObj(prim_path::AbstractString, usd_handle::Integer) =
-    OvrtxRObj(String(prim_path), UInt64(usd_handle), Dict{Symbol,Any}())
+    OvrtxRObj(String(prim_path), UInt64(usd_handle), Dict{Symbol,Any}(), nothing)
 
 # ==================================================================
 # M2.2 — the :ovrtx_renderobject diff node + push_to_ovrtx! (diff driver)
@@ -73,7 +79,11 @@ plot_prim_path(scene2scope::AbstractDict, scene, plot) =
 # (those have no clean in-place USD route yet) — their build still reads them from
 # the plot.  Surface (no `*_f32c`/`faces` outputs) + unknown types get NO node
 # (`Symbol[]`) and build once via the M1 `to_ovrtx_object` path.
-consumed_inputs(::Makie.Mesh)         = [:positions_transformed_f32c, :model_f32c, :faces, :normals, :scaled_color, :visible]
+# M3.4: `:material` is tracked so a live `plot.material[]` edit fires the diff node and
+# re-writes the pre-authored OmniPBR shader inputs (push route below).  It resolves as a
+# graph output for every Mesh (a plain mesh's value is `nothing` / an empty material and
+# never changes, so it never pushes — no regression to the displayColor path).
+consumed_inputs(::Makie.Mesh)         = [:positions_transformed_f32c, :model_f32c, :faces, :normals, :scaled_color, :material, :visible]
 consumed_inputs(::Makie.Scatter)      = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
 consumed_inputs(::Makie.MeshScatter)  = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
 consumed_inputs(::Makie.Lines)        = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
@@ -152,7 +162,11 @@ function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
                          texcoords            = texcoords)
         h = OV.add_usd_reference!(screen.renderer, usda, path)
         OV.bind_material!(screen.renderer, path, material_prim_path(plot))
-        return OvrtxRObj(path, h)
+        robj = OvrtxRObj(path, h)
+        # M3.4: record the pre-authored OmniPBR shader prim so a live `color`/`material`
+        # edit re-writes its inputs in place (push_to_ovrtx! material routing).
+        robj.material_shader = material_prim_path(plot) * "/Shader"
+        return robj
     end
 
     # Non-materialized: the M1 USD-native `displayColor` path, byte-unchanged.
@@ -290,6 +304,65 @@ end
 # to assert EXACTLY ONE minimal write fires per attribute edit.
 const _PUSH_OBSERVER = Ref{Any}(nothing)
 
+# Diagnostic hook (M3.4): called with the OmniPBR INPUT name on every live shader-input
+# write (`write_shader_input!`).  `nothing` (default) → no overhead.
+# `test/m3_material_live_test.jl` installs a recorder to assert EXACTLY the changed
+# inputs were written (one write per changed param) on a `color`/`material` edit.
+const _SHADER_WRITE_OBSERVER = Ref{Any}(nothing)
+
+# Write one OmniPBR shader input live + fire the shader-write observer.  Mirrors how
+# `push_to_ovrtx!` fires `_PUSH_OBSERVER`, but at the granularity of individual shader
+# inputs (a single `:material` push may re-write several inputs).
+function _write_shader_input!(r, shader_prim::AbstractString, input_name::AbstractString, value)
+    OV.write_shader_input!(r, shader_prim, input_name, value)
+    ob = _SHADER_WRITE_OBSERVER[]
+    ob === nothing || ob(input_name)
+    return nothing
+end
+
+# Constant `(r,g,b)` Float32 base colour from a resolved `:scaled_color` for a
+# MATERIALIZED plot: a single colour is used directly; a per-vertex colour collapses to
+# its average (OmniPBR has no per-vertex diffuse base — the M3.2 stretch fallback).
+function _materialized_base_rgb(scaled_color)
+    values, interp = _displaycolor_from_scaled(scaled_color, 0)
+    if interp == "constant"
+        return (Float32(values[1]), Float32(values[2]), Float32(values[3]))
+    end
+    @warn "OmniverseMakie: per-vertex `color` on a materialized plot — a live edit uses a \
+           constant AVERAGE base colour (OmniPBR has no per-vertex diffuse base)."
+    n = max(length(values), 1)
+    return (Float32(sum(v[1] for v in values) / n),
+            Float32(sum(v[2] for v in values) / n),
+            Float32(sum(v[3] for v in values) / n))
+end
+
+# Route a changed `:material` (the resolved `Attributes`) to live OmniPBR shader-input
+# writes: map each material key to its OmniPBR input name (reusing the M3.2
+# `_merge_material_input!` mapping), then `write_shader_input!` each SCALAR / color3f
+# input.  Texture-asset live-swaps (`diffuse_texture`, …) are OUT of M3.4 scope (only
+# scalar/color3f writes are proven here) — a texture-bearing change is `@warn`ed + skipped.
+function _push_material!(r, shader_prim::AbstractString, material_attrs)
+    inputs = Dict{String,Any}()
+    for k in keys(material_attrs)
+        _merge_material_input!(inputs, Symbol(k), Makie.to_value(material_attrs[k]), false, false)
+    end
+    for (input_name, v) in inputs
+        if v isa AbstractString
+            @warn "OmniverseMakie: live texture-asset swap (`$(input_name)`) is not supported \
+                   (M3.4 scope) — skipped."
+        elseif v isa NTuple{3}
+            _write_shader_input!(r, shader_prim, input_name,
+                                 (Float32(v[1]), Float32(v[2]), Float32(v[3])))
+        elseif v isa Real
+            _write_shader_input!(r, shader_prim, input_name, Float32(v))
+        else
+            @warn "OmniverseMakie: live material input `$(input_name)` has unsupported type \
+                   $(typeof(v)) — skipped."
+        end
+    end
+    return nothing
+end
+
 """
     push_to_ovrtx!(screen, robj, name::Symbol, value) -> Bool
 
@@ -300,7 +373,10 @@ prim `robj.prim_path` (no re-author):
 - `:positions_transformed_f32c` → `points` array write
 - `:normals`                    → `normals` array write
 - `:faces`                      → `faceVertexIndices` + `faceVertexCounts`
-- `:scaled_color`               → `primvars:displayColor`
+- `:scaled_color`               → `primvars:displayColor`, OR (MATERIALIZED plot, M3.4)
+                                  the OmniPBR `inputs:diffuse_color_constant` shader input
+- `:material` (M3.4)            → each changed OmniPBR scalar/color3f shader input on a
+                                  MATERIALIZED plot's `Mat_<id>/Shader` (no-op otherwise)
 - `:visible`                    → `visibility` token
 
 Returns `true` if a write was issued (an unrouted `name` is a no-op → `false`).
@@ -331,7 +407,24 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, name::Symbol, value)
     elseif name === :faces
         _push_faces!(r, prim, value)
     elseif name === :scaled_color
-        _push_displaycolor!(r, prim, value)
+        if robj.material_shader === nothing
+            _push_displaycolor!(r, prim, value)                  # USD-native displayColor (unchanged)
+        else
+            # M3.4: materialized → re-write the OmniPBR base colour in place (constant only).
+            _write_shader_input!(r, robj.material_shader, "diffuse_color_constant",
+                                 _materialized_base_rgb(value))
+        end
+    elseif name === :material
+        # M3.4: a live `plot.material[]` edit re-writes the pre-authored shader's inputs.
+        if robj.material_shader === nothing
+            # A plain plot gaining a material at runtime is a true material SWAP (needs a
+            # pre-authored material → a root re-author) — out of M3.4 scope.
+            @warn "OmniverseMakie: live `material` edit on a non-materialized plot is not \
+                   supported (a runtime material swap needs a root re-author) — skipped."
+            routed = false
+        else
+            _push_material!(r, robj.material_shader, value)
+        end
     elseif name === :visible
         _push_visibility!(r, prim, value)
     else

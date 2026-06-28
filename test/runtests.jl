@@ -55,3 +55,7 @@ include("m3_material_test.jl")
 
 # M3.3 — image textures (color=img → diffuse_texture + st UV primvar) + *_texture maps.
 include("m3_texture_test.jl")
+
+# M3.4 — live material edits (plot.color[]/plot.material[]) on the pre-authored OmniPBR
+# material via the M2 diff path (write_shader_input! on Mat_<id>/Shader, ROOT_OPENS==1).
+include("m3_material_live_test.jl")
