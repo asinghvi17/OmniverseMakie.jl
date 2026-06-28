@@ -258,6 +258,22 @@ function usda_light(l, index::Int)
     return ""
 end
 
+# Walk the scene lights (per-concrete-type 0-based counter) and return each light
+# paired with its per-type index, in scene order.  Unsupported types still increment
+# their counter so indices never desync between callers.  This is the SINGLE SOURCE
+# for per-type light indexing; both `lights_usda` and `_light_paths` consume it.
+function _enumerate_lights(lights)
+    counts = Dict{DataType,Int}()
+    out = Vector{Tuple{Any,Int}}(undef, length(lights))
+    for (i, l) in enumerate(lights)
+        T   = typeof(l)
+        idx = get(counts, T, 0)
+        counts[T] = idx + 1
+        out[i] = (l, idx)
+    end
+    return out
+end
+
 # ------------------------------------------------------------------
 # lights_usda — concatenate all scene lights into a USDA block
 # ------------------------------------------------------------------
@@ -281,10 +297,9 @@ function lights_usda(scene; cam_to_world = nothing)
     lights = scene.compute[:lights][]
     isempty(lights) && return _DEFAULT_LIGHTS_STR
 
-    counts = Dict{DataType, Int}()
-    buf    = IOBuffer()
+    buf = IOBuffer()
 
-    for l in lights
+    for (l, idx) in _enumerate_lights(lights)
         # Camera-relative DirectionalLight: transform direction to world space.
         l_emit = if l isa Makie.DirectionalLight && l.camera_relative && cam_to_world !== nothing
             d   = Float64[l.direction[1], l.direction[2], l.direction[3]]
@@ -297,9 +312,6 @@ function lights_usda(scene; cam_to_world = nothing)
             l
         end
 
-        T   = typeof(l)            # key on original type for counting
-        idx = get(counts, T, 0)
-        counts[T] = idx + 1
         write(buf, usda_light(l_emit, idx))
     end
 
@@ -333,18 +345,10 @@ function _light_render_state(l::Makie.AmbientLight)
 end
 _light_render_state(_) = nothing   # exotic light type → no live sync (stays baked)
 
-# Walk the scene lights exactly as `lights_usda` does (per-concrete-type 0-based
-# counter) so each light's prim path here EQUALS the authored path.
+# Build (light, prim_path) pairs via the shared `_enumerate_lights` counter
+# so each light's prim path here EQUALS the authored path.
 function _light_paths(lights)
-    counts = Dict{DataType,Int}()
-    out = Tuple{Any,String}[]
-    for l in lights
-        T = typeof(l)
-        idx = get(counts, T, 0)
-        counts[T] = idx + 1
-        push!(out, (l, light_prim_path(l, idx)))
-    end
-    return out
+    return [(l, light_prim_path(l, idx)) for (l, idx) in _enumerate_lights(lights)]
 end
 
 # Snapshot of every light's (path, render-state); render-state may be `nothing`.
@@ -375,9 +379,9 @@ written/baked) and push a MINIMAL live write for each changed attribute:
 spike).  Updates `screen.last_lights` and returns `true` iff anything was written
 (so `colorbuffer` knows to `OV.reset!` before rendering).
 
-A structural change (the light *set*: count or per-position type differs from the
-snapshot) is NOT a live edit — it requires a stage re-open (a later-M2 concern);
-this function refreshes the snapshot and returns `false` in that case.
+A structural change (the light *count* differs from the snapshot) is NOT a live
+edit — it requires a stage re-open (a later-M2 concern); this function refreshes
+the snapshot and returns `false` in that case.
 """
 function sync_lights!(screen, scene)
     lights   = scene.compute[:lights][]
