@@ -200,6 +200,11 @@ size `(H, W)`.
 
 Warmup frames are destroyed immediately.  The final `StepResult` is closed
 after the pixel copy.
+
+Orientation: the returned matrix is top-left-origin (row 1 = top of the image,
+right-side-up).  No vertical flip is applied.  Verified empirically by
+`test/m1_orientation_test.jl` (red_row ≈ 103 < blue_row ≈ 306 for boxes at
+world +Z vs −Z).
 """
 function render_to_matrix(r::Renderer, product::AbstractString; warmup::Int=64)
     for s in 1:(warmup - 1)

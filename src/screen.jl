@@ -151,7 +151,7 @@ Render `screen`'s scene and return the LdrColor framebuffer.
 
 On the first call this lazily authors the USD stage and inserts all plots via
 `setup_scene!`.  The matrix is returned EXACTLY as `OV.render_to_matrix` produces
-it — top-left origin (right-side-up, per the M0 readback), 4-channel `RGBA{N0f8}`,
+it — top-left origin (right-side-up, verified by `test/m1_orientation_test.jl`), 4-channel `RGBA{N0f8}`,
 with NO flip / alpha-drop / conversion.
 
 This is the kwargs form (it tolerates the `figure` keyword that Makie's
