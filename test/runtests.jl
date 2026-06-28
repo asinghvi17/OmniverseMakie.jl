@@ -45,3 +45,6 @@ include("m2_binding_test.jl")
 
 # M2.5 — leak-free delete! / delete!(scene) / empty! teardown
 include("m2_delete_test.jl")
+
+# M2.6 — hot-path throughput benchmark + gate (≥30 Hz for 10^4 xforms OR 10^5 points)
+include("m2_bench_test.jl")
