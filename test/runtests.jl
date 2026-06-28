@@ -39,3 +39,6 @@ include("m2_diffnode_test.jl")
 
 # M2.3 — USD subscene grouping (def Scope hierarchy mirroring the Makie scene tree)
 include("m2_subscene_test.jl")
+
+# M2.4 — persistent hot-path bindings (map_attribute / bind_array_attribute)
+include("m2_binding_test.jl")

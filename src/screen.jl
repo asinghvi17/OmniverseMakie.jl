@@ -81,12 +81,16 @@ Base.isopen(s::Screen) = s.renderer.alive
 """
     close(screen::Screen)
 
-Close the renderer.  In M2.1 there are no per-frame `StepResult` handles to drain
-(`render_to_matrix` closes each step internally) and no persistent bindings yet
-(`OV.destroy!` of `OvrtxRObj.bindings` is an M2.3 concern), so teardown is just
-closing the renderer.
+Tear down the screen.  First destroy every plot's persistent hot-path attribute
+bindings (M2.4 — `destroy_bindings!` per `OvrtxRObj`), which must happen while the
+Renderer is still alive (the bindings are GPU resources owned by it), THEN close the
+Renderer.  `render_to_matrix` closes each per-frame `StepResult` internally, so there
+are no step handles left to drain here.
 """
 function Base.close(s::Screen)
+    for robj in values(s.plot2robj)
+        destroy_bindings!(robj)
+    end
     close(s.renderer)
     return
 end

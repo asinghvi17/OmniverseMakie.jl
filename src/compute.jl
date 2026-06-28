@@ -4,7 +4,7 @@
 # and the M2.2 diff driver: `consumed_inputs`, `author_usd_prim!`, `push_to_ovrtx!`,
 # `register_ovrtx_robj!`, `pull_ovrtx_nodes!` — the `:ovrtx_renderobject` node that,
 # on an already-open stage, pushes one minimal C write per changed plot attribute
-# instead of re-authoring.  M2.3 fills `bindings` for the hot path.
+# instead of re-authoring.  M2.4 fills `bindings` for the hot path.
 #
 # NOTE: included inside the OmniverseMakie module, BEFORE screen.jl, because the
 # `Screen` struct references `OvrtxRObj` in its `plot2robj` field type.
@@ -18,8 +18,9 @@ open stage.  Records:
 - `prim_path`  — the USD prim the reference was added at (`/World/plot_<id>`).
 - `usd_handle` — the `ovrtx_usd_handle_t` returned by `OV.add_usd_reference!`
                  (used by `OV.remove_usd!` on delete — M2.4).
-- `bindings`   — persistent attribute bindings keyed by attribute name; empty in
-                 M2.1, filled by the hot-path work in M2.3.
+- `bindings`   — persistent attribute bindings keyed by the driving compute-output
+                 name; empty until M2.4's `bind_hot_attributes!` fills it (the hot
+                 path), destroyed by `destroy_bindings!`.
 """
 mutable struct OvrtxRObj
     prim_path::String
@@ -235,6 +236,17 @@ function _push_faces!(r, prim, faces)
     return nothing
 end
 
+# M2.4 hot path: flatten a resolved positions output (`Vector{Point3f}`) into an owned
+# Float32 buffer and write it through the persistent `point3f[]` array binding (one
+# tensor element per point; `shape = [npoints]`).  Mirrors `write_array_attribute!`'s
+# structural `reinterpret(Float32, …)` so the lanes/shape match the bound element type.
+function _push_points_binding!(binding, pts::AbstractVector)
+    src  = pts isa Vector ? pts : collect(pts)
+    data = collect(reinterpret(Float32, src))
+    OV.write_binding!(binding, data, Int64[length(src)])
+    return nothing
+end
+
 # Diagnostic hook: called with the attribute name on every `push_to_ovrtx!` write.
 # `nothing` (default) → no overhead.  `test/m2_diffnode_test.jl` installs a counter
 # to assert EXACTLY ONE minimal write fires per attribute edit.
@@ -256,13 +268,26 @@ prim `robj.prim_path` (no re-author):
 Returns `true` if a write was issued (an unrouted `name` is a no-op → `false`).
 """
 function push_to_ovrtx!(screen, robj::OvrtxRObj, name::Symbol, value)
-    r    = screen.renderer
-    prim = robj.prim_path
-    routed = true
+    r       = screen.renderer
+    prim    = robj.prim_path
+    binding = get(robj.bindings, name, nothing)   # M2.4: persistent hot-path binding (or nothing)
+    routed  = true
     if name === :model_f32c
-        OV.write_xform!(r, prim, _model_to_usd_xform(value))
+        # omni:xform — when a persistent binding exists (created once by
+        # bind_hot_attributes!), write zero-copy through the MAPPED binding; otherwise
+        # the M0 one-shot `write_attribute` path (correct, non-zero-copy fallback).
+        if binding === nothing
+            OV.write_xform!(r, prim, _model_to_usd_xform(value))
+        else
+            OV.write_mapped_xform!(binding, _model_to_usd_xform(value))
+        end
     elseif name === :positions_transformed_f32c
-        OV.write_array_attribute!(r, prim, "points", value)
+        # points — persistent `bind_array_attribute` + write when bound, else one-shot.
+        if binding === nothing
+            OV.write_array_attribute!(r, prim, "points", value)
+        else
+            _push_points_binding!(binding, value)
+        end
     elseif name === :normals
         OV.write_array_attribute!(r, prim, "normals", value)
     elseif name === :faces
@@ -279,6 +304,73 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, name::Symbol, value)
         ob === nothing || ob(name)
     end
     return routed
+end
+
+# ------------------------------------------------------------------
+# bind_hot_attributes! — create the persistent hot-path bindings (M2.4)
+# ------------------------------------------------------------------
+
+# Plot types whose `:positions_transformed_f32c` route writes a real `points` array on
+# a UsdGeomMesh / UsdGeomBasisCurves prim, so a persistent array binding is valid.
+# Scatter/MeshScatter author a UsdGeomPointInstancer (per-instance `positions`, not
+# `points`), which M2.2's push route does not yet write in place, so they get NO array
+# binding — only the universal xform binding — leaving their positions on the existing
+# path (behaviour identical to M2.3).
+_points_binding_attr(::Makie.Mesh)         = "points"
+_points_binding_attr(::Makie.Lines)        = "points"
+_points_binding_attr(::Makie.LineSegments) = "points"
+_points_binding_attr(::Any)                = nothing
+
+"""
+    bind_hot_attributes!(screen, robj, plot, args) -> OvrtxRObj
+
+Create the per-plot persistent attribute bindings ONCE (right after the plot's USD
+reference is authored) and store them in `robj.bindings`, keyed by the compute-output
+name that drives them so `push_to_ovrtx!` routes a changed attribute through the
+binding instead of re-authoring:
+
+- `:model_f32c` → an `omni:xform` binding (`OVRTX_BINDING_FLAG_OPTIMIZE`) written
+  ZERO-COPY via `map_attribute` (every plot type — the primary hot binding).
+- `:positions_transformed_f32c` → a `point3f[] points` array binding written via
+  `bind_array_attribute` + `write` (mesh / curve only — see `_points_binding_attr`).
+
+Both target the referenced prim `robj.prim_path`; the M2.4 binding spike VALIDATED
+that map/write through a persistent binding on a referenced prim honors the edit
+(xform map round-trip byte-exact; points write-through-handle scaled then reverted
+exactly).  Released by `destroy_bindings!` on `close(Screen)` / per-plot `delete!`.
+"""
+function bind_hot_attributes!(screen, robj::OvrtxRObj, plot, args)
+    r    = screen.renderer
+    prim = robj.prim_path
+    # Tier 1 (universal): omni:xform, zero-copy map, OPTIMIZE.
+    robj.bindings[:model_f32c] = OV.create_binding(
+        r, prim, "omni:xform",
+        LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(64), UInt16(16));
+        array = false, semantic = LibOVRTX.OVRTX_SEMANTIC_XFORM_MAT4x4, optimize = true)
+    # Tier 2 (mesh / curve points): point3f[] array, bind + write.
+    pname = _points_binding_attr(plot)
+    if pname !== nothing
+        robj.bindings[:positions_transformed_f32c] = OV.create_binding(
+            r, prim, pname,
+            LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(3));
+            array = true, semantic = LibOVRTX.OVRTX_SEMANTIC_NONE, optimize = false)
+    end
+    return robj
+end
+
+"""
+    destroy_bindings!(robj::OvrtxRObj) -> OvrtxRObj
+
+Destroy + clear every persistent attribute binding on `robj` (M2.4 lifetime).  Called
+by `close(Screen)` and (M2.5) per-plot `delete!`.  Safe to call after the Renderer is
+closed (`OV.destroy!` is a no-op then).
+"""
+function destroy_bindings!(robj::OvrtxRObj)
+    for b in values(robj.bindings)
+        b isa OV.Binding && OV.destroy!(b)
+    end
+    empty!(robj.bindings)
+    return robj
 end
 
 # ------------------------------------------------------------------
@@ -333,6 +425,9 @@ function register_ovrtx_robj!(screen, scene, plot)
                 # a NEW screen, scr.scene2scope (same objectids) yields the same nested
                 # path — so the reference re-nests identically on the fresh stage.
                 robj = author_usd_prim!(scr, scene, plot, args)      # (RE)BUILD on the active screen
+                # M2.4: create the persistent hot-path bindings ONCE on the fresh
+                # reference (a NEW screen rebinds against its own renderer's stage).
+                robj === nothing || bind_hot_attributes!(scr, robj, plot, args)
             else
                 robj = last.ovrtx_renderobject
                 if robj !== nothing

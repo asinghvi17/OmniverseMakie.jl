@@ -424,4 +424,195 @@ function remove_usd!(r::Renderer, handle::L.ovrtx_usd_handle_t)
     return nothing
 end
 
+# ==================================================================
+# Binding — persistent attribute bindings (M2.4 hot path)
+#
+# `ovrtx_create_attribute_binding` locks a prim + attribute name + element type so
+# repeated per-frame writes skip rebuilding the binding descriptor.  Two hot-path
+# tiers (ARCHITECTURE §6), both VALIDATED on a referenced plot prim by the M2.4
+# binding spike (omni:xform map round-trip byte-exact; points write-through-handle
+# scaled + reverted exactly):
+#   - fixed-size (`omni:xform`): `map_binding`/`unmap!` → ZERO-COPY write straight
+#     into ovrtx's internal buffer (created with OVRTX_BINDING_FLAG_OPTIMIZE).
+#   - array (`points`): `write_binding!` copies a fresh tensor through the handle.
+#
+# GC discipline mirrors `_write_attribute!`: the prim path + attribute name `String`s
+# are retained on the struct so they stay rooted for the binding's lifetime, and
+# every FFI buffer/desc is `GC.@preserve`d across the ccall + wait.
+# ==================================================================
+
+"""
+    Binding
+
+A persistent ovrtx attribute binding (handle from `ovrtx_create_attribute_binding`).
+Reused across frames; released by `destroy!` (finalizer is a backstop).  `map_handle`
+is non-zero only while a `map_binding`/`unmap!` pair is outstanding.
+"""
+mutable struct Binding
+    r::Renderer
+    handle::L.ovrtx_attribute_binding_handle_t
+    prim::String
+    attr_name::String
+    dtype::L.DLDataType
+    is_array::Bool
+    semantic::L.ovrtx_attribute_semantic_t
+    map_handle::L.ovrtx_map_handle_t   # non-zero while mapped
+    alive::Bool
+end
+
+# A zeroed `ovrtx_binding_desc_t`; it is IGNORED whenever `binding_handle != 0`
+# (the header: "If binding_handle is non-zero then it will be used, otherwise
+# binding_desc will be used"), so every map/write through a handle passes this.
+_empty_binding_desc() = L.ovrtx_binding_desc_t(
+    L.ovrtx_prim_list_t(Ptr{L.ovx_string_t}(C_NULL), Csize_t(0)),
+    L.ovx_primpath_list_t(0),
+    L.ovx_string_or_token_t(UInt64(0), L.ovx_string_t(reinterpret(Cstring, C_NULL), Csize_t(0))),
+    L.ovrtx_attribute_type_t(L.DLDataType(UInt8(0), UInt8(0), UInt16(0)), false, L.OVRTX_SEMANTIC_NONE),
+    L.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
+    L.OVRTX_BINDING_FLAG_NONE,
+)
+
+_desc_or_handle(b::Binding) = L.ovrtx_binding_desc_or_handle_t(_empty_binding_desc(), b.handle)
+
+"""
+    create_binding(r, prim, name, dtype; array=false, semantic=OVRTX_SEMANTIC_NONE,
+                   optimize=false) -> Binding
+
+Create a persistent binding locking `prim`'s `name` attribute to `dtype` (lane-based:
+`{kDLFloat,64,16}` for a 4×4 double, `{kDLFloat,32,3}` for `point3f[]`).  `array=true`
+binds a variable-length array attribute; `optimize=true` sets
+`OVRTX_BINDING_FLAG_OPTIMIZE` for the primary high-volume hot binding.  Synchronous
+(enqueue + wait); the prim list strings are preserved across the call.
+"""
+function create_binding(r::Renderer, prim::AbstractString, name::AbstractString,
+                        dtype::L.DLDataType; array::Bool=false,
+                        semantic=L.OVRTX_SEMANTIC_NONE, optimize::Bool=false)
+    r.alive || error("create_binding on a closed Renderer")
+    prim_s   = String(prim)
+    name_s   = String(name)
+    prim_arr = L.ovx_string_t[L.ovx_string(prim_s)]
+    handle   = Ref{L.ovrtx_attribute_binding_handle_t}(0)
+    flags    = optimize ? L.OVRTX_BINDING_FLAG_OPTIMIZE : L.OVRTX_BINDING_FLAG_NONE
+    GC.@preserve prim_s prim_arr name_s begin
+        prim_list   = L.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(1))
+        attr_lookup = L.ovx_string_or_token_t(UInt64(0), L.ovx_string(name_s))
+        attr_type   = L.ovrtx_attribute_type_t(dtype, array, semantic)
+        bdesc = L.ovrtx_binding_desc_t(prim_list, L.ovx_primpath_list_t(0),
+            attr_lookup, attr_type, L.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY, flags)
+        bref = Ref(bdesc)
+        GC.@preserve bref begin
+            enqueue_wait(r, L.ovrtx_create_attribute_binding(r.ptr, bref, handle),
+                         "create_attribute_binding($name)")
+        end
+    end
+    b = Binding(r, handle[], prim_s, name_s, dtype, array, semantic,
+                L.ovrtx_map_handle_t(0), true)
+    finalizer(destroy!, b)
+    return b
+end
+
+"""
+    map_binding(b::Binding; device=kDLCPU, device_id=0) -> Ptr{Cvoid}
+
+Map the binding's internal buffer for a ZERO-COPY write; returns the data pointer
+(valid ONLY until `unmap!`).  Stashes the map handle on `b`.  `ovrtx_map_attribute`
+is synchronous (no enqueue/wait).
+"""
+function map_binding(b::Binding; device=L.kDLCPU, device_id::Integer=0)
+    b.alive || error("map_binding on a destroyed Binding")
+    b.map_handle == 0 || error("map_binding: already mapped (call unmap! first)")
+    bdoh  = Ref(_desc_or_handle(b))
+    mdesc = L.ovrtx_mapping_desc_t(Int32(device), Int32(device_id))
+    out   = Ref{L.ovrtx_attribute_mapping_t}()
+    GC.@preserve bdoh begin
+        L.check(L.ovrtx_map_attribute(b.r.ptr, bdoh, mdesc, out), "map_attribute($(b.attr_name))")
+    end
+    m = out[]
+    b.map_handle = m.map_handle
+    return Ptr{Cvoid}(m.dl.data)
+end
+
+"""
+    unmap!(b::Binding)
+
+Commit + release a mapping from `map_binding` (async unmap + wait).  No-op when not
+mapped or when the Renderer is already closed.
+"""
+function unmap!(b::Binding)
+    b.map_handle == 0 && return nothing
+    b.r.alive && enqueue_wait(b.r, L.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, L.NOSYNC),
+                              "unmap_attribute")
+    b.map_handle = L.ovrtx_map_handle_t(0)
+    return nothing
+end
+
+"""
+    write_mapped_xform!(b::Binding, mat::AbstractMatrix{Float64})
+
+ZERO-COPY write of a 4×4 transform through the MAPPED fixed-size binding `b`:
+map → store the 16 row-major doubles into the internal buffer → unmap.  `mat` is in
+USD row-vector form (translation in the last row), identical to `write_xform!`; the
+16 doubles written are `vec(collect(mat'))`, so it round-trips byte-for-byte.
+"""
+function write_mapped_xform!(b::Binding, mat::AbstractMatrix{Float64})
+    @assert size(mat) == (4, 4) "write_mapped_xform! requires a 4×4 matrix, got $(size(mat))"
+    M   = vec(collect(mat'))                      # 16 row-major Float64
+    ptr = Ptr{Cdouble}(map_binding(b))
+    try
+        GC.@preserve M begin
+            @inbounds for i in 1:16
+                unsafe_store!(ptr, M[i], i)
+            end
+        end
+    finally
+        unmap!(b)
+    end
+    return nothing
+end
+
+"""
+    write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
+
+Write `data` through the persistent binding handle (array tier).  `data` is a
+contiguous, owned vector whose bytes match `b.dtype` (e.g. a flattened `Float32`
+buffer for a `point3f[]` binding); `shape` is the per-prim element count
+(`[npoints]`).  Mirrors `_write_attribute!`'s `GC.@preserve` discipline.
+"""
+function write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
+    b.alive || error("write_binding! on a destroyed Binding")
+    strides = Int64[1]
+    bdoh    = Ref(_desc_or_handle(b))
+    GC.@preserve data shape strides bdoh begin
+        dl = L.DLTensor(Ptr{Cvoid}(pointer(data)), L.DLDevice(L.kDLCPU, Int32(0)),
+                        Int32(1), b.dtype, pointer(shape), pointer(strides), UInt64(0))
+        dl_arr = L.DLTensor[dl]
+        GC.@preserve dl_arr begin
+            ibuf = Ref(L.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
+                       Ptr{UInt8}(C_NULL), Csize_t(0), L.NOSYNC, L.NOSYNC))
+            enqueue_wait(b.r, L.ovrtx_write_attribute(b.r.ptr, bdoh, ibuf, L.OVRTX_DATA_ACCESS_SYNC),
+                         "write_attribute(binding:$(b.attr_name))")
+        end
+    end
+    return nothing
+end
+
+"""
+    destroy!(b::Binding)
+
+Release the persistent binding (`ovrtx_destroy_attribute_binding`).  Idempotent;
+unmaps first if still mapped; a no-op once the Renderer is closed (the GPU pool is
+already freed).
+"""
+function destroy!(b::Binding)
+    b.alive || return nothing
+    if b.r.alive
+        b.map_handle == 0 || unmap!(b)
+        enqueue_wait(b.r, L.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle),
+                     "destroy_attribute_binding")
+    end
+    b.map_handle = L.ovrtx_map_handle_t(0)
+    b.alive = false
+    return nothing
+end
+
 end # module OV
