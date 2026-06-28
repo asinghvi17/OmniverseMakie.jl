@@ -1,5 +1,6 @@
 name = "OmniverseMakie"
 uuid = "d60c73f4-20f1-48ea-a3b4-a683962494cb"
+authors = ["Anshul Singhvi <anshulsinghvi@gmail.com>"]
 version = "0.1.0"
 
 [deps]
@@ -14,5 +15,4 @@ projects = ["lib/LibOVRTX"]
 
 [compat]
 LibOVRTX = "0.1"
-Libdl = "1.11.0"
 julia = "1.12"
