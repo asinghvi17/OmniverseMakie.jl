@@ -14,3 +14,4 @@ end
 include("libovrtx_struct_test.jl")
 include("libovrtx_load_test.jl")
 include("m0_signals_test.jl")
+include("m0_renderer_test.jl")
