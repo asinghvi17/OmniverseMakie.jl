@@ -1,0 +1,15 @@
+name = "LibOVRTX"
+uuid = "48e69356-47aa-4e0c-8089-4409475c3dd9"
+version = "0.1.0"
+authors = ["juliahub "]
+
+[deps]
+CEnum = "fa961155-64e5-5f13-b03f-caf6b980ea82"
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+Libglvnd_jll = "7e76a0d4-f3c7-5321-8279-8d96eeed0f29"
+
+[compat]
+CEnum = "0.5.0"
+Libdl = "1.11.0"
+Libglvnd_jll = "1"
+julia = "1.12"
