@@ -100,19 +100,32 @@ end
 """
     setup_scene!(screen::Screen) -> Screen
 
-Lazily author the full USD stage for `screen.scene` and insert every plot's USD
-geometry.  Runs once, on the first `colorbuffer`.
+Author the full USD stage for `screen.scene` and insert every plot's USD geometry.
+Called by `colorbuffer` on EVERY render (not just the first) so that `Makie.record`
+— which calls `colorbuffer` repeatedly on the same `Screen` — gets a fresh stage
+that reflects the current scene state each frame.
 
-ORDER IS CRITICAL: `author_root_from_scene!` re-opens the stage (wiping any added
-references), so the camera + lights root MUST be authored BEFORE any plot reference
-is added.  The camera pose is read from the first descendant `Camera3D` scene; the
-stage is rendered at `screen.fb_size` (the root scene size).
+M1.6 re-author-per-call fix:
+  - `empty!(screen.plot2usd)` first: clears the idempotency guard in `insert!` so
+    plots are re-added even after the stage wipe.
+  - `author_root_from_scene!` re-opens the stage (wipes all refs) with the CURRENT
+    camera + lights baked in.
+  - `Makie.insertplots!` re-adds every plot's USD reference on the fresh stage.
+
+For a single `save` call, this runs once per Screen (same as M1.5).  For `record`,
+it runs per frame, reflecting scene mutations (camera orbit, model changes, etc.)
+between frames.  Per-frame re-open may accumulate reference handles — acceptable
+for M1; M2 manages handles via diffing.
+
+ORDER IS CRITICAL: `author_root_from_scene!` wipes refs, so plots must be added AFTER.
 """
 function setup_scene!(screen::Screen)
     scene = screen.scene
     scene === nothing && error("OmniverseMakie.setup_scene!: screen has no scene")
+    # Clear so the insert! idempotency guard doesn't skip re-insertion on a wiped stage.
+    empty!(screen.plot2usd)
     cam_scene = something(_scene_for_camera(scene), scene)
-    # 1. author root (camera + lights) in ONE open_usd_string! — this wipes refs.
+    # 1. author root (camera + lights) in ONE open_usd_string! — this wipes all refs.
     author_root_from_scene!(screen, cam_scene; resolution = screen.fb_size)
     # 2. THEN add each plot's USD reference (recurse over scene.plots + children).
     Makie.insertplots!(screen, scene)
@@ -149,10 +162,15 @@ end
 
 Render `screen`'s scene and return the LdrColor framebuffer.
 
-On the first call this lazily authors the USD stage and inserts all plots via
-`setup_scene!`.  The matrix is returned EXACTLY as `OV.render_to_matrix` produces
-it — top-left origin (right-side-up, verified by `test/m1_orientation_test.jl`), 4-channel `RGBA{N0f8}`,
-with NO flip / alpha-drop / conversion.
+Calls `setup_scene!(screen)` on EVERY call (M1.6 re-author-per-call fix).  This
+is required for `Makie.record`, which calls `colorbuffer` repeatedly on the same
+`Screen` while the scene mutates between frames — without re-authoring, frames 2..N
+would re-render the stale frame-1 stage.  For a single `save`, the overhead is
+one extra `empty!` call on an already-empty dict (negligible).
+
+The matrix is returned EXACTLY as `OV.render_to_matrix` produces it — top-left
+origin (right-side-up, verified by `test/m1_orientation_test.jl`), 4-channel
+`RGBA{N0f8}`, with NO flip / alpha-drop / conversion.
 
 This is the kwargs form (it tolerates the `figure` keyword that Makie's
 `backend_show` → `save` path passes).  `ImageStorageFormat` dispatch
@@ -160,14 +178,19 @@ This is the kwargs form (it tolerates the `figure` keyword that Makie's
 `colorbuffer(::MakieScreen, ::ImageStorageFormat)`, which calls this method.
 """
 function Makie.colorbuffer(screen::Screen; kw...)
-    screen.setup || setup_scene!(screen)
+    setup_scene!(screen)   # always re-author (M1.6 fix: correct for record multi-frame)
     return OV.render_to_matrix(screen.renderer, screen.product; warmup = screen.config.warmup)
 end
 
-# Minimal PNG showability so `save(fig, "x.png")` / `show(io, MIME"image/png", fig)`
-# route through Makie's generic backend_show → our colorbuffer.  M1.6 generalizes
-# (jpeg + record + the offscreen constructors).
-Makie.backend_showable(::Type{Screen}, ::MIME"image/png") = true
+# PNG showability: `save(fig, "x.png")` / `Base.show(io, MIME"image/png", fig)` and
+# Jupyter auto-display both check `backend_showable` → Makie's generic `backend_show`
+# → our `colorbuffer`.
+Makie.backend_showable(::Type{Screen}, ::MIME"image/png")  = true
+# JPEG showability: `Base.showable(MIME"image/jpeg", fig) = true` so Jupyter and
+# `Base.show(io, MIME"image/jpeg", fig)` work.  Note: `FileIO.save("x.jpg", fig)`
+# bypasses `backend_showable` (goes direct getscreen → backend_show) and already
+# worked in M1.5; this line makes `Base.showable` consistent.
+Makie.backend_showable(::Type{Screen}, ::MIME"image/jpeg") = true
 
 # ------------------------------------------------------------------
 # activate! — register OmniverseMakie as the current Makie backend
