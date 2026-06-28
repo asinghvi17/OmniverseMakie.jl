@@ -8,7 +8,7 @@ camera controllers work, and display the result in an interactive window with a
 GPU-direct (no-CPU-roundtrip) blit.
 
 > Status: **design / pre-implementation.** This document is the agreed architecture.
-> The implementation plan (milestones M0–M4) follows in a separate plan doc.
+> The implementation plan (milestones M0–M6) follows in a separate plan doc.
 
 ---
 
@@ -362,6 +362,8 @@ code**; camera change → update camera `omni:xform` + `reset()`.
 
 ## 9. Milestones (streaming shelved)
 
+> Reordered 2026-06-28 (option B): examples land before interactivity, and materials are pulled forward — so the example gallery has full materials. Old order was M3 interactive · M4 depth · M5 examples.
+
 - **M0 — binding spike.** Clang.jl-generate `LibOVRTX`; `dlopen` + `OVRTX_LIBRARY_PATH` +
   `libOpenGL` global load; port the C `minimal` path: `init → open_usd(local) → step →
   map LdrColor → PNG` through pure `ccall`. (ovrtx pipeline already validated via Python;
@@ -371,13 +373,18 @@ code**; camera change → update camera `omni:xform` + `reset()`.
   `record`. Author via inline USDA + references.
 - **M2 — ComputePipeline diff path.** `:ovrtx_renderobject` node; live attribute/transform/
   color updates via map/array-bindings; accumulation reset; **benchmark the hot path**.
-- **M3 — interactive window.** GLMakie display (CPU blit) + event injection; `cam3d!`
-  orbit/zoom; on-demand loop + progressive refinement; dynamic add/delete end-to-end.
-- **M4 — depth.** GPU-direct CUDA-GL blit; materials (OmniPBR/MaterialX); AOVs
-  (Depth/Normal/ID) → picking (`scene.events`); subscene-leak fixes.
-- **M5 — examples gallery.** Adapt the [RPRMakieNotes](https://github.com/lazarusA/RPRMakieNotes)
+- **M3 — materials.** OmniPBR / MaterialX: Makie shading/PBR (metalness/roughness/
+  transparency) → MDL `OmniPBR`; backend `material=` escape hatch (MDL/MaterialX path);
+  runtime material swap via `material:binding`. Enables the examples gallery to use full
+  materials.
+- **M4 — examples gallery.** Adapt the [RPRMakieNotes](https://github.com/lazarusA/RPRMakieNotes)
   and [raydemo](https://github.com/simondanisch/raydemo) scenes into `examples/` (originals
-  untouched) — the end-to-end showcase that the backend handles real-world scenes.
+  untouched) — the end-to-end showcase that the backend handles real-world scenes, now with
+  full OmniPBR materials available from M3.
+- **M5 — interactive viewport.** GLMakie display (CPU blit) + event injection; `cam3d!`
+  orbit/zoom; on-demand loop + progressive refinement; dynamic add/delete end-to-end.
+- **M6 — GPU-direct + picking + hardening.** GPU-direct CUDA-GL blit (no CPU roundtrip);
+  AOVs (Depth/Normal/ID) → picking (`scene.events`); subscene-leak fixes.
 
 (Deferred: 2D/text/axes parity; remote streaming — WGLMakie-style websocket then GStreamer
 `webrtcsink` sidecar — see `references/notes/wire-protocol-and-webrtc.md`.)
@@ -388,7 +395,7 @@ code**; camera change → update camera `omni:xform` + `reset()`.
 
 | Risk | Mitigation |
 |---|---|
-| **carb breakpad crash reporter** hijacks signals → Julia crashes at process exit | Snapshot/restore POSIX signal handlers (SIGSEGV/ABRT/BUS/ILL/FPE) around `ovrtx_create_renderer` (plan Task M0.4); re-verify for the long-lived interactive loop (M3.3). Discovered in Spike A. |
+| **carb breakpad crash reporter** hijacks signals → Julia crashes at process exit | Snapshot/restore POSIX signal handlers (SIGSEGV/ABRT/BUS/ILL/FPE) around `ovrtx_create_renderer` (plan Task M0.4); re-verify for the long-lived interactive loop (M5.3). Discovered in Spike A. |
 | ovrtx is **preview 0.3** (API stability "later 2026") | Pin a version; isolate churn in `LibOVRTX`; regen via `gen/` |
 | Path-tracer interactivity latency on A5000 | RT2 + denoiser + low-sample-while-moving + progressive idle accumulation; benchmark in M2 |
 | Hot-path throughput ("fast *if*…") | M2 benchmark of map/array-binding writes for N transforms/points per frame |

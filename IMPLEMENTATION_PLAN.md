@@ -6,7 +6,7 @@
 
 **Architecture:** Three layers — (1) `LibOVRTX` subpackage: Clang.jl-generated raw `ccall` bindings + a hand-written loader; (2) `OV` high-level GC-aware wrapper + Makie⇄USD translation; (3) `Screen <: Makie.MakieScreen` with the backend contract, an on-demand render loop, event injection, and GPU-direct display. USD *is* the wire format; the `:ovrtx_renderobject` compute node *is* the diff engine. Full design rationale: `ARCHITECTURE.md`.
 
-**Tech Stack:** Julia 1.12 · ovrtx 0.3.0 (`libovrtx-dynamic.so`) · Makie 0.24.12 / ComputePipeline 0.1.8 / GLMakie 0.13.12 · CEnum · GeometryBasics · Colors · CUDA.jl (M3/M4) · Clang.jl (codegen only).
+**Tech Stack:** Julia 1.12 · ovrtx 0.3.0 (`libovrtx-dynamic.so`) · Makie 0.24.12 / ComputePipeline 0.1.8 / GLMakie 0.13.12 · CEnum · GeometryBasics · Colors · CUDA.jl (M5/M6) · Clang.jl (codegen only).
 
 **Validation backing this plan (all run live on this machine — NVIDIA RTX A5000, Julia 1.12.6):**
 - The full Python pipeline renders `torus-plane.usda` → RT2 → DLPack → PNG (`references/validation/torus-A5000.png`).
@@ -54,11 +54,12 @@ Iterate with the **`julia` MCP** (`julia_eval`, `env_path="…/OmniverseMakie.jl
 | **M0** | `LibOVRTX` + `OV` wrapper: render `torus-plane.usda` → `Matrix{RGBA}` and apply a live `omni:xform` update, **all from Julia, process exits 0** | Julia-native render proven; crash reporter neutralized |
 | **M1** | `Screen` + static `Scene→USD` for the 3D core; `colorbuffer`/`save` produce a correct image of a real Makie `Scene` | `mesh!`/`scatter!` scene → PNG via Makie |
 | **M2** | `:ovrtx_renderobject` diff node + hot-path bindings + dynamic add/delete; live attribute/transform/color edits | benchmark meets interactive rates; add/delete leak-free |
-| **M3** | Interactive GLMakie window: CPU-blit display, event injection, `cam3d!` orbit/zoom, on-demand loop + RT2 progressive refinement | orbit a live RTX viewport |
-| **M4** | Depth: GPU-direct CUDA-GL blit, materials (OmniPBR/MaterialX), AOV picking, subscene hardening | no-CPU-roundtrip display; pick + materials |
-| **M5** | Examples gallery: adapt RPRMakieNotes + raydemo scenes into `examples/` (originals untouched) | a real scene gallery renders through OmniverseMakie |
+| **M3** | Materials: OmniPBR / MaterialX — Makie PBR → MDL `OmniPBR`; `material=` escape hatch; runtime swap | PBR materials render; runtime material swap works |
+| **M4** | Examples gallery: adapt RPRMakieNotes + raydemo scenes into `examples/` (originals untouched); full materials available from M3 | a real scene gallery renders through OmniverseMakie |
+| **M5** | Interactive viewport: GLMakie window (CPU blit), event injection, `cam3d!` orbit/zoom, on-demand loop + RT2 progressive refinement | orbit a live RTX viewport |
+| **M6** | GPU-direct CUDA-GL blit + AOV picking + subscene hardening | no-CPU-roundtrip display; pick + leak-free subscenes |
 
-M0 is fully detailed below (TDD steps + complete code from the spikes). **M1–M5 are specified at task granularity** — each task names exact files, the interfaces it consumes/produces, the novel code in full, and its test. Per writing-plans guidance for a multi-phase backend, **M1–M5 tasks are expanded into their own bite-sized step lists just before each milestone is executed**, because their concrete signatures depend on what the previous milestone surfaces (e.g. the exact `OV` wrapper API M1 consumes is produced by M0). Do not start a milestone before its predecessor's gate is green.
+M0 is fully detailed below (TDD steps + complete code from the spikes). **M1–M6 are specified at task granularity** — each task names exact files, the interfaces it consumes/produces, the novel code in full, and its test. Per writing-plans guidance for a multi-phase backend, **M1–M6 tasks are expanded into their own bite-sized step lists just before each milestone is executed**, because their concrete signatures depend on what the previous milestone surfaces (e.g. the exact `OV` wrapper API M1 consumes is produced by M0). Do not start a milestone before its predecessor's gate is green.
 
 ---
 
@@ -76,17 +77,17 @@ omniverse-makie/                         # working dir (holds the repo + referen
     │   ├── binding/
     │   │   ├── OV.jl                      # GC-aware Renderer/StepResult/MappedVar/AttrBinding + async lifecycle (M0.5–0.7)
     │   │   ├── signals.jl                 # carb crash-reporter neutralization (M0.4)
-    │   │   └── dlpack.jl                  # DLTensor → Array/CuArray wrapping (M0.6, M4.1)
+    │   │   └── dlpack.jl                  # DLTensor → Array/CuArray wrapping (M0.6, M6.1)
     │   ├── translation/
     │   │   ├── usd.jl                     # inline-USDA builders, references, render-config root (M1.2)
-    │   │   ├── camera.jl  lights.jl  materials.jl                                          (M1.3,1.4,M4.2)
+    │   │   ├── camera.jl  lights.jl  materials.jl                                          (M1.3,1.4,M3.1)
     │   │   ├── meshes.jl  scatter.jl  lines.jl  surface.jl  volume.jl  # to_ovrtx_object   (M1.5,1.7)
     │   ├── compute.jl                     # :ovrtx_renderobject node + push_to_ovrtx! + bind_hot_attributes! (M2.2,2.3)
     │   ├── screen.jl                      # Screen <: MakieScreen + contract + insert!/delete!/empty! (M1.1,M2.1,2.4)
-    │   ├── renderloop.jl                  # on-demand loop, progressive refinement, requires_update (M3.3)
-    │   ├── events.jl                      # scene.events.* injection + render_tick               (M3.2)
-    │   ├── display.jl                     # GLMakie image! target; CPU blit + CUDA-GL blit        (M3.1,M4.1)
-    │   └── settings.jl                    # RT2/PathTracing/Minimal, samples, bounces             (M1.2,M3.3)
+    │   ├── renderloop.jl                  # on-demand loop, progressive refinement, requires_update (M5.3)
+    │   ├── events.jl                      # scene.events.* injection + render_tick               (M5.2)
+    │   ├── display.jl                     # GLMakie image! target; CPU blit + CUDA-GL blit        (M5.1,M6.1)
+    │   └── settings.jl                    # RT2/PathTracing/Minimal, samples, bounces             (M1.2,M5.3)
     ├── lib/LibOVRTX/                      # subpackage (raw bindings)
     │   ├── Project.toml                   # name=LibOVRTX; deps CEnum, Libdl, Libglvnd_jll          (M0.1)
     │   ├── src/
@@ -94,7 +95,7 @@ omniverse-makie/                         # working dir (holds the repo + referen
     │   │   └── libovrtx_api.jl            # GENERATED 1:1 ccalls (verbatim)                         (M0.2)
     │   └── gen/  generator.jl  generator.toml  ovrtx_umbrella.h  Project.toml                       (M0.2)
     ├── test/   runtests.jl + per-milestone test files
-    ├── examples/   ported scene gallery — RPRMakieNotes + raydemo               (M5)
+    ├── examples/   ported scene gallery — RPRMakieNotes + raydemo               (M4)
     └── ext/    (future: CUDA interop extension)
 ```
 
@@ -477,7 +478,7 @@ end # module
 - `open_usd!(r, path::AbstractString)` / `open_usd_string!(r, usda::AbstractString)` — sync (enqueue+wait)
 - `step!(r, product::AbstractString; dt=1/60) -> StepResult`
 - `struct StepResult; r::Renderer; handle::L.ovrtx_step_result_handle_t; open::Bool; end`; `Base.close(::StepResult)` → `destroy_results`
-- `map_cpu(sr::StepResult, name="LdrColor") -> (pixels::Array{UInt8,3} [C,W,H], W::Int, H::Int)` (fetch + tree-walk + map CPU + **copy before unmap** + unmap). The CUDA-array analog `map_cuda_array` is added in M4.1.
+- `map_cpu(sr::StepResult, name="LdrColor") -> (pixels::Array{UInt8,3} [C,W,H], W::Int, H::Int)` (fetch + tree-walk + map CPU + **copy before unmap** + unmap). The CUDA-array analog `map_cuda_array` is added in M6.1.
 - `render_to_matrix(r, product; warmup=64) -> Matrix{RGBA{N0f8}}` (convenience: warmup loop + `map_cpu` + reshape `[C,W,H]`→`Matrix`)
 
 - [ ] **Step 1: Write the failing test** (subprocess renders the torus, asserts non-black + exit 0):
@@ -551,7 +552,7 @@ function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
     return (pixels, Int(W), Int(H))                 # pixels is [C,W,H]
 end
 ```
-`render_to_matrix` warms up `warmup` steps then maps the last and reshapes `[C,W,H]`→`Matrix{RGBA{N0f8}}` (`dlpack.jl` holds the `[C,W,H]`→`RGBA` reinterpret + the M3 y-flip; M0 just asserts non-black, so any orientation passes).
+`render_to_matrix` warms up `warmup` steps then maps the last and reshapes `[C,W,H]`→`Matrix{RGBA{N0f8}}` (`dlpack.jl` holds the `[C,W,H]`→`RGBA` reinterpret + the M5 y-flip; M0 just asserts non-black, so any orientation passes).
 
 - [ ] **Step 4: Run it** → PASS (1080×1920, all non-black, exit 0).
 
@@ -611,8 +612,8 @@ Each task below carries Files / Interfaces / key code / Test / Acceptance. Expan
       config::ScreenConfig
       requires_update::Bool
       scene::Union{Nothing, Makie.Scene}
-      render_tick::Observable{Makie.TickState}   # M3
-      display_target::Any                   # M3 GLMakie image!/screen; nothing offscreen
+      render_tick::Observable{Makie.TickState}   # M5
+      display_target::Any                   # M5 GLMakie image!/screen; nothing offscreen
   end
   struct ScreenConfig
       samples::Int                          # offline PathTracing SPP (default 512)
@@ -664,7 +665,7 @@ Each task below carries Files / Interfaces / key code / Test / Acceptance. Expan
   Base.display(screen::Screen, scene::Makie.Scene)               # author root+camera+lights+plots, set requires_update
   Base.insert!(screen::Screen, scene, plot::Plot)               # build-once: recurse plot.plots; atomic -> to_ovrtx_object
   ```
-- **Key code:** `colorbuffer` = `author/refresh if needed → warmup `config.warmup` steps (RT2) or one PathTracing step → `OV.map_cpu` → `[C,W,H]`→`Matrix{RGB{N0f8}}` with the y-flip/permute matching GLMakie's `JuliaNative` convention (`makie-backend-contract.md §6.6`). `insert!` recurses `plot.plots` (Spike B: called once-per-parent) and is idempotent via `haskey(screen.plot2robj, objectid(plot))`. Material: scalar `color`→`primvars:displayColor`; matrix/colormap→per-vertex `displayColor` or texture (adapt RPRMakie's 4-way `mesh_material` branch); MDL `OmniPBR` deferred to M4. Backend `material=` escape hatch like RPRMakie.
+- **Key code:** `colorbuffer` = `author/refresh if needed → warmup `config.warmup` steps (RT2) or one PathTracing step → `OV.map_cpu` → `[C,W,H]`→`Matrix{RGB{N0f8}}` with the y-flip/permute matching GLMakie's `JuliaNative` convention (`makie-backend-contract.md §6.6`). `insert!` recurses `plot.plots` (Spike B: called once-per-parent) and is idempotent via `haskey(screen.plot2robj, objectid(plot))`. Material: scalar `color`→`primvars:displayColor`; matrix/colormap→per-vertex `displayColor` or texture (adapt RPRMakie's 4-way `mesh_material` branch); MDL `OmniPBR` deferred to M3. Backend `material=` escape hatch like RPRMakie.
 - **Test:** `fig = Figure(); ax = LScene(fig[1,1]); mesh!(ax, Rect3f(...)); scatter is M1.7`. `img = colorbuffer(ax.scene)`; assert size + non-black; `save(tmp*".png", fig)` writes a valid PNG. Subprocess, exit 0.
 - **Acceptance:** a real Makie `Scene` with a mesh renders to a correct image; `save`/`record` work via `colorbuffer`.
 
@@ -758,107 +759,115 @@ Each task below carries Files / Interfaces / key code / Test / Acceptance. Expan
 ### Task M2.5: Hot-path benchmark (de-risk gate)
 - **Files:** `OmniverseMakie/bench/hot_path.jl`. Test: a threshold assertion.
 - **Interfaces — produces:** a benchmark animating N transforms (map) and N points (bind+write) per frame, reporting updates/sec and frame time.
-- **Acceptance:** map/bind throughput sustains interactive rates (target: ≥30 Hz for ~10⁴ instance transforms or ~10⁵ points) on the A5000. Record the numbers in `bench/RESULTS.md`. If below target, escalate to GPU-resident DLPack writes before M3.
+- **Acceptance:** map/bind throughput sustains interactive rates (target: ≥30 Hz for ~10⁴ instance transforms or ~10⁵ points) on the A5000. Record the numbers in `bench/RESULTS.md`. If below target, escalate to GPU-resident DLPack writes before M5.
 
 **M2 GATE:** live edits push minimal writes; add/delete is leak-free; benchmark meets target. ✅ → M3.
 
 ---
 
-# Milestone M3 — Interactive window
+# Milestone M3 — Materials
 
-**Outcome:** a GLMakie window shows the live RTX viewport; `cam3d!` orbits/zooms; the on-demand loop renders only when dirty and progressively refines (RT2). CPU blit. Add GLMakie + CUDA to deps.
+**Outcome:** Makie PBR attributes (metalness/roughness/transparency) translate to MDL `OmniPBR` in the USD stage; a `material=` escape hatch accepts raw MDL/MaterialX; runtime material swap via `material:binding` write. This milestone is pulled forward so the Examples gallery (M4) has full materials available.
 
-### Task M3.1: GLMakie display target + CPU blit
-- **Files:** `src/display.jl`, `src/screen.jl` (`display` window path). Test: `test/m3_display_test.jl` (headed; skip if no display).
-- **Interfaces — produces:** `open_window!(screen, scene)` — open a GLMakie `Screen`, plot a fullscreen `image!` at frame size, store it as `screen.display_target`; `present_cpu!(screen, pixels)` — write the mapped `LdrColor` into the `image!` data Observable (one host roundtrip; `cuda-gl-interop.md §5`).
-- **Acceptance:** ovrtx frames appear in a GLMakie window.
-
-### Task M3.2: Event injection + `render_tick`
-- **Files:** `src/events.jl`. Test: `test/m3_events_test.jl`.
-- **Interfaces — produces:** `connect_screen(scene, screen)` overloads writing GLMakie window input into `scene.events.*` (mouseposition px/upper-left, mousebutton, scroll, keyboard, resize) per `makie-backend-contract.md §5.3`; `screen.render_tick` bumped each loop iteration to drive mouse-position polling + `frame_tick`.
-- **Acceptance:** mouse/keyboard events reach `scene.events`; `ispressed`/`mouseposition` work.
-
-### Task M3.3: On-demand render loop + progressive refinement
-- **Files:** `src/renderloop.jl`, `src/settings.jl`. Test: `test/m3_loop_test.jl`.
-- **Interfaces — produces:** `start_renderloop!(screen)` (`@async`, GL context on the render task per `cuda-gl-interop.md §2`); each iteration `pollevents → poll_updates (pull every `plot2robj` node) → if requires_update or still accumulating: step! + present`; `requires_update` set by the diff node, `add_scene!` listeners, and `on(scene.camera.projectionview)`. RT2: low-sample denoised while moving, keep accumulating when idle, `OV.reset!` on any change (`ARCHITECTURE.md §8.2`).
-- **Key code:** `poll_updates` mirrors GLMakie (`computepipeline.md §3c`): `try plot.attributes[:ovrtx_renderobject][] catch; ComputePipeline.mark_resolved!(node) end`. **Run the renderloop with the signal guard applied** (the renderer lives across the whole loop; ensure the crash-reporter fix from M0.4 holds for a long-lived in-process renderer + window teardown).
-- **Acceptance:** idle scene converges and stops; any change re-renders; no busy-spin.
-
-### Task M3.4: End-to-end interactive + live add/delete
-- **Files:** integration. Test: `test/m3_interactive_test.jl` (scripted camera moves via `update_cam!`, assert frames change + accumulation resets).
-- **Interfaces — produces:** `update_camera!` wired to `on(scene.camera.projectionview)` → re-author camera xform + `reset!`. Confirm `cam3d!` orbit/zoom and live `plot!`/`delete!` during the loop.
-- **Acceptance:** a user can `display(fig)`, orbit/zoom a path-traced scene, and add/remove plots live.
-
-**M3 GATE:** interactive orbit of a live RTX viewport with progressive refinement and live add/delete. ✅ → M4.
-
----
-
-# Milestone M4 — Depth
-
-### Task M4.1: GPU-direct CUDA-GL blit (no CPU roundtrip)
-- **Files:** `src/display.jl`, `ext/OmniverseMakieCUDAExt.jl`. Test: `test/m4_gpu_blit_test.jl`.
-- **Interfaces — produces:** `OV.map_cuda_array(sr, name="LdrColor")` (CUDA-array analog of M0.6 `map_cpu`, mode `OVRTX_MAP_DEVICE_TYPE_CUDA_ARRAY`, returns the `CUarray` + `cuda_sync.wait_event`); `present_gpu!(screen, ...)` — `cuGraphicsGLRegisterImage` the `image!`'s `Texture.id` once → per frame map/`SubResourceGetMappedArray`/`cuMemcpy2D`/unmap, event-gated `ovrtx_unmap` (`cuda-gl-interop.md §3–4`). Runs on the GLMakie render task; falls back to `present_cpu!`.
-- **Acceptance:** display path uses no host roundtrip; visually identical to CPU blit; measurable latency drop.
-
-### Task M4.2: Materials — OmniPBR / MaterialX
-- **Files:** `src/translation/materials.jl`. Test: `test/m4_materials_test.jl`.
+### Task M3.1: OmniPBR / MaterialX translation
+- **Files:** `src/translation/materials.jl`. Test: `test/m3_materials_test.jl`.
 - **Interfaces — produces:** Makie shading/PBR (metalness/roughness/transparency) → MDL `OmniPBR`; backend `material=` escape hatch (MDL/MaterialX path); runtime swap = write `material:binding`.
 - **Acceptance:** PBR materials render; runtime material swap works.
 
-### Task M4.3: AOVs + picking
-- **Files:** `src/screen.jl` (pick), `src/settings.jl` (extra RenderVars). Test: `test/m4_pick_test.jl`.
-- **Interfaces — produces:** add `Depth`/`Normal`/`Id` RenderVars; `Makie.pick(scene, screen, xy)` via `ovrtx_enqueue_pick_query` or the ID AOV → `screen.events`.
-- **Acceptance:** `pick`/`mouseover` return the plot under the cursor.
-
-### Task M4.4: Subscene hardening
-- **Files:** `src/screen.jl`. Test: `test/m4_subscene_test.jl`.
-- **Interfaces — produces:** refcounted shared resources; contiguous ScreenID remap; eager empty-subscene registration (optional `on(parent.children)`); fix the GLMakie gaps catalogued in `dynamic-add-delete.md §5`.
-- **Acceptance:** stress add/remove of nested subscenes leaves zero leaks.
-
-**M4 GATE:** GPU-direct display + materials + picking + leak-free subscenes. ✅ → v1 complete.
-
-(Deferred beyond v1: 2D/text/axes parity; remote streaming — `references/notes/wire-protocol-and-webrtc.md`.)
+**M3 GATE:** PBR materials render via OmniPBR; `material=` escape hatch accepts MDL/MaterialX; runtime swap works. ✅ → M4.
 
 ---
 
-# Milestone M5 — Examples gallery
+# Milestone M4 — Examples gallery
 
-**Outcome:** a set of real, recognizable path-traced scenes rendering through OmniverseMakie, adapted from two existing Makie ray-tracing galleries into `OmniverseMakie.jl/examples/`. **The original repos are never edited** — they live read-only under `references/`; we copy/adapt out of them. This is the end-to-end validation that the backend handles real-world scenes, and the project's showcase.
+**Outcome:** a set of real, recognizable path-traced scenes rendering through OmniverseMakie, adapted from two existing Makie ray-tracing galleries into `OmniverseMakie.jl/examples/`. **The original repos are never edited** — they live read-only under `references/`; we copy/adapt out of them. This is the end-to-end validation that the backend handles real-world scenes, and the project's showcase. Full OmniPBR materials are available from M3.
 
 Source galleries (both are Makie backends, so the *plotting* code ports closely; only backend-specific bits — `activate!`, materials, camera/lights — are translated):
 - **RPRMakieNotes** (`references/RPRMakieNotes/scripts/`, ~19 scripts): earth/earthquakes, glass & material balls, transparent + uber materials, volumes, sphere+light studies, freetype text, point fonts, submarine cables. RPRMakie API → OmniverseMakie.
 - **raydemo** (`references/raydemo/`, ~20 scene folders): Crown, KillerooGold, BlackHole, Materials, Plants, ProtPlot (proteins), Volumes (bunny cloud, clouds, terrain), GLTF (drone, spacecraft), Waterlily smoke sims, Trixi/koeln flooding. RayMakie/Hikari API → OmniverseMakie.
 
-### Task M5.1: Inventory + triage
+### Task M4.1: Inventory + triage
 - **Files:** `examples/README.md` (gallery index + port-status table).
-- **Interfaces — produces:** a table classifying every source scene as **port-now** (uses only the M1–M4 3D core: mesh/meshscatter/scatter/surface/lines/volume + materials/lights/camera), **needs-deferred-feature** (2D/text/axes — e.g. `freetype_text`, `pointsfont`), or **drop** (backend-internal/benchmark scaffolding). Note per-scene asset needs (`.obj`, `.mtlx`, `.hdr`, GLTF).
+- **Interfaces — produces:** a table classifying every source scene as **port-now** (uses only the M1–M3 3D core: mesh/meshscatter/scatter/surface/lines/volume + materials/lights/camera), **needs-deferred-feature** (2D/text/axes — e.g. `freetype_text`, `pointsfont`), or **drop** (backend-internal/benchmark scaffolding). Note per-scene asset needs (`.obj`, `.mtlx`, `.hdr`, GLTF).
 - **Test:** a script asserts every `*.jl` scene in both source repos appears in the table (no silent omissions).
 - **Acceptance:** a complete, justified port list.
 
-### Task M5.2: Examples harness + assets
+### Task M4.2: Examples harness + assets
 - **Files:** `examples/common/` (shared `activate!`, camera/light helpers, asset loader), `examples/Project.toml` (its own env — OmniverseMakie + GeometryBasics/Colors/FileIO/MeshIO/… via `Pkg`), `examples/assets/`.
 - **Interfaces — produces:** `run_example(path)` + a shared scene scaffold so each ported script is small; assets (meshes, HDRIs, MaterialX) copied into `examples/assets/` (no network at render time).
 - **Test:** a trivial example (one mesh + light + camera) renders to PNG via the harness.
 - **Acceptance:** harness renders a minimal scene; assets resolve locally.
 
-### Task M5.3: Port the RPRMakieNotes gallery
+### Task M4.3: Port the RPRMakieNotes gallery
 - **Files:** `examples/<scene>.jl` per port-now RPRMakieNotes script.
 - **Interfaces — produces:** each script adapted — `RPRMakie.activate!()` → `OmniverseMakie.activate!()`; RPR material objects/NamedTuples (`RPR.Glass`, uber-material params) → OmniverseMakie's `material=` escape hatch (MDL `OmniGlass`/`OmniPBR`/MaterialX) or `displayColor`; `EnvironmentLight`/HDRIs → `DomeLight`; camera unchanged (reads `cameracontrols`). Plot calls (`mesh!`, `meshscatter!`, `surface!`, `volume!`) stay as-is.
 - **Test:** each ported scene renders to a non-black PNG at a fixed sample count; a CI script renders all and assembles a contact sheet.
 - **Acceptance:** RPRMakieNotes 3D scenes reproduce recognizably under OmniverseMakie.
 
-### Task M5.4: Port selected raydemo scenes
+### Task M4.4: Port selected raydemo scenes
 - **Files:** `examples/<scene>.jl` per chosen raydemo scene (e.g. Crown, Killeroo, Materials, BlackHole, a Volumes cloud, a ProtPlot protein, a GLTF model).
-- **Interfaces — produces:** RayMakie/Hikari scene scripts adapted to OmniverseMakie (same translation pattern as M5.3; GLTF/mesh import via MeshIO → USD mesh; volumes → `UsdVol`). Prefer scenes exercising distinct features (instancing, volumes, glass, large meshes).
+- **Interfaces — produces:** RayMakie/Hikari scene scripts adapted to OmniverseMakie (same translation pattern as M4.3; GLTF/mesh import via MeshIO → USD mesh; volumes → `UsdVol`). Prefer scenes exercising distinct features (instancing, volumes, glass, large meshes).
 - **Test:** each renders to a non-black PNG; volume + glass + instancing scenes each covered.
 - **Acceptance:** a cross-section of raydemo scenes renders, exercising the full primitive/material set.
 
-### Task M5.5: Gallery doc + render CI
+### Task M4.5: Gallery doc + render CI
 - **Files:** `examples/README.md` (final gallery with thumbnails), `examples/render_all.jl`.
 - **Interfaces — produces:** a one-command render of the whole gallery → thumbnails; optional docs page.
 - **Acceptance:** `julia examples/render_all.jl` renders the gallery; README shows the results.
 
-**M5 GATE:** the adapted RPRMakieNotes + raydemo galleries render through OmniverseMakie from `examples/`, originals untouched. ✅ → showcase-ready.
+**M4 GATE:** the adapted RPRMakieNotes + raydemo galleries render through OmniverseMakie from `examples/`, originals untouched. ✅ → M5.
+
+---
+
+# Milestone M5 — Interactive viewport
+
+**Outcome:** a GLMakie window shows the live RTX viewport; `cam3d!` orbits/zooms; the on-demand loop renders only when dirty and progressively refines (RT2). CPU blit. Add GLMakie + CUDA to deps.
+
+### Task M5.1: GLMakie display target + CPU blit
+- **Files:** `src/display.jl`, `src/screen.jl` (`display` window path). Test: `test/m5_display_test.jl` (headed; skip if no display).
+- **Interfaces — produces:** `open_window!(screen, scene)` — open a GLMakie `Screen`, plot a fullscreen `image!` at frame size, store it as `screen.display_target`; `present_cpu!(screen, pixels)` — write the mapped `LdrColor` into the `image!` data Observable (one host roundtrip; `cuda-gl-interop.md §5`).
+- **Acceptance:** ovrtx frames appear in a GLMakie window.
+
+### Task M5.2: Event injection + `render_tick`
+- **Files:** `src/events.jl`. Test: `test/m5_events_test.jl`.
+- **Interfaces — produces:** `connect_screen(scene, screen)` overloads writing GLMakie window input into `scene.events.*` (mouseposition px/upper-left, mousebutton, scroll, keyboard, resize) per `makie-backend-contract.md §5.3`; `screen.render_tick` bumped each loop iteration to drive mouse-position polling + `frame_tick`.
+- **Acceptance:** mouse/keyboard events reach `scene.events`; `ispressed`/`mouseposition` work.
+
+### Task M5.3: On-demand render loop + progressive refinement
+- **Files:** `src/renderloop.jl`, `src/settings.jl`. Test: `test/m5_loop_test.jl`.
+- **Interfaces — produces:** `start_renderloop!(screen)` (`@async`, GL context on the render task per `cuda-gl-interop.md §2`); each iteration `pollevents → poll_updates (pull every `plot2robj` node) → if requires_update or still accumulating: step! + present`; `requires_update` set by the diff node, `add_scene!` listeners, and `on(scene.camera.projectionview)`. RT2: low-sample denoised while moving, keep accumulating when idle, `OV.reset!` on any change (`ARCHITECTURE.md §8.2`).
+- **Key code:** `poll_updates` mirrors GLMakie (`computepipeline.md §3c`): `try plot.attributes[:ovrtx_renderobject][] catch; ComputePipeline.mark_resolved!(node) end`. **Run the renderloop with the signal guard applied** (the renderer lives across the whole loop; ensure the crash-reporter fix from M0.4 holds for a long-lived in-process renderer + window teardown).
+- **Acceptance:** idle scene converges and stops; any change re-renders; no busy-spin.
+
+### Task M5.4: End-to-end interactive + live add/delete
+- **Files:** integration. Test: `test/m5_interactive_test.jl` (scripted camera moves via `update_cam!`, assert frames change + accumulation resets).
+- **Interfaces — produces:** `update_camera!` wired to `on(scene.camera.projectionview)` → re-author camera xform + `reset!`. Confirm `cam3d!` orbit/zoom and live `plot!`/`delete!` during the loop.
+- **Acceptance:** a user can `display(fig)`, orbit/zoom a path-traced scene, and add/remove plots live.
+
+**M5 GATE:** interactive orbit of a live RTX viewport with progressive refinement and live add/delete. ✅ → M6.
+
+---
+
+# Milestone M6 — GPU-direct CUDA-GL blit + AOV picking + subscene hardening
+
+### Task M6.1: GPU-direct CUDA-GL blit (no CPU roundtrip)
+- **Files:** `src/display.jl`, `ext/OmniverseMakieCUDAExt.jl`. Test: `test/m6_gpu_blit_test.jl`.
+- **Interfaces — produces:** `OV.map_cuda_array(sr, name="LdrColor")` (CUDA-array analog of M0.6 `map_cpu`, mode `OVRTX_MAP_DEVICE_TYPE_CUDA_ARRAY`, returns the `CUarray` + `cuda_sync.wait_event`); `present_gpu!(screen, ...)` — `cuGraphicsGLRegisterImage` the `image!`'s `Texture.id` once → per frame map/`SubResourceGetMappedArray`/`cuMemcpy2D`/unmap, event-gated `ovrtx_unmap` (`cuda-gl-interop.md §3–4`). Runs on the GLMakie render task; falls back to `present_cpu!`.
+- **Acceptance:** display path uses no host roundtrip; visually identical to CPU blit; measurable latency drop.
+
+### Task M6.2: AOVs + picking
+- **Files:** `src/screen.jl` (pick), `src/settings.jl` (extra RenderVars). Test: `test/m6_pick_test.jl`.
+- **Interfaces — produces:** add `Depth`/`Normal`/`Id` RenderVars; `Makie.pick(scene, screen, xy)` via `ovrtx_enqueue_pick_query` or the ID AOV → `screen.events`.
+- **Acceptance:** `pick`/`mouseover` return the plot under the cursor.
+
+### Task M6.3: Subscene hardening
+- **Files:** `src/screen.jl`. Test: `test/m6_subscene_test.jl`.
+- **Interfaces — produces:** refcounted shared resources; contiguous ScreenID remap; eager empty-subscene registration (optional `on(parent.children)`); fix the GLMakie gaps catalogued in `dynamic-add-delete.md §5`.
+- **Acceptance:** stress add/remove of nested subscenes leaves zero leaks.
+
+**M6 GATE:** GPU-direct display + AOV picking + leak-free subscenes. ✅ → v1 complete.
+
+(Deferred beyond v1: 2D/text/axes parity; remote streaming — `references/notes/wire-protocol-and-webrtc.md`.)
 
 ---
 
@@ -867,12 +876,12 @@ Source galleries (both are Makie backends, so the *plotting* code ports closely;
 | Risk | Status / mitigation |
 |---|---|
 | Julia-native `ccall` render feasibility | **RETIRED** — Spike A renders + updates from Julia, exit 0 |
-| **carb breakpad crash reporter crashes Julia at exit** | **NEW** — Task M0.4 signal save/restore; re-verify for long-lived loop in M3.3 |
+| **carb breakpad crash reporter crashes Julia at exit** | **NEW** — Task M0.4 signal save/restore; re-verify for long-lived loop in M5.3 |
 | ovrtx is preview 0.3 (API may churn) | pin a version; isolate in `LibOVRTX`; regen via `gen/` |
 | Path-tracer interactivity latency | RT2 + denoiser + low-sample-while-moving + idle accumulation; **M2.5 benchmark gate** |
 | Hot-path throughput | M2.5 benchmark; escalate to GPU DLPack writes if under target |
 | Array attrs not mappable (`points`) | `bind_array_attribute` + write (M2.3) |
-| CUDA-GL interop glue (context/threading) | run on GLMakie render task; CPU fallback always available (M3.1 ships first) |
+| CUDA-GL interop glue (context/threading) | run on GLMakie render task; CPU fallback always available (M5.1 ships first) |
 | Makie internals drift | exact version pins (`=0.24.12` etc.); Spike B confirmed all cited file:lines |
 
 ## Reproducing the spikes
