@@ -16,7 +16,7 @@ const _RENDER_WARMUP     = 64
 # - creates a Renderer, opens the USDA, runs render_to_matrix with warmup frames
 # - asserts size == (1080,1920) and that the image is substantially non-black
 #   (tolerates up to 100 edge/border pixels that may be black after 64 frames)
-# - hard-exits via _exit(0) to avoid breakpad signal-handler crashes on Julia teardown
+# - exits normally (clean teardown verified: no _exit needed)
 const _RENDER_PROG = """
 using LibOVRTX
 include($(repr(_RENDER_OV_JL)))
@@ -41,10 +41,6 @@ total = 1080 * 1920
 
 close(r)
 println("OK")
-
-# Hard-exit: bypass carb/breakpad signal handlers installed during create_renderer.
-flush(stdout); flush(stderr)
-ccall(:_exit, Cvoid, (Cint,), 0)
 """
 
 @testset "M0.6 Julia-native render (torus, LdrColor, non-black)" begin

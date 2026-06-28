@@ -27,7 +27,18 @@ initialization, breakpad chains to SIG_DFL (harmless) rather than Julia's comple
 SA_ONSTACK handlers.  Call restore(saved) after create_renderer to put Julia's
 handlers back.
 """
-snapshot() = Dict(sig => _swap_default(sig) for sig in _SIGS)
+function snapshot()
+    saved = Dict{Int,Vector{UInt8}}()
+    try
+        for sig in _SIGS
+            saved[sig] = _swap_default(sig)
+        end
+    catch
+        restore(saved)   # roll back what we already swapped
+        rethrow()
+    end
+    return saved
+end
 
 """
     restore(saved)

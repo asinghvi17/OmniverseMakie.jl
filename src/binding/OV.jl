@@ -88,7 +88,7 @@ end
 
 function Base.close(sr::StepResult)
     sr.open || return
-    L.ovrtx_destroy_results(sr.r.ptr, sr.handle)
+    sr.r.alive && L.ovrtx_destroy_results(sr.r.ptr, sr.handle)  # pool already freed if renderer closed
     sr.open = false
     return nothing
 end
@@ -157,6 +157,7 @@ unmap, and return `(pixels, W, H)`.
 `pixels` is a 3-D `Array{UInt8}` with layout `[C=4, W, H]` (channel-fastest).
 """
 function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
+    sr.r.alive || error("map_cpu: the StepResult's Renderer is already closed")
     # 1. fetch
     outs = Ref{L.ovrtx_render_product_set_outputs_t}()
     L.check(L.ovrtx_fetch_results(sr.r.ptr, sr.handle, L.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")

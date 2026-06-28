@@ -5,7 +5,8 @@ const _UPDATE_OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH",
     "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/python/minimal/.venv/lib/python3.13/site-packages/ovrtx/bin/libovrtx-dynamic.so")
 const _UPDATE_REPO_ROOT  = joinpath(@__DIR__, "..")
 const _UPDATE_OV_JL      = joinpath(_UPDATE_REPO_ROOT, "src", "binding", "OV.jl")
-const _UPDATE_USDA       = "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda"
+const _UPDATE_USDA       = get(ENV, "OM_USDA",
+    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda")
 const _UPDATE_PRODUCT    = "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
 const _UPDATE_WARMUP     = 64
 const _UPDATE_PRIM       = "/World/Torus"
@@ -19,13 +20,13 @@ const _UPDATE_PRIM       = "/World/Torus"
 #      excludes normal RT2 stochastic noise, proves the geometry actually moved).
 #   6. Asserts changed_count >= 50000 (spike measured ~597k — 50k is a very
 #      conservative floor that distinguishes "moved" from "noise").
-#   7. hard-exits via _exit(0) to bypass carb/breakpad signal handlers.
+#   7. exits normally (clean teardown verified: no _exit needed).
 const _UPDATE_PROG = """
 using LibOVRTX
 include($(repr(_UPDATE_OV_JL)))
 using ColorTypes
 
-const USDA    = $(repr(_UPDATE_USDA))
+const USDA    = ENV["OM_USDA"]
 const PRODUCT = $(repr(_UPDATE_PRODUCT))
 const WARMUP  = $(_UPDATE_WARMUP)
 const PRIM    = $(repr(_UPDATE_PRIM))
@@ -77,10 +78,6 @@ println("CHANGED_PIXELS=", changed, " / ", H*W)
 
 close(r)
 println("OK_UPDATE")
-
-# Hard-exit: bypass carb/breakpad signal handlers installed during create_renderer.
-flush(stdout); flush(stderr)
-ccall(:_exit, Cvoid, (Cint,), 0)
 """
 
 @testset "M0.7 write_xform! moves torus (changed >= 50000 pixels)" begin
@@ -92,6 +89,7 @@ ccall(:_exit, Cvoid, (Cint,), 0)
         cmd = setenv(
             `julia --project=$(_UPDATE_REPO_ROOT) $script`,
             "OVRTX_LIBRARY_PATH" => _UPDATE_OVRTX_LIB,
+            "OM_USDA"            => _UPDATE_USDA,
             "PATH"               => get(ENV, "PATH", ""),
             "HOME"               => get(ENV, "HOME", ""),
         )
