@@ -49,6 +49,5 @@ function to_ovrtx_object(screen, scene, plot::Makie.Mesh)
                      normal_interpolation = "vertex",   # Makie meshes carry per-vertex normals
                      color_interpolation  = interp)
 
-    path = "/World/plot_$(objectid(plot))"
-    return OV.add_usd_reference!(screen.renderer, usda, path)
+    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
 end

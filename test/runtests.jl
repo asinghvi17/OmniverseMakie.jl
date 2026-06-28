@@ -33,3 +33,6 @@ include("m1_primitives_test.jl")
 include("m2_openstage_test.jl")
 include("m2_insert_test.jl")
 include("m2_rendercfg_test.jl")
+
+# M2.2 — :ovrtx_renderobject diff node + push_to_ovrtx! minimal edits
+include("m2_diffnode_test.jl")

@@ -322,19 +322,47 @@ end
 # write_array_attribute! — write an array attribute (e.g. points)
 # ------------------------------------------------------------------
 
+# Float32-aggregate lane count: `Point3f`/`Vec3f` → 3, `Point2f` → 2, etc.
+# 0 for anything that is NOT a fixed-size Float32 aggregate (so the scalar paths or
+# the error branch handle it).  Detected structurally (`eltype(ET) === Float32`) so
+# OV.jl needs no GeometryBasics/StaticArrays import.
+function _f32_lanes(::Type{ET}) where {ET}
+    (isconcretetype(ET) && isbitstype(ET) && eltype(ET) === Float32) || return 0
+    n, r = divrem(sizeof(ET), sizeof(Float32))
+    return r == 0 ? n : 0
+end
+
 """
     write_array_attribute!(r::Renderer, prim::AbstractString,
                            name::AbstractString, arr::AbstractArray)
 
 Write an array attribute (e.g. `points`) to `prim`.
 The element DLDataType is inferred from the Julia element type of `arr`.
+
+`Vector{Point3f}` / `Vector{Vec3f}` (and other fixed-size `Float32` aggregates) are
+written zero-copy as a multi-lane `kDLFloat/32` tensor: `reinterpret(Float32, …)`
+flattens the components and the DLTensor carries `lanes = sizeof(eltype)/4` with
+`shape = [length(arr)]` (one element per point), so `point3f[]` round-trips
+correctly (M2 hot-path needs point arrays).
+
 The array data, prim string, and attribute name are preserved across the
 write + wait via `GC.@preserve`.
 """
 function write_array_attribute!(r::Renderer, prim::AbstractString,
                                 name::AbstractString, arr::AbstractArray)
-    # Infer DLDataType from Julia element type
-    ET = eltype(arr)
+    ET    = eltype(arr)
+    lanes = _f32_lanes(ET)
+    if lanes >= 2
+        # Float32 aggregate (Point3f/Vec3f/…): reinterpret components to a flat,
+        # owned Float32 vector; one tensor element per aggregate (multi-lane).
+        src   = arr isa Vector ? arr : collect(arr)
+        data  = collect(reinterpret(Float32, src))   # length = lanes * length(arr)
+        dtype = L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(lanes))
+        _write_attribute!(r, prim, name, dtype, true, L.OVRTX_SEMANTIC_NONE, data, Int64[length(arr)])
+        return nothing
+    end
+
+    # Scalar element types: one lane each.
     dtype = if ET === Float32
         L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(1))
     elseif ET === Float64

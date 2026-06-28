@@ -2,6 +2,7 @@ module OmniverseMakie
 
 using Makie, GeometryBasics, Colors, ColorTypes, FixedPointNumbers, LinearAlgebra
 import LibOVRTX
+import ComputePipeline   # :ovrtx_renderobject diff node (register_computation!/mark_resolved!)
 
 # OV.jl does `using ..LibOVRTX`; having `import LibOVRTX` above makes
 # `..LibOVRTX` resolve to OmniverseMakie.LibOVRTX (the M0 parent-module fix).

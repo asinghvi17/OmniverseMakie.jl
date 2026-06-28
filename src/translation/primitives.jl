@@ -187,7 +187,7 @@ function to_ovrtx_object(screen, scene, plot::Makie.Scatter)
 
     usda = _usda_pointinstancer(pos, scales, nothing, instancer_color,
                                 _sphere_proto_body(proto_color); model = plot.model[])
-    return OV.add_usd_reference!(screen.renderer, usda, "/World/plot_$(objectid(plot))")
+    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
 end
 
 # ------------------------------------------------------------------
@@ -223,7 +223,7 @@ function to_ovrtx_object(screen, scene, plot::Makie.MeshScatter)
     proto = _mesh_proto_body(mpts, mfaces, mnrm, proto_color)
     usda  = _usda_pointinstancer(pos, scales, orientations, instancer_color, proto;
                                  model = plot.model[])
-    return OV.add_usd_reference!(screen.renderer, usda, "/World/plot_$(objectid(plot))")
+    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
 end
 
 # ------------------------------------------------------------------
@@ -274,7 +274,7 @@ function to_ovrtx_object(screen, scene, plot::Makie.Lines)
     values, interp = displaycolor_for(plot, n)
     width = _curve_width(pts, plot.linewidth[])
     usda  = _usda_basiscurves(pts, [n], width, values, interp; model = plot.model[])
-    return OV.add_usd_reference!(screen.renderer, usda, "/World/plot_$(objectid(plot))")
+    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
 end
 
 """
@@ -291,7 +291,7 @@ function to_ovrtx_object(screen, scene, plot::Makie.LineSegments)
     values, interp = displaycolor_for(plot, length(pts2))
     width  = _curve_width(pts, plot.linewidth[])
     usda   = _usda_basiscurves(pts2, fill(2, nseg), width, values, interp; model = plot.model[])
-    return OV.add_usd_reference!(screen.renderer, usda, "/World/plot_$(objectid(plot))")
+    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
 end
 
 # ------------------------------------------------------------------
@@ -375,5 +375,5 @@ function to_ovrtx_object(screen, scene, plot::Makie.Surface)
                      model                = plot.model[],
                      normal_interpolation = "vertex",
                      color_interpolation  = interp)
-    return OV.add_usd_reference!(screen.renderer, usda, "/World/plot_$(objectid(plot))")
+    return OV.add_usd_reference!(screen.renderer, usda, plot_prim_path(plot))
 end

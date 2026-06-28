@@ -1,9 +1,10 @@
 # Screen — the Makie backend screen that owns an OV.Renderer.
 #
-# M2.1 open-stage model: the USD stage is authored ONCE (lazily, on the first
+# Open-stage model: the USD stage is authored ONCE (lazily, on the first
 # `colorbuffer`) and stays open across frames.  Later `colorbuffer` calls push
-# MINIMAL live edits — camera + light writes via `sync_camera!`/`sync_lights!`
-# (plot-node diffing arrives in M2.2) — instead of re-authoring the whole stage.
+# MINIMAL live edits — camera + light writes via `sync_camera!`/`sync_lights!`, and
+# per-plot attribute writes via the M2.2 `:ovrtx_renderobject` diff nodes
+# (`pull_ovrtx_nodes!` → `push_to_ovrtx!`) — instead of re-authoring the whole stage.
 
 mutable struct Screen <: Makie.MakieScreen
     renderer::OV.Renderer
@@ -135,9 +136,10 @@ end
     Base.insert!(screen::Screen, scene::Scene, plot::Plot) -> Screen
 
 Open-stage plot insert.  Registers `scene` (`add_scene!`) first.  Idempotent via
-`screen.plot2robj`.  An atomic plot (`isempty(plot.plots)`) is authored via
-`to_ovrtx_object` (a USD reference at `/World/plot_<id>`) and recorded as an
-`OvrtxRObj`; a composite plot recurses over its children.
+`screen.plot2robj`.  An atomic plot (`isempty(plot.plots)`) is registered via
+`register_ovrtx_robj!` (its `:ovrtx_renderobject` diff node builds the USD reference
+at `/World/plot_<id>` and records the `OvrtxRObj`); a composite plot recurses over
+its children.
 
 Before the stage is authored (open), this is a no-op: the plot is already in
 `scene.plots` and will be added by `insertplots!` at the first `colorbuffer`
@@ -150,11 +152,10 @@ function Base.insert!(screen::Screen, scene::Makie.Scene, plot::Makie.Plot)
     screen.authored || return screen   # defer to insertplots! at first colorbuffer
     haskey(screen.plot2robj, objectid(plot)) && return screen
     if isempty(plot.plots)
-        h = to_ovrtx_object(screen, scene, plot)
-        if h !== nothing
-            path = "/World/plot_$(objectid(plot))"
-            screen.plot2robj[objectid(plot)] = OvrtxRObj(path, h)
-        end
+        # M2.2: register the :ovrtx_renderobject diff node, which builds the USD
+        # reference (author_usd_prim!) on first resolve and records plot2robj.  The
+        # prim path is owned by register_ovrtx_robj!/plot_prim_path (single source).
+        register_ovrtx_robj!(screen, scene, plot)
     else
         foreach(p -> insert!(screen, scene, p), plot.plots)
     end
@@ -186,14 +187,18 @@ end
 
 Render `screen`'s scene and return the LdrColor framebuffer.
 
-Open-stage model (M2.1): on the FIRST call, author the root stage ONCE
+Open-stage model: on the FIRST call, author the root stage ONCE
 (`author_root_from_scene!`, which bakes the camera + lights) and add every plot's
-USD reference (`insertplots!`); the camera/light snapshots are seeded so the
+USD reference (`insertplots!` → `register_ovrtx_robj!`, building each plot's
+`:ovrtx_renderobject` diff node); the camera/light snapshots are seeded so the
 immediately-following sync is a no-op.  On EVERY call, `sync_camera!`/`sync_lights!`
-push minimal live writes for any pose/intensity/color/transform change; if either
-wrote anything, `OV.reset!` restarts RT2 accumulation before rendering.  A static
-scene therefore keeps accumulating across frames (no re-open, no reset); a camera
-orbit reframes via `write_xform!` (NOT a re-author).
+push minimal live writes for any pose/intensity/color/transform change, and
+`pull_ovrtx_nodes!` resolves every plot's diff node — pushing one minimal C write
+per changed plot attribute (`push_to_ovrtx!`).  If anything was written (camera,
+light, or geometry), `OV.reset!` restarts RT2 accumulation once before rendering.  A
+static scene therefore keeps accumulating across frames (no re-open, no reset); a
+camera orbit reframes via `write_xform!` and a `plot.color`/`translate!` edit writes
+displayColor/`omni:xform` in place (NOT a re-author).
 
 The matrix is returned EXACTLY as `OV.render_to_matrix` produces it — top-left
 origin (right-side-up, verified by `test/m1_orientation_test.jl`), 4-channel
@@ -218,7 +223,13 @@ function Makie.colorbuffer(screen::Screen; kw...)
     # Push live render-config deltas (each a no-op when unchanged).
     cam_changed   = sync_camera!(screen, cam_scene)
     light_changed = sync_lights!(screen, cam_scene)
-    (cam_changed || light_changed) && OV.reset!(screen.renderer)
+
+    # Pull every plot's :ovrtx_renderobject diff node (M2.2): a clean graph is a
+    # no-op; any changed attribute pushes one minimal C write and flips
+    # `requires_update`.  Fold that into the single per-frame RT2 reset.
+    screen.requires_update = false
+    pull_ovrtx_nodes!(screen, scene)
+    (cam_changed || light_changed || screen.requires_update) && OV.reset!(screen.renderer)
 
     return OV.render_to_matrix(screen.renderer, screen.product; warmup = screen.config.warmup)
 end
