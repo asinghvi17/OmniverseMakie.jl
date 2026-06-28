@@ -130,7 +130,10 @@ const _DEFAULT_CAMERA_XFORM_STR = "( (-0.70711, 0.70711, 0.0, 0.0), (-0.40825, -
 function author_render_root!(screen;
                               resolution = screen.fb_size,
                               camera_path::String = "/World/Camera",
-                              camera_xform_str::String = _DEFAULT_CAMERA_XFORM_STR)
+                              camera_xform_str::String = _DEFAULT_CAMERA_XFORM_STR,
+                              focal_length::Float64 = 18.147562,
+                              h_aperture::Float64   = 20.955,
+                              v_aperture::Float64   = 15.2908)
     W, H       = resolution
     cam_name   = split(camera_path, "/")[end]   # last segment → prim name under /World
     rtx_lines  = rtx_settings_usda(screen.config)
@@ -162,10 +165,10 @@ def Xform "World"
     )
     {
         float2 clippingRange = (1, 10000000)
-        float focalLength = 18.147562
+        float focalLength = $(focal_length)
         float focusDistance = 400
-        float horizontalAperture = 20.955
-        float verticalAperture = 15.2908
+        float horizontalAperture = $(h_aperture)
+        float verticalAperture = $(v_aperture)
         token projection = "perspective"
         matrix4d xformOp:transform = $(camera_xform_str)
         uniform token[] xformOpOrder = ["xformOp:transform"]

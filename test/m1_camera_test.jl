@@ -6,7 +6,7 @@ using Test
 # Tests:
 #   1. 400×400 Scene with a 3-D camera; cube added via usda_mesh (closes Minor #1).
 #   2. author_camera! pose A (eye=(500,500,500)) → add cube → render img1.
-#   3. author_camera! pose B (eye=(-400,200,300)) → re-add cube → reset! → render img2.
+#   3. author_camera! pose B (eye=(150,150,150)) → re-add cube → reset! → render img2.
 #   4. Assert ≥ 20_000 pixels changed by ≥ 8/255 on any channel.
 #      Subprocess exits 0.
 #
@@ -121,6 +121,18 @@ println("CHANGED_PIXELS=", changed, " / ", Himg * Wimg)
 close(screen)
 println("OK_CAMERA")
 """
+
+@testset "M1.3 camera_intrinsics unit" begin
+    # Wider FOV → shorter focal length (inverse relationship).
+    @test OmniverseMakie.camera_intrinsics(90, 400, 400).focal_length <
+          OmniverseMakie.camera_intrinsics(30, 400, 400).focal_length
+    # Square image → h_aperture == v_aperture (aspect ratio = 1).
+    intr_sq = OmniverseMakie.camera_intrinsics(45, 400, 400)
+    @test intr_sq.h_aperture ≈ intr_sq.v_aperture
+    # Landscape 2:1 image → h_aperture == 2 * v_aperture.
+    intr_wide = OmniverseMakie.camera_intrinsics(45, 800, 400)
+    @test intr_wide.h_aperture ≈ 2 * intr_wide.v_aperture
+end
 
 @testset "M1.3 author_camera! drives viewpoint (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M13_CAMERA_PROG; timeout=600)

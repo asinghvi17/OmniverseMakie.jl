@@ -105,6 +105,33 @@ function _validate_camera_path(camera_path::String)
 end
 
 # ------------------------------------------------------------------
+# camera_intrinsics — derive USD focalLength / aperture from Makie FOV
+# ------------------------------------------------------------------
+
+"""
+    camera_intrinsics(fov_deg, W, H) -> NamedTuple
+
+Compute USD camera intrinsics from a vertical field-of-view (degrees) and
+image dimensions (W × H pixels).
+
+Returns a NamedTuple with fields `focal_length`, `h_aperture`, `v_aperture`.
+
+# Formulas
+USD vertical FOV definition: `vfov = 2·atan(v_aperture / (2·focal_length))`
+Inverting: `focal_length = v_aperture / (2·tand(fov_deg/2))`
+Horizontal aperture matches the image aspect: `h_aperture = v_aperture · (W/H)`
+
+# Reference vertical aperture
+`v_aperture = 15.2908` (matches the M1.2 spike-proven stage).
+"""
+function camera_intrinsics(fov_deg, W, H)
+    v_aperture   = 15.2908
+    focal_length = v_aperture / (2 * tand(fov_deg / 2))
+    h_aperture   = v_aperture * (W / H)
+    return (focal_length = focal_length, h_aperture = h_aperture, v_aperture = v_aperture)
+end
+
+# ------------------------------------------------------------------
 # author_camera! — bake Makie 3-D camera pose into the root USD stage
 # ------------------------------------------------------------------
 
@@ -149,6 +176,10 @@ function author_camera!(screen, scene; camera_path::String = "/World/Camera")
     eye    = cam.eyeposition[]
     target = cam.lookat[]
     up     = cam.upvector[]
+    fov    = cam.fov[]             # vertical FOV in degrees (Camera3D default: 45.0)
+
+    # Get image dimensions for aspect-correct horizontal aperture.
+    W, H = screen.fb_size
 
     # Compute camera-to-world (USD row-vector convention).
     M = camera_to_world(eye, target, up)
@@ -156,10 +187,16 @@ function author_camera!(screen, scene; camera_path::String = "/World/Camera")
     # Format the row-vector matrix as a USD matrix4d literal (no transpose).
     xform_str = _usda_row_vector_matrix(M)
 
+    # Derive intrinsics from the scene's vertical FOV and image aspect ratio.
+    intr = camera_intrinsics(fov, W, H)
+
     # Bake camera into root (fallback path: re-opens stage).
     author_render_root!(screen;
         resolution       = screen.fb_size,
         camera_path      = camera_path,
-        camera_xform_str = xform_str)
+        camera_xform_str = xform_str,
+        focal_length     = intr.focal_length,
+        h_aperture       = intr.h_aperture,
+        v_aperture       = intr.v_aperture)
     return nothing
 end
