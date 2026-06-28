@@ -7,6 +7,8 @@ authors = ["Anshul Singhvi <anshulsinghvi@gmail.com>"]
 projects = ["lib/LibOVRTX"]
 
 [deps]
+ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
+FixedPointNumbers = "53c48c17-4a7d-5ca2-90c5-79b7896eea93"
 LibOVRTX = "48e69356-47aa-4e0c-8089-4409475c3dd9"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 
@@ -14,5 +16,7 @@ Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 LibOVRTX = {path = "lib/LibOVRTX"}
 
 [compat]
+ColorTypes = "0.11, 0.12"
+FixedPointNumbers = "0.8"
 LibOVRTX = "0.1"
 julia = "1.12"
