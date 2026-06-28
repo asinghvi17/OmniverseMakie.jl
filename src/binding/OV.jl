@@ -210,4 +210,179 @@ function render_to_matrix(r::Renderer, product::AbstractString; warmup::Int=64)
     return cwh_to_matrix(pixels)
 end
 
+# ------------------------------------------------------------------
+# reset! — restart RT2 accumulation (call after any geometry/camera change)
+# ------------------------------------------------------------------
+
+"""
+    reset!(r::Renderer; time=0.0)
+
+Enqueue and wait for an RT2 accumulation reset.  Must be called after any
+geometry or camera change so the path-tracer starts fresh.
+"""
+function reset!(r::Renderer; time::Float64=0.0)
+    enqueue_wait(r, L.ovrtx_reset(r.ptr, time), "reset")
+    return nothing
+end
+
+# ------------------------------------------------------------------
+# write_xform! — write a 4×4 transform to a USD prim (hot-path)
+# ------------------------------------------------------------------
+
+"""
+    write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Float64})
+
+Write a 4×4 row-major transform matrix to the `omni:xform` attribute of `prim`.
+Translation lives in the last row (row 4, columns 1–3).
+
+Reimplements the static-inline `ovrtx_set_xform_mat` in pure Julia.
+The matrix data AND the prim string are preserved across the write + wait via
+`GC.@preserve`.
+"""
+function write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Float64})
+    @assert size(mat) == (4, 4) "write_xform! requires a 4×4 matrix, got $(size(mat))"
+
+    # Row-major 4×4 flat array (16 elements).  Julia matrices are column-major,
+    # so we transpose to get row-major order as expected by ovrtx.
+    M = vec(collect(mat'))  # length-16 Vector{Float64}, row-major
+
+    shape   = Int64[1]       # shape of the DLTensor = 1 prim
+    strides = Int64[1]
+
+    # dtype: kDLFloat / 64 bits / lanes=16 → encodes the 4×4 as a single element
+    dtype = L.DLDataType(UInt8(L.kDLFloat), UInt8(64), UInt16(16))
+
+    prim_s = String(prim)    # materialise so we can take a stable pointer
+    prim_ovx = L.ovx_string(prim_s)
+    prim_arr = L.ovx_string_t[prim_ovx]
+
+    attr_name = "omni:xform"
+    attr_ovx  = L.ovx_string(attr_name)
+
+    GC.@preserve prim_s prim_arr attr_name M shape strides begin
+        prim_list  = L.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(1))
+        attr_lookup = L.ovx_string_or_token_t(UInt64(0), attr_ovx)
+        attr_type   = L.ovrtx_attribute_type_t(dtype, false, L.OVRTX_SEMANTIC_XFORM_MAT4x4)
+        bdesc = L.ovrtx_binding_desc_t(
+            prim_list,
+            L.ovx_primpath_list_t(0),
+            attr_lookup,
+            attr_type,
+            L.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
+            L.OVRTX_BINDING_FLAG_NONE,
+        )
+        bdoh = Ref(L.ovrtx_binding_desc_or_handle_t(bdesc, L.ovrtx_attribute_binding_handle_t(0)))
+
+        dl = L.DLTensor(
+            Ptr{Cvoid}(pointer(M)),
+            L.DLDevice(L.kDLCPU, Int32(0)),
+            Int32(1),
+            dtype,
+            pointer(shape),
+            pointer(strides),
+            UInt64(0),
+        )
+        dl_arr = L.DLTensor[dl]
+        GC.@preserve dl_arr begin
+            ibuf = Ref(L.ovrtx_input_buffer_t(
+                pointer(dl_arr),
+                UInt64(1),
+                Ptr{UInt8}(C_NULL),
+                Csize_t(0),
+                L.NOSYNC,
+                L.NOSYNC,
+            ))
+            enqueue_wait(r, L.ovrtx_write_attribute(r.ptr, bdoh, ibuf, L.OVRTX_DATA_ACCESS_SYNC),
+                         "write_attribute(omni:xform)")
+        end
+    end
+    return nothing
+end
+
+# ------------------------------------------------------------------
+# write_array_attribute! — write an array attribute (e.g. points)
+# ------------------------------------------------------------------
+
+"""
+    write_array_attribute!(r::Renderer, prim::AbstractString,
+                           name::AbstractString, arr::AbstractArray)
+
+Write an array attribute (e.g. `points`) to `prim`.
+The element DLDataType is inferred from the Julia element type of `arr`.
+The array data, prim string, and attribute name are preserved across the
+write + wait via `GC.@preserve`.
+"""
+function write_array_attribute!(r::Renderer, prim::AbstractString,
+                                name::AbstractString, arr::AbstractArray)
+    # Infer DLDataType from Julia element type
+    ET = eltype(arr)
+    dtype = if ET === Float32
+        L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(1))
+    elseif ET === Float64
+        L.DLDataType(UInt8(L.kDLFloat), UInt8(64), UInt16(1))
+    elseif ET === Int32
+        L.DLDataType(UInt8(L.kDLInt), UInt8(32), UInt16(1))
+    elseif ET === Int64
+        L.DLDataType(UInt8(L.kDLInt), UInt8(64), UInt16(1))
+    elseif ET === UInt32
+        L.DLDataType(UInt8(L.kDLUInt), UInt8(32), UInt16(1))
+    elseif ET === UInt64
+        L.DLDataType(UInt8(L.kDLUInt), UInt8(64), UInt16(1))
+    else
+        error("write_array_attribute!: unsupported element type $ET")
+    end
+
+    data = collect(arr)  # ensure contiguous, owned copy
+    n    = length(data)
+
+    shape   = Int64[n]
+    strides = Int64[1]
+
+    prim_s   = String(prim)
+    prim_ovx = L.ovx_string(prim_s)
+    prim_arr = L.ovx_string_t[prim_ovx]
+
+    name_s  = String(name)
+    name_ovx = L.ovx_string(name_s)
+
+    GC.@preserve prim_s prim_arr name_s data shape strides begin
+        prim_list   = L.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(1))
+        attr_lookup = L.ovx_string_or_token_t(UInt64(0), name_ovx)
+        attr_type   = L.ovrtx_attribute_type_t(dtype, true, L.OVRTX_SEMANTIC_NONE)
+        bdesc = L.ovrtx_binding_desc_t(
+            prim_list,
+            L.ovx_primpath_list_t(0),
+            attr_lookup,
+            attr_type,
+            L.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
+            L.OVRTX_BINDING_FLAG_NONE,
+        )
+        bdoh = Ref(L.ovrtx_binding_desc_or_handle_t(bdesc, L.ovrtx_attribute_binding_handle_t(0)))
+
+        dl = L.DLTensor(
+            Ptr{Cvoid}(pointer(data)),
+            L.DLDevice(L.kDLCPU, Int32(0)),
+            Int32(1),
+            dtype,
+            pointer(shape),
+            pointer(strides),
+            UInt64(0),
+        )
+        dl_arr = L.DLTensor[dl]
+        GC.@preserve dl_arr begin
+            ibuf = Ref(L.ovrtx_input_buffer_t(
+                pointer(dl_arr),
+                UInt64(1),
+                Ptr{UInt8}(C_NULL),
+                Csize_t(0),
+                L.NOSYNC,
+                L.NOSYNC,
+            ))
+            enqueue_wait(r, L.ovrtx_write_attribute(r.ptr, bdoh, ibuf, L.OVRTX_DATA_ACCESS_SYNC),
+                         "write_attribute($name)")
+        end
+    end
+    return nothing
+end
+
 end # module OV
