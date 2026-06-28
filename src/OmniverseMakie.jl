@@ -12,6 +12,7 @@ include("translation/camera.jl") # camera_to_world, author_camera!, camera_intri
 include("translation/lights.jl") # lights_usda, author_root_from_scene!, author_lights!
 include("translation/materials.jl") # displaycolor_for (plot.color → primvars:displayColor)
 include("translation/meshes.jl")    # to_ovrtx_object (Makie.Mesh → UsdGeomMesh reference)
+include("translation/primitives.jl") # to_ovrtx_object (scatter/meshscatter/lines/surface)
 include("screen.jl")             # Screen, setup_scene!, insert!, colorbuffer, activate!
 
 # Re-export every Makie name verbatim (GLMakie/src/GLMakie.jl:36-41).
