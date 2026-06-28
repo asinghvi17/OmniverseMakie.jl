@@ -41,15 +41,15 @@ src/
   compute.jl        # NEW: OvrtxRObj, register_ovrtx_robj!, push_to_ovrtx!, consumed_inputs, author_usd_prim!, bind_hot_attributes!
   screen.jl         # MODIFY: open-stage colorbuffer; live camera/lights push (sync_camera!/sync_lights!); insert!/insertplots!/add_scene!/delete!/empty!; Screen struct; drop open_results
   binding/OV.jl     # MODIFY: create_binding/map_binding/unmap!/destroy! wrappers; write_array_attribute! Point3f/Vec3f fix
-  translation/usd.jl (or composition.jl)  # MODIFY: relocate author_root_from_scene!
+  translation/usd.jl (or composition.jl)  # MODIFY: relocate author_root_from_scene! (M2.1); emit def Scope hierarchy via scene_scopes_usda (M2.3)
   translation/camera.jl  # MODIFY (M2.1): correct the false M1.3 "ignored on camera" comment; document the live write_xform! path
   translation/lights.jl  # MODIFY (M2.1): shared light_prim_path helper (single source for /World/<Type>Light_<i>); live attr writes
 bench/
-  hot_path.jl       # NEW (M2.5)
-  RESULTS.md        # NEW (M2.5)
+  hot_path.jl       # NEW (M2.6)
+  RESULTS.md        # NEW (M2.6)
 test/
   m2_openstage_test.jl  m2_insert_test.jl  m2_rendercfg_test.jl  m2_diffnode_test.jl
-  m2_binding_test.jl    m2_delete_test.jl
+  m2_subscene_test.jl   m2_binding_test.jl    m2_delete_test.jl
 ```
 
 ---
@@ -142,7 +142,29 @@ push_to_ovrtx!(screen, robj, name::Symbol, value)            # route ONE changed
 
 ---
 
-## Task M2.3 — Persistent hot-path bindings (`map_attribute` / `bind_array_attribute`) + Point3f write fix
+## Task M2.3 — USD subscene grouping (`def Scope` hierarchy mirroring the Makie scene tree) ★
+
+> Inserted 2026-06-28 (user-requested), overriding the M2.1 `add_scene!` deferral. Full brief: `.superpowers/sdd/briefs/m2.3-subscene-brief.md`. **Renumber note:** the former M2.3/M2.4/M2.5 (bindings / delete / benchmark) are now **M2.4 / M2.5 / M2.6**; a few inline `(M2.x)` cross-references in earlier task bodies may still show the old numbers — the task HEADERS are authoritative.
+
+**Files:** `src/translation/usd.jl` (root authoring emits the scope skeleton), `src/screen.jl` (`add_scene!`; thread scene through `insert!`/`insertplots!`), `src/compute.jl` (`plot_prim_path` scope-aware; thread scene through `author_usd_prim!`/`register_ovrtx_robj!`/node callback), `src/translation/{meshes,primitives}.jl` (remove the now-DEAD `to_ovrtx_object(::Mesh/::Scatter/::MeshScatter/::Lines/::LineSegments)` — M2.2 Minor #1; keep `::Surface`). Test: `test/m2_subscene_test.jl`.
+
+**Goal:** author a `def Scope` per Makie subscene, nested to mirror the scene tree, so each plot's USD reference lives at `/World/Scene_<objectid(scene)>/plot_<objectid(plot)>`. The open stage's prim hierarchy then mirrors the Makie `Scene` graph (correct representation + future USD export + clean subscene deletion in M2.5). **Render stays pixel-equivalent** (plots keep `:model_f32c` composed-world; scopes carry NO transform — transform-decomposition onto `Xform` scopes is a future refinement).
+
+**Interfaces — Produces:** `scene_scopes_usda(root) -> (usda, scene2scope)` (pure, unit-testable); `plot_prim_path(scene, plot)`; `add_scene!(screen, scene) -> scope_path`; `author_usd_prim!(screen, scene, plot, args)`.
+
+**Approach:** root authoring embeds nested `def Scope "Scene_<objectid>"` inside `def Xform "World"` (scopes exist before plots reference under them) + populates `screen.scene2scope`; `plot_prim_path = scene2scope[objectid(scene)] * "/plot_<id>"` (objectid-derived ⇒ stable across screens / the M2.2 `:ovrtx_screen` rebuild); scene threaded through build/register/node. **Validate early (Step 2):** a reference nested under a root-authored Scope renders (report if not). Handle the 2-D figure root (root→`/World`, 3-D child→a `Scene_` scope) so `m1_save_record`/`save(fig)` stay green.
+
+- [ ] **Step 1:** failing unit test — `scene_scopes_usda` nesting + `scene2scope` paths (no render). RED.
+- [ ] **Step 2:** failing render test (subprocess) — Figure with a subscene renders, paths nested, `ROOT_OPENS==1`. RED.
+- [ ] **Step 3:** implement + consolidate the dead `to_ovrtx_object` methods.
+- [ ] **Step 4:** GREEN; full `Pkg.test` (incl. `m1_save_record`).
+- [ ] **Step 5:** commit `feat(M2.3): USD subscene grouping (def Scope hierarchy)`.
+
+**Acceptance:** USD prim hierarchy mirrors the scene tree; render pixel-equivalent within RT2 noise; dead build paths removed; `plot_prim_path` scope-aware + single-sourced.
+
+---
+
+## Task M2.4 — Persistent hot-path bindings (`map_attribute` / `bind_array_attribute`) + Point3f write fix
 
 **Files:** `src/compute.jl`, `src/binding/OV.jl`. Test: `test/m2_binding_test.jl`.
 
@@ -160,13 +182,13 @@ bind_hot_attributes!(screen, robj, args)                                 # creat
 - [ ] **Step 2:** run → FAIL.
 - [ ] **Step 3:** add the OV binding wrappers (mirror M0 `_write_attribute!` GC discipline) + the `Point3f`/`Vec3f` reinterpret in `write_array_attribute!`; `bind_hot_attributes!` creates+stores bindings; route `push_to_ovrtx!` hot attrs through them.
 - [ ] **Step 4:** run → PASS (persistent bindings; no re-author).
-- [ ] **Step 5:** commit `feat(M2.3): persistent map/bind hot-path bindings + Point3f array writes`.
+- [ ] **Step 5:** commit `feat(M2.4): persistent map/bind hot-path bindings + Point3f array writes`.
 
 **Acceptance:** transforms/points update through persistent bindings created once, no re-authoring per frame.
 
 ---
 
-## Task M2.4 — `delete!` / `delete!(scene)` / `empty!` — leak-free teardown
+## Task M2.5 — `delete!` / `delete!(scene)` / `empty!` — leak-free teardown
 
 **Files:** `src/screen.jl`. Test: `test/m2_delete_test.jl`.
 
@@ -181,13 +203,13 @@ Base.empty!(screen::Screen)
 - [ ] **Step 2:** run → FAIL.
 - [ ] **Step 3:** implement the three typed methods + the listener/scope/binding teardown.
 - [ ] **Step 4:** run → PASS (no residual prims, bindings, nodes, or listeners).
-- [ ] **Step 5:** commit `feat(M2.4): leak-free delete!/delete!(scene)/empty! teardown`.
+- [ ] **Step 5:** commit `feat(M2.5): leak-free delete!/delete!(scene)/empty! teardown`.
 
 **Acceptance:** add/delete of plots and subscenes leaves zero residual prims, bindings, nodes, or listeners; `remove_usd!` closes the M1.6 handle leak.
 
 ---
 
-## Task M2.5 — Hot-path benchmark (de-risk gate)
+## Task M2.6 — Hot-path benchmark (de-risk gate)
 
 **Files:** `bench/hot_path.jl`, `bench/RESULTS.md`. Test: a threshold assertion in `test/` (or a `bench` target).
 
@@ -195,7 +217,7 @@ Base.empty!(screen::Screen)
 - [ ] **Step 1:** write the benchmark (reuse the subprocess harness; create the renderer once; loop M frames over N objects).
 - [ ] **Step 2:** run; record updates/sec + frame time to `bench/RESULTS.md`.
 - [ ] **Step 3:** a test asserting the measured rate ≥ target (**≥30 Hz for ~10⁴ instance transforms OR ~10⁵ points**). If below target → the result documents the gap and escalates GPU-resident DLPack writes to M3 (do NOT silently pass).
-- [ ] **Step 4:** commit `bench(M2.5): hot-path throughput benchmark + results`.
+- [ ] **Step 4:** commit `bench(M2.6): hot-path throughput benchmark + results`.
 
 **Acceptance:** map/bind throughput sustains interactive rates on the A5000 (or the shortfall is measured + escalated).
 
