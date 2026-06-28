@@ -17,3 +17,7 @@ include("m0_signals_test.jl")
 include("m0_renderer_test.jl")
 include("m0_render_test.jl")
 include("m0_update_test.jl")
+
+# Shared subprocess runner (M1+)
+include("helpers.jl")
+include("m1_screen_test.jl")

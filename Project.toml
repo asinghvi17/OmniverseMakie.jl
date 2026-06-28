@@ -8,14 +8,24 @@ projects = ["lib/LibOVRTX"]
 
 [deps]
 ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
+Colors = "5ae59095-9a9b-59fe-a467-6f913c188581"
+ComputePipeline = "95dc2771-c249-4cd0-9c9f-1f3b4330693c"
 FixedPointNumbers = "53c48c17-4a7d-5ca2-90c5-79b7896eea93"
+GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 LibOVRTX = "48e69356-47aa-4e0c-8089-4409475c3dd9"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 
 [sources]
 LibOVRTX = {path = "lib/LibOVRTX"}
 
 [compat]
 ColorTypes = "0.11, 0.12"
+Colors = "0.13.1"
+ComputePipeline = "=0.1.8"
 FixedPointNumbers = "0.8"
+GeometryBasics = "0.5.11"
 LibOVRTX = "0.1"
+LinearAlgebra = "1.12.0"
+Makie = "=0.24.12"
 julia = "1.12"
