@@ -10,7 +10,9 @@ include("settings.jl")           # ScreenConfig, rtx_settings_usda
 include("translation/usd.jl")    # author_render_root!, usda_mesh, usda_matrix4d
 include("translation/camera.jl") # camera_to_world, author_camera!, camera_intrinsics
 include("translation/lights.jl") # lights_usda, author_root_from_scene!, author_lights!
-include("screen.jl")             # Screen, activate!
+include("translation/materials.jl") # displaycolor_for (plot.color → primvars:displayColor)
+include("translation/meshes.jl")    # to_ovrtx_object (Makie.Mesh → UsdGeomMesh reference)
+include("screen.jl")             # Screen, setup_scene!, insert!, colorbuffer, activate!
 
 # Re-export every Makie name verbatim (GLMakie/src/GLMakie.jl:36-41).
 for name in names(Makie, all = true)

@@ -36,21 +36,34 @@ end
 # ------------------------------------------------------------------
 
 """
-    usda_mesh(points, faces, normals, displaycolor; model = I₄) -> String
+    usda_mesh(points, faces, normals, displaycolor; model = I₄,
+              normal_interpolation = "faceVarying", color_interpolation = "constant") -> String
 
 Emit a self-contained USDA layer containing a single `UsdGeomMesh` prim at the
 `defaultPrim = "mesh"` path.  Intended for use with `OV.add_usd_reference!`.
 
 # Arguments
 - `points`       — iterable of 3-element point positions (Float32 in output)
-- `faces`        — iterable of index iterables; any polygon arity is supported
-- `normals`      — one `normal3f` per face-vertex (faceVarying interpolation)
-- `displaycolor` — single (r, g, b) colour (constant interpolation)
+- `faces`        — iterable of index iterables; any polygon arity is supported.
+                   Indices must be **0-based** (USD convention).
+- `normals`      — one `normal3f` per face-vertex (`faceVarying`) or per vertex
+                   (`vertex`), per `normal_interpolation`.
+- `displaycolor` — a single `(r, g, b)` colour (constant interpolation) **or** a
+                   `Vector` of `(r, g, b)` colours (per-vertex interpolation),
+                   per `color_interpolation`.
 - `model`        — optional 4×4 transform matrix applied via `xformOp:transform`
-                   (defaults to identity; Makie `Mat4f` accepted directly)
+                   (defaults to identity; Makie `Mat4f` accepted directly).
+
+# Keyword arguments (backward-compatible defaults match M1.2)
+- `normal_interpolation::AbstractString = "faceVarying"` — M1.5 meshes pass
+  `"vertex"` (Makie supplies per-vertex normals).
+- `color_interpolation::AbstractString = "constant"` — M1.5 passes `"constant"`
+  (single colour) or `"vertex"` (per-vertex `displaycolor` vector).
 """
 function usda_mesh(points, faces, normals, displaycolor;
-                   model = Matrix{Float64}(LinearAlgebra.I, 4, 4))
+                   model = Matrix{Float64}(LinearAlgebra.I, 4, 4),
+                   normal_interpolation::AbstractString = "faceVarying",
+                   color_interpolation::AbstractString  = "constant")
     # Format points
     pts_str = join(
         ["($(Float32(p[1])), $(Float32(p[2])), $(Float32(p[3])))" for p in points], ", ")
@@ -61,13 +74,12 @@ function usda_mesh(points, faces, normals, displaycolor;
     fvc_str = join(string.(face_counts), ", ")
     fvi_str = join(string.(face_indices), ", ")
 
-    # Normals (per face-vertex)
+    # Normals (faceVarying or per-vertex, per normal_interpolation)
     nrm_str = join(
         ["($(Float32(n[1])), $(Float32(n[2])), $(Float32(n[3])))" for n in normals], ", ")
 
-    # Constant display colour
-    r = Float32(displaycolor[1]); g = Float32(displaycolor[2]); b = Float32(displaycolor[3])
-    col_str = "($(r), $(g), $(b))"
+    # Display colour: single (r,g,b) → constant; Vector of (r,g,b) → per-vertex.
+    col_str = _displaycolor_str(displaycolor)
 
     xform_str = usda_matrix4d(model)
 
@@ -80,17 +92,30 @@ def Mesh "mesh"
     int[] faceVertexCounts = [$(fvc_str)]
     int[] faceVertexIndices = [$(fvi_str)]
     normal3f[] normals = [$(nrm_str)] (
-        interpolation = "faceVarying"
+        interpolation = "$(normal_interpolation)"
     )
     point3f[] points = [$(pts_str)]
     color3f[] primvars:displayColor = [$(col_str)] (
-        interpolation = "constant"
+        interpolation = "$(color_interpolation)"
     )
     uniform token subdivisionScheme = "none"
     matrix4d xformOp:transform = $(xform_str)
     uniform token[] xformOpOrder = ["xformOp:transform"]
 }
 """
+end
+
+# Format a displayColor payload as the inner text of `primvars:displayColor = [...]`.
+# A single `(r, g, b)` tuple → one constant colour; a `Vector` of `(r, g, b)` → a
+# comma-separated per-vertex list.  (A bare 3-tuple is NOT an AbstractVector, so it
+# is correctly treated as one colour, preserving the M1.2/1.3/1.4 constant path.)
+function _displaycolor_str(dc)
+    if dc isa AbstractVector && !isempty(dc) && first(dc) isa Union{Tuple, AbstractVector}
+        return join(
+            ["($(Float32(c[1])), $(Float32(c[2])), $(Float32(c[3])))" for c in dc], ", ")
+    else
+        return "($(Float32(dc[1])), $(Float32(dc[2])), $(Float32(dc[3])))"
+    end
 end
 
 # ------------------------------------------------------------------
