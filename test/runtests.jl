@@ -48,3 +48,7 @@ include("m2_delete_test.jl")
 
 # M2.6 — hot-path throughput benchmark + gate (≥30 Hz for 10^4 xforms OR 10^5 points)
 include("m2_bench_test.jl")
+
+# M3.1 — OmniPBR material authoring (usda_omnipbr_material/looks_scope_usda) +
+# runtime material:binding (OV.bind_material!), validated metallic-vs-diffuse render.
+include("m3_material_test.jl")

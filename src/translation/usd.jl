@@ -177,6 +177,35 @@ function _emit_scene_scope!(buf::IO, scene2scope::Dict{UInt64,String}, scene,
 end
 
 # ------------------------------------------------------------------
+# looks_scope_usda — `def Scope "Looks"` holding (pre-authored) OmniPBR materials (M3.1)
+# ------------------------------------------------------------------
+
+"""
+    looks_scope_usda(materials::AbstractString = "") -> String
+
+Emit a `def Scope "Looks"` block (4-space indented, a direct child of `/World`, like
+the M2.3 scene scopes) to hold OmniPBR `UsdShade Material` prims.  `materials` is the
+USDA body composed inside it (one or more `usda_omnipbr_material` fragments); the
+default `""` yields an empty scope.  Authored into the root by `author_root_from_scene!`
+alongside the scene scopes.
+
+⚠️ M3.1 VALIDATED CONSTRAINT (load-bearing): an OmniPBR `Material` must be
+PRE-AUTHORED into the stage at open-time (composed into this scope's body) to be
+usable.  A `Material` added to the OPEN stage at runtime via `OV.add_usd_reference!`
+is a SILENT NO-OP for `material:binding` in our ovrtx build — the MDL material never
+becomes bindable, regardless of timing (before/after the first render).  `bind_material!`
+itself works at runtime, but only on a material that was present when the stage opened.
+So materials compose INTO this scope at author-time; they are NOT added by reference.
+
+Purely organizational: carries no transform and OMITS `upAxis` (only the root
+governs — M1.2).
+"""
+looks_scope_usda(materials::AbstractString = "") = """    def Scope "Looks"
+    {
+$(materials)    }
+"""
+
+# ------------------------------------------------------------------
 # author_render_root! — open a self-renderable USD stage in the renderer
 # ------------------------------------------------------------------
 
@@ -371,6 +400,14 @@ function author_root_from_scene!(screen, scene;
     root_scene = something(screen.scene, scene)
     scopes_str, scene2scope = scene_scopes_usda(root_scene)
     screen.scene2scope = scene2scope
+
+    # M3.1: author a `/World/Looks` scope alongside the scene scopes to hold OmniPBR
+    # materials.  Empty here (no materialized plots in M3.1); the M3.2 build branch
+    # composes each materialized plot's `usda_omnipbr_material` fragment INTO this
+    # scope's body at author-time.  Materials MUST be pre-authored (open-time) — a
+    # Material added to the OPEN stage via `add_usd_reference!` is not bindable
+    # (M3.1-validated); `OV.bind_material!` then binds at runtime.
+    scopes_str = scopes_str * looks_scope_usda()
 
     # Bake camera + lights + scope skeleton into root in ONE open_usd_string! call.
     author_render_root!(screen;

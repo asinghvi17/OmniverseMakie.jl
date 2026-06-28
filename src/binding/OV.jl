@@ -319,6 +319,40 @@ function write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Flo
 end
 
 # ------------------------------------------------------------------
+# bind_material! — write the `material:binding` relationship (M3.1)
+# ------------------------------------------------------------------
+
+"""
+    bind_material!(r::Renderer, geom_prim::AbstractString, material_prim::AbstractString)
+
+Write the USD `material:binding` relationship on the GEOMETRY prim `geom_prim`,
+pointing it at the material prim `material_prim` (an absolute prim path, e.g.
+`/World/Looks/Mat_42`).  The material prim MUST already exist on the open stage.
+
+`material:binding` is a USD relationship — a single-element array of PATHS per prim —
+so this mirrors the C `ovrtx_set_path_attributes` helper: one `ovx_string_t` element
+(the material path, 128 bits = ptr+len) with dtype `{kDLUInt,128,1}`, `is_array=true`,
+`shape=[1]`, and the `OVRTX_SEMANTIC_PATH_STRING` semantic.  Mechanically the same
+shape as the `visibility` TOKEN_STRING write, but `is_array=true` (a relationship array)
+and the PATH semantic.
+
+The material-path `String` is preserved across the FFI call + wait (the `ovx_string_t`
+references its bytes), exactly like the token-string write.  As with every open-stage
+edit, call `OV.reset!` after binding to restart RT2 accumulation before stepping.
+"""
+function bind_material!(r::Renderer, geom_prim::AbstractString, material_prim::AbstractString)
+    r.alive || error("bind_material! on a closed Renderer")
+    mat_s = String(material_prim)
+    dtype = L.DLDataType(UInt8(L.kDLUInt), UInt8(128), UInt16(1))
+    GC.@preserve mat_s begin
+        data = L.ovx_string_t[L.ovx_string(mat_s)]
+        _write_attribute!(r, geom_prim, "material:binding", dtype, true,
+                          L.OVRTX_SEMANTIC_PATH_STRING, data, Int64[1])
+    end
+    return nothing
+end
+
+# ------------------------------------------------------------------
 # write_array_attribute! — write an array attribute (e.g. points)
 # ------------------------------------------------------------------
 
