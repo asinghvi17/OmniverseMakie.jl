@@ -1,0 +1,30 @@
+[general]
+library_name = "libovrtx"
+output_file_path = "../src/libovrtx_api.jl"
+jll_pkg_name = ""
+export_symbol_prefixes = ["ovrtx_", "ovx_", "OVRTX_", "OVX_", "path_dictionary_", "DL", "kDL"]
+extract_c_comment_style = "doxygen"
+
+# Emit CEnum.@cenum for C enums (matches RadeonProRender.jl's LibRPR).
+use_julia_native_enum_type = false
+print_using_CEnum = true
+
+# CRITICAL: do not wrap `static inline` helpers (ovrtx_config_entry_*,
+# path_dictionary_* utils, is_ovx_string_empty). They have internal linkage and
+# are NOT exported symbols in libovrtx-dynamic.so, so any @ccall to them would
+# fail at runtime. We reimplement them in Julia in the parent package.
+skip_static_functions = true
+
+# Keep raw 1:1 ccall bindings; the high-level layer lives in the parent package.
+wrap_variadic_function = false
+print_enum_as_integer = false
+
+# Anonymous structs/unions (e.g. the config-entry key/value unions) get auto names.
+auto_mutability = false
+
+[codegen]
+use_ccall_macro = true
+always_NUL_terminated_string = true
+
+[codegen.macro]
+macro_mode = "basic"

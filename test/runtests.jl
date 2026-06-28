@@ -4,3 +4,5 @@ using Test
     @test (using LibOVRTX; true)
     @test (using OmniverseMakie; true)
 end
+
+include("libovrtx_struct_test.jl")
