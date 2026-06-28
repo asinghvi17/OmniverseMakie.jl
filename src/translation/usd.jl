@@ -127,13 +127,30 @@ precomputed for eye=(500,500,500), target=origin, Z-up (row-vector convention).
 # Matches the M1.2 spike-verified matrix exactly.
 const _DEFAULT_CAMERA_XFORM_STR = "( (-0.70711, 0.70711, 0.0, 0.0), (-0.40825, -0.40825, 0.81650, 0.0), (0.57735, 0.57735, 0.57735, 0.0), (500.0, 500.0, 500.0, 1.0) )"
 
+# Default lights block — a single DistantLight "Sun" that matches the M1.2 spike stage.
+# Used as the fallback when author_render_root! is called without a lights_str kwarg, and
+# when lights_usda finds no lights in the scene.  The block is 4-space indented (World child)
+# and ends with two newlines so it fits directly before the Camera prim in the template.
+const _DEFAULT_LIGHTS_STR = """    def DistantLight "Sun" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:angle = 1
+        float inputs:intensity = 3000
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+"""
+
 function author_render_root!(screen;
                               resolution = screen.fb_size,
                               camera_path::String = "/World/Camera",
                               camera_xform_str::String = _DEFAULT_CAMERA_XFORM_STR,
                               focal_length::Float64 = 18.147562,
                               h_aperture::Float64   = 20.955,
-                              v_aperture::Float64   = 15.2908)
+                              v_aperture::Float64   = 15.2908,
+                              lights_str::String    = _DEFAULT_LIGHTS_STR)
     W, H       = resolution
     cam_name   = split(camera_path, "/")[end]   # last segment → prim name under /World
     rtx_lines  = rtx_settings_usda(screen.config)
@@ -150,17 +167,7 @@ function author_render_root!(screen;
 
 def Xform "World"
 {
-    def DistantLight "Sun" (
-        prepend apiSchemas = ["ShapingAPI"]
-    )
-    {
-        float inputs:angle = 1
-        float inputs:intensity = 3000
-        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
-        uniform token[] xformOpOrder = ["xformOp:transform"]
-    }
-
-    def Camera "$(cam_name)" (
+$(lights_str)    def Camera "$(cam_name)" (
         prepend apiSchemas = ["OmniRtxCameraAutoExposureAPI_1", "OmniRtxCameraExposureAPI_1"]
     )
     {

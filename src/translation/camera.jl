@@ -138,65 +138,33 @@ end
 """
     author_camera!(screen, scene; camera_path="/World/Camera") -> Nothing
 
-Bake `scene`'s 3-D camera pose into the USD render-root and re-open the stage.
+Bake `scene`'s 3-D camera pose (and lights) into the USD render-root and re-open
+the stage.
 
-Reads `eyeposition`, `lookat`, and `upvector` from the `Camera3D` attached to
-`scene` (via `Makie.cameracontrols`), computes the camera-to-world transform with
-`camera_to_world`, and re-authors the entire root stage via `author_render_root!`
-with the new camera xform embedded in the USDA string.
+Delegates to `author_root_from_scene!` (defined in lights.jl, included after this
+file), which reads both the scene camera AND `scene.compute[:lights][]` and opens
+the stage once with both baked in.  Camera and lights are always authored together —
+baking them separately would require two stage re-opens, and the second would wipe
+the first.
 
-# Implementation note (fallback path)
-The primary mechanism — writing `omni:xform` to the camera prim via
-`OV.write_xform!` — was tested first but produced only ~7177/160000 changed pixels
-(indistinguishable from RT2 accumulation noise), confirming that camera prims ignore
-the `omni:xform` live-update attribute.  The fallback bakes the camera transform
-directly into the USDA root string, which re-opens the stage.
+This function is an intent-named entry point for callers that are conceptually
+updating the camera.  M2 will specialize it to live diffing if needed.
 
 # Side effect: stage re-open
-Because `author_render_root!` is called internally, the stage is **re-opened** on
-every `author_camera!` call.  All previously added USD references
-(`OV.add_usd_reference!`) are lost and must be re-added by the caller.
+Every call re-opens the stage.  All previously added USD references are lost and
+must be re-added by the caller.
 
 # Precondition
 `scene` must have a 3-D camera controller (`cam3d!(scene)` or `LScene`).
 
 # camera_path
-Must be a direct `/World/<name>` child (default `"/World/Camera"`).  An error is
-thrown for any other path (closes M1.2 Minor #2).
+Must be a direct `/World/<name>` child (default `"/World/Camera"`).
 
 # After this call
-Call `OV.reset!(screen.renderer)` before rendering to restart RT2 accumulation
-from the new viewpoint.
+Call `OV.reset!(screen.renderer)` before rendering to restart RT2 accumulation.
 """
 function author_camera!(screen, scene; camera_path::String = "/World/Camera")
-    _validate_camera_path(camera_path)
-
-    # Read 3-D camera controls from the Makie scene.
-    cam    = Makie.cameracontrols(scene)
-    eye    = cam.eyeposition[]
-    target = cam.lookat[]
-    up     = cam.upvector[]
-    fov    = cam.fov[]             # vertical FOV in degrees (Camera3D default: 45.0)
-
-    # Get image dimensions for aspect-correct horizontal aperture.
-    W, H = screen.fb_size
-
-    # Compute camera-to-world (USD row-vector convention).
-    M = camera_to_world(eye, target, up)
-
-    # Format the row-vector matrix as a USD matrix4d literal (no transpose).
-    xform_str = _usda_row_vector_matrix(M)
-
-    # Derive intrinsics from the scene's vertical FOV and image aspect ratio.
-    intr = camera_intrinsics(fov, W, H)
-
-    # Bake camera into root (fallback path: re-opens stage).
-    author_render_root!(screen;
-        resolution       = screen.fb_size,
-        camera_path      = camera_path,
-        camera_xform_str = xform_str,
-        focal_length     = intr.focal_length,
-        h_aperture       = intr.h_aperture,
-        v_aperture       = intr.v_aperture)
-    return nothing
+    # Delegate to the canonical combined authorer (lights.jl).
+    # camera_path validation happens inside author_root_from_scene!.
+    return author_root_from_scene!(screen, scene; camera_path = camera_path)
 end
