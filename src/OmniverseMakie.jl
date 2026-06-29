@@ -34,6 +34,10 @@ function __init__()
     Makie.CURRENT_DEFAULT_THEME[:OmniverseMakie] = Makie.Attributes(
         mode = :rt2, samples = 512, warmup = 64, max_bounces = 4,
     )
+    # M3.5: make `material=` a backend-universal attribute so it is accepted on Lines /
+    # Scatter / LineSegments too (Makie validates undocumented keywords; only mesh-like
+    # recipes document `material` natively).
+    _enable_material_attribute!()
     activate!()
     return
 end

@@ -100,7 +100,8 @@ end
 # ------------------------------------------------------------------
 
 # `def Sphere "proto" { ... }` body (4-space indented, child of the instancer).
-# `color_const` (an (r,g,b) tuple) is baked as a constant displayColor when given.
+# `color_const` (an (r,g,b) tuple) is baked as a constant displayColor when given;
+# `nothing` (a materialized instancer) OMITS displayColor.
 function _sphere_proto_body(color_const)
     col = color_const === nothing ? "" : """
         color3f[] primvars:displayColor = [($(Float32(color_const[1])), $(Float32(color_const[2])), $(Float32(color_const[3])))] (
@@ -114,6 +115,7 @@ $(col)    }"""
 end
 
 # `def Mesh "proto" { ... }` body from an explicit mesh (4-space indented).
+# `color_const === nothing` (a materialized instancer) OMITS displayColor.
 function _mesh_proto_body(points, faces0, normals, color_const)
     fvc = join(string.([length(f) for f in faces0]), ", ")
     fvi = join(string.([i for f in faces0 for i in f]), ", ")
@@ -133,6 +135,53 @@ function _mesh_proto_body(points, faces0, normals, color_const)
         point3f[] points = [$(_pt3f_list(points))]
 $(col)        uniform token subdivisionScheme = "none"
     }"""
+end
+
+# ------------------------------------------------------------------
+# Merged-instances mesh — materialized Scatter / MeshScatter (M3.5)
+#
+# ovrtx does NOT honor an OmniPBR `material:binding` on a UsdGeomPointInstancer (its
+# instances render the MDL default regardless of binding to the instancer, the
+# prototype, or an inline binding — empirically verified).  So a MATERIALIZED
+# Scatter/MeshScatter is rendered as ONE merged `UsdGeomMesh` of the marker copies (the
+# fallback documented at the top of this file), which DOES bind a material like any Mesh.
+# Non-materialized scatter/meshscatter stay on the proven PointInstancer path (unchanged).
+# ------------------------------------------------------------------
+
+# Rotate a 3-vector by a quaternion (w, x, y, z) — `v + 2w(q×v) + 2(q×(q×v))`.
+function _quat_rotate(q, v)
+    w, x, y, z = Float32(q[1]), Float32(q[2]), Float32(q[3]), Float32(q[4])
+    vx, vy, vz = Float32(v[1]), Float32(v[2]), Float32(v[3])
+    tx = 2f0 * (y * vz - z * vy); ty = 2f0 * (z * vx - x * vz); tz = 2f0 * (x * vy - y * vx)
+    return (vx + w * tx + (y * tz - z * ty),
+            vy + w * ty + (z * tx - x * tz),
+            vz + w * tz + (x * ty - y * tx))
+end
+
+# Concatenate the marker mesh (`mpts`/`mfaces` 0-based/`mnrm`) transformed to each
+# instance (per-instance `scales`, optional `orientations` quaternions, `positions`)
+# into ONE (points, 0-based faces, normals) mesh.
+function _merged_instances_mesh(mpts, mfaces, mnrm, positions, scales, orientations)
+    P = Point3f[]; N = Vec3f[]; F = Vector{Int}[]
+    nmark = length(mpts)
+    for i in eachindex(positions)
+        s = scales[i]; pos = positions[i]
+        q = orientations === nothing ? nothing : orientations[i]
+        off = length(P)
+        for k in 1:nmark
+            p  = mpts[k]
+            sp = (Float32(p[1]) * s[1], Float32(p[2]) * s[2], Float32(p[3]) * s[3])
+            rp = q === nothing ? sp : _quat_rotate(q, sp)
+            push!(P, Point3f(rp[1] + Float32(pos[1]), rp[2] + Float32(pos[2]), rp[3] + Float32(pos[3])))
+            nn = mnrm[k]
+            rn = q === nothing ? (Float32(nn[1]), Float32(nn[2]), Float32(nn[3])) : _quat_rotate(q, nn)
+            push!(N, Vec3f(rn[1], rn[2], rn[3]))
+        end
+        for f in mfaces
+            push!(F, Int[off + idx for idx in f])
+        end
+    end
+    return P, F, N
 end
 
 # Author a complete PointInstancer reference layer around `proto_body`.
@@ -189,7 +238,11 @@ end
 
 function _usda_basiscurves(points, counts, width, color_values, color_interp; model)
     counts_str = join(string.(counts), ", ")
-    col_block = """    color3f[] primvars:displayColor = [$(_displaycolor_str(color_values))] (
+    # `color_values === nothing` (a MATERIALIZED curve — M3.5) OMITS `primvars:displayColor`
+    # so the bound OmniPBR material fully governs shading; the non-`nothing` branch is the
+    # byte-for-byte M1 emit (regression guard).  Mirrors `usda_mesh`'s `col_block`.
+    col_block = color_values === nothing ? "" :
+        """    color3f[] primvars:displayColor = [$(_displaycolor_str(color_values))] (
         interpolation = "$(color_interp)"
     )
 """
@@ -295,12 +348,23 @@ function to_ovrtx_object(screen, scene, plot::Makie.Surface)
 
     points, faces0, normals = _surface_mesh(xs, ys, zs)
     isempty(faces0) && return nothing
-    values, interp = _surface_colors(plot, zs)
+    path = plot_prim_path(screen.scene2scope, scene, plot)
 
+    if is_materialized(plot)
+        # M3.5: a materialized Surface is a `UsdGeomMesh` like `Mesh` — emit it WITHOUT
+        # `displayColor` (the `nothing` sentinel) so the OmniPBR material (PRE-AUTHORED in
+        # /World/Looks, BOUND by `register_ovrtx_robj!`'s empty-inputs branch) governs
+        # shading.  Surface has NO diff node ⇒ a STATIC material (no live edit) — fine.
+        usda = usda_mesh(points, faces0, normals, nothing;
+                         model                = plot.model[],
+                         normal_interpolation = "vertex")
+        return OV.add_usd_reference!(screen.renderer, usda, path)
+    end
+
+    values, interp = _surface_colors(plot, zs)
     usda = usda_mesh(points, faces0, normals, values;
                      model                = plot.model[],
                      normal_interpolation = "vertex",
                      color_interpolation  = interp)
-    return OV.add_usd_reference!(screen.renderer, usda,
-                                 plot_prim_path(screen.scene2scope, scene, plot))
+    return OV.add_usd_reference!(screen.renderer, usda, path)
 end

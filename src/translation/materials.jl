@@ -123,8 +123,8 @@ function usda_omnipbr_material(name::AbstractString, inputs::AbstractDict)
     for (k, v) in inputs
         if v isa NTuple{3}                     # color3f
             push!(lines, "                color3f inputs:$k = ($(v[1]), $(v[2]), $(v[3]))")
-        elseif v isa Bool                      # bool (e.g. project_uvw) — must precede the
-            push!(lines, "                bool inputs:$k = $(v ? 1 : 0)")   # Real/float branch
+        elseif v isa Bool                      # bool (enable_emission/_opacity, project_uvw)
+            push!(lines, "                bool inputs:$k = $(v ? 1 : 0)")   # — must precede Real/float
         elseif v isa AbstractString            # asset (texture)
             push!(lines, "                asset inputs:$k = @$(v)@")
         else                                   # float
@@ -180,6 +180,35 @@ const _OMNIPBR_KEY_MAP = Dict{Symbol,String}(
     :roughness_texture  => "reflectionroughness_texture",
     :metallic_texture   => "metallic_texture",
 )
+
+# Default OmniPBR `emissive_intensity` authored alongside an `emissive=` material key
+# (M3.5).  OmniPBR's MDL default is 40.0 (soft-range 0–1000); we author a higher constant
+# so an emission-only material reads clearly emissive-coloured through auto-exposure
+# (the M3.5 emissive-red Lines render test), rather than near-black.
+const _EMISSIVE_INTENSITY = 5000.0f0
+
+"""
+    _enable_material_attribute!() -> Nothing
+
+Register `:material` as a Makie GENERIC attribute (M3.5) so the `material=` escape hatch
+is accepted on EVERY plot type — not just the recipes that document it natively
+(`mesh`/`meshscatter`/`surface`).  Makie's `validate_attribute_keys` rejects an undocumented
+keyword UNLESS it is in `Makie.attribute_name_allowlist()` (the universal-attribute list:
+`:model`, `:transformation`, `:cycle`, …); without this, `lines!(…; material=…)` /
+`scatter!(…; material=…)` throw `InvalidAttributeError` (`Lines`/`Scatter`/`LineSegments`
+have no `material` attribute).  We append `:material` to that allowlist at `__init__`
+(idempotently, capturing the existing list so we never drop Makie's own entries), making
+materials a backend-universal attribute.  Plots that don't set it are unaffected
+(`is_materialized` reads it through a `haskey` guard → `false` for a plain plot, keeping
+the `displayColor` path byte-unchanged).
+"""
+function _enable_material_attribute!()
+    base = Makie.attribute_name_allowlist()
+    :material in base && return nothing
+    newlist = (base..., :material)
+    @eval Makie attribute_name_allowlist() = $newlist
+    return nothing
+end
 
 # ==================================================================
 # M3.3 — the temp-texture writer + `_texture_asset_for`
@@ -334,11 +363,20 @@ function _merge_material_input!(inputs::AbstractDict, key::Symbol, value,
         # Other `*_texture` maps — paths used AS-IS (no temp write; already asset paths).
         inputs[_OMNIPBR_KEY_MAP[key]] = _texture_asset_for(value, nothing)
     elseif key === :emissive
-        inputs["emissive_color"]  = _rgb(Makie.to_color(value))
-        inputs["enable_emission"] = 1          # companion flag (OmniPBR gate)
+        inputs["emissive_color"]     = _rgb(Makie.to_color(value))
+        # OmniPBR's `enable_emission` / `enable_opacity` are MDL `uniform bool` gates;
+        # they MUST be authored as USD `bool` (a `float`/`int` against a bool MDL param
+        # fails to bind → emission/opacity SILENTLY off).  `true` (a `Bool`) hits
+        # `usda_omnipbr_material`'s `Bool` branch (ordered BEFORE the `Real` float branch,
+        # since `Bool <: Real`) → `bool inputs:enable_emission = 1`.
+        inputs["enable_emission"]    = true            # companion bool gate (OmniPBR)
+        # `emissive_intensity` (OmniPBR float, default 40.0, soft-range 0–1000) scales the
+        # emission; author it explicitly so emission is clearly VISIBLE (a curve/mesh with
+        # only `emissive=` set reads emissive-coloured rather than near-black).
+        inputs["emissive_intensity"] = _EMISSIVE_INTENSITY
     elseif key === :opacity
         inputs["opacity_constant"] = value
-        inputs["enable_opacity"]   = 1          # companion flag (OmniPBR gate)
+        inputs["enable_opacity"]   = true              # companion bool gate (OmniPBR)
     elseif haskey(_OMNIPBR_KEY_MAP, key)
         inputs[_OMNIPBR_KEY_MAP[key]] = value   # metallic, roughness, …
     else
