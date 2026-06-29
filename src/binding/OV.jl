@@ -5,6 +5,9 @@ using .SignalGuard: with_restored_signals
 
 include("dlpack.jl")
 
+# Named constant so the three timeout kwarg defaults share a single source.
+const _TIMEOUT_INFINITE_NS = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns
+
 # ------------------------------------------------------------------
 # Renderer — GC-aware wrapper around ovrtx_renderer_t
 # ------------------------------------------------------------------
@@ -39,7 +42,7 @@ end
 # ------------------------------------------------------------------
 
 function enqueue_wait(r::Renderer, enq, op::AbstractString;
-                     timeout_ns::UInt64 = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns)
+                     timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
     r.alive || error("enqueue_wait called on a closed Renderer")
     LibOVRTX.check(enq, op)
     wr = Ref{LibOVRTX.ovrtx_op_wait_result_t}()
@@ -111,7 +114,7 @@ Returns a `StepResult`; the caller is responsible for closing it (or letting
 the finalizer run).
 """
 function step!(r::Renderer, product::AbstractString;
-              dt::Float64=1/60, timeout_ns::UInt64 = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns)
+              dt::Float64=1/60, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
     rp = LibOVRTX.ovx_string_t[ LibOVRTX.ovx_string(product) ]
     GC.@preserve product rp begin
         set = LibOVRTX.ovrtx_render_product_set_t(pointer(rp), Csize_t(1))
@@ -213,7 +216,7 @@ right-side-up).  No vertical flip is applied.  Verified empirically by
 world +Z vs −Z).
 """
 function render_to_matrix(r::Renderer, product::AbstractString;
-                         warmup::Int=64, timeout_ns::UInt64 = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns)
+                         warmup::Int=64, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
     for s in 1:(warmup - 1)
         sr = step!(r, product; timeout_ns); close(sr)
     end

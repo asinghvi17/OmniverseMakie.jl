@@ -76,11 +76,7 @@ function interactive_display(fig_or_scene; size = (800, 600), steps_per_tick = 2
     screen = Screen(cam_scene)
     screen.fb_size == size ||
         error("interactive_display: expected fb_size $(size), got $(screen.fb_size)")
-    author_root_from_scene!(screen, cam_scene; resolution = screen.fb_size)
-    screen.last_camera = _camera_snapshot(cam_scene)
-    screen.last_lights = _lights_snapshot(cam_scene.compute[:lights][])
-    screen.authored = true
-    Makie.insertplots!(screen, scene)
+    _author_screen!(screen, cam_scene, scene)
 
     # 3. First ovrtx frame (full warmup for a clean initial image).
     frame = OV.render_to_matrix(screen.renderer, screen.product; warmup = screen.config.warmup)
@@ -98,20 +94,17 @@ function interactive_display(fig_or_scene; size = (800, 600), steps_per_tick = 2
     W, H = size
     glscene = Makie.Scene(size = size)
     Makie.campixel!(glscene)
-    img = image!(glscene, 0 .. W, 0 .. H, reverse(permutedims(frame), dims = 2); interpolate = false)
+    img = image!(glscene, 0 .. W, 0 .. H, _orient_for_display(frame); interpolate = false)
     glscr = GLMakie.Screen()
     display(glscr, glscene)
 
     # 5. Forward the window's input into cam_scene so its Camera3D orbits/zooms live
     #    (campixel! has no 3-D camera of its own).  One-way glscene→cam_scene; the
     #    listeners observe (never Consume), so GLMakie still processes events normally.
-    input_listeners = Any[]
-    for f in _M5_FORWARDED_EVENTS
-        push!(input_listeners, on(getproperty(glscene.events, f)) do v
-            getproperty(cam_scene.events, f)[] = v
-            return Makie.Consume(false)
-        end)
-    end
+    input_listeners = [on(getproperty(glscene.events, f)) do v
+        getproperty(cam_scene.events, f)[] = v
+        return Makie.Consume(false)
+    end for f in _M5_FORWARDED_EVENTS]
 
     session = ViewportSession(screen, glscr, glscene, img, cam_scene,
                               steps_per_tick, screen.config.warmup,
@@ -197,11 +190,7 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     if new_screen.fb_size != (W, H)
         @warn "M5 resize: expected fb_size $((W, H)), got $(new_screen.fb_size)"
     end
-    author_root_from_scene!(new_screen, cam_scene; resolution = new_screen.fb_size)
-    new_screen.last_camera = _camera_snapshot(cam_scene)
-    new_screen.last_lights = _lights_snapshot(cam_scene.compute[:lights][])
-    new_screen.authored    = true
-    Makie.insertplots!(new_screen, root_scene)
+    _author_screen!(new_screen, cam_scene, root_scene)
 
     # 3. Render a warmup frame at the new size.
     frame = OV.render_to_matrix(new_screen.renderer, new_screen.product;
@@ -213,6 +202,10 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     old_screen      = session.screen
     session.screen  = new_screen
     session.samples = new_screen.config.warmup
+    # Consume the warmup render's flag (mirrors interactive_display's post-warmup reset):
+    # the warmup already drew the new geometry, so the first tick should not redundantly
+    # reset and discard this clean frame.
+    new_screen.requires_update = false
     Base.close(old_screen)
 
     # 5. Update the displayed image: delete the old image! (wrong size) and add a new
@@ -220,7 +213,7 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     #    covers 0..W, 0..H after the GLMakie window resize.
     delete!(session.glscene, session.image_plot)
     new_img = image!(session.glscene, 0 .. W, 0 .. H,
-                     reverse(permutedims(frame), dims = 2); interpolate = false)
+                     _orient_for_display(frame); interpolate = false)
     session.image_plot = new_img
 
     return nothing

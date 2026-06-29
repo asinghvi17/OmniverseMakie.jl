@@ -33,21 +33,8 @@ function _on_render_tick_impl!(session::ViewportSession)
     screen    = session.screen
     cam_scene = session.cam_scene
 
-    # Push live render-config deltas (each a no-op when unchanged).
-    cam_changed   = sync_camera!(screen, cam_scene)
-    light_changed = sync_lights!(screen, cam_scene)
-
-    # Pull every plot's :ovrtx_renderobject diff node — mirrors colorbuffer's per-frame
-    # logic.  Capture `pending` (a requires_update set before this tick, e.g. from
-    # delete!) and clear the flag so it never carries over.
-    pending = screen.requires_update
-    screen.requires_update = false
-    pull_ovrtx_nodes!(screen, screen.scene)
-    need_reset = cam_changed || light_changed || screen.requires_update || pending
-    screen.requires_update = false
-
-    # Reset RT2 accumulation if anything changed; otherwise keep accumulating.
-    if need_reset
+    # Push live camera/light/plot deltas; reset RT2 accumulation if anything changed.
+    if _sync_and_needs_reset!(screen, cam_scene)
         OV.reset!(screen.renderer)
         session.samples = 0
     end

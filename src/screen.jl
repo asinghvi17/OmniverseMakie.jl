@@ -297,6 +297,37 @@ function Base.empty!(screen::Screen)
 end
 
 # ------------------------------------------------------------------
+# Shared authoring + sync helpers (colorbuffer + M5 interactive paths)
+# ------------------------------------------------------------------
+
+# Author the open ovrtx stage from a scene + seed the camera/light snapshots so the next
+# sync is a no-op, then add every plot.  Shared by colorbuffer (offscreen) + the M5
+# interactive paths so the snapshot-before-sync invariant cannot drift between them.
+function _author_screen!(screen::Screen, cam_scene, plot_scene)
+    author_root_from_scene!(screen, cam_scene; resolution = screen.fb_size)
+    screen.last_camera = _camera_snapshot(cam_scene)
+    screen.last_lights = _lights_snapshot(cam_scene.compute[:lights][])
+    screen.authored    = true
+    Makie.insertplots!(screen, plot_scene)
+    return screen
+end
+
+# Push live camera/light/plot deltas to the open stage; return whether RT2 must restart this
+# frame (camera/light moved, or a plot diff node flipped requires_update).  Clears
+# requires_update on both the pre-pull capture and the post-pull read.  Shared by colorbuffer
+# and the M5 render tick so the subtle two-write reset logic stays in one place.
+function _sync_and_needs_reset!(screen::Screen, cam_scene)::Bool
+    cam_changed   = sync_camera!(screen, cam_scene)
+    light_changed = sync_lights!(screen, cam_scene)
+    pending = screen.requires_update
+    screen.requires_update = false
+    pull_ovrtx_nodes!(screen, screen.scene)
+    need_reset = cam_changed || light_changed || screen.requires_update || pending
+    screen.requires_update = false
+    return need_reset
+end
+
+# ------------------------------------------------------------------
 # colorbuffer — open-once + live render-config sync + RT2 render
 # ------------------------------------------------------------------
 
@@ -328,31 +359,12 @@ function Makie.colorbuffer(screen::Screen; kw...)
     cam_scene = something(_scene_for_camera(scene), scene)
 
     if !screen.authored
-        # 1. Author the root ONCE (camera + lights baked) — this opens the stage.
-        author_root_from_scene!(screen, cam_scene; resolution = screen.fb_size)
-        # 2. Seed snapshots to the just-baked state so the first sync is a no-op.
-        screen.last_camera = _camera_snapshot(cam_scene)
-        screen.last_lights = _lights_snapshot(cam_scene.compute[:lights][])
-        screen.authored = true
-        # 3. Add every plot's USD reference on the fresh stage.
-        Makie.insertplots!(screen, scene)
+        # Author the root ONCE (camera + lights baked, snapshots seeded, plots added).
+        _author_screen!(screen, cam_scene, scene)
     end
 
-    # Push live render-config deltas (each a no-op when unchanged).
-    cam_changed   = sync_camera!(screen, cam_scene)
-    light_changed = sync_lights!(screen, cam_scene)
-
-    # Pull every plot's :ovrtx_renderobject diff node (M2.2): a clean graph is a
-    # no-op; any changed attribute pushes one minimal C write and flips
-    # `requires_update`.  Fold that into the single per-frame RT2 reset.  A
-    # `requires_update` set BEFORE this frame (an imperative `delete!`/`empty!`
-    # teardown — M2.5) is captured as `pending` so its reset is honored too, then the
-    # flag is cleared so it never carries over to a later frame.
-    pending = screen.requires_update
-    screen.requires_update = false
-    pull_ovrtx_nodes!(screen, scene)
-    need_reset = cam_changed || light_changed || screen.requires_update || pending
-    screen.requires_update = false
+    # Push live render-config deltas; reset RT2 if anything changed.
+    need_reset = _sync_and_needs_reset!(screen, cam_scene)
     need_reset && OV.reset!(screen.renderer)
 
     return OV.render_to_matrix(screen.renderer, screen.product; warmup = screen.config.warmup)

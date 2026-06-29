@@ -14,6 +14,9 @@
 #   img[1][] = EndPoints (x range), img[2][] = EndPoints (y range), img[3][] = Matrix{RGBA{N0f8}}
 #   Data Observable index = [3].  `image!(ax, frame)` — x=img[1], y=img[2], data=img[3].
 
+# single source for the host-frame → Makie-image orientation; cpu_blit!, interactive_display, and resize_viewport! must all use it
+_orient_for_display(frame) = reverse(permutedims(frame), dims = 2)
+
 """
     cpu_blit!(image_plot, frame::AbstractMatrix{RGBA{N0f8}}) -> Nothing
 
@@ -26,6 +29,6 @@ image appears right-side-up in the GLMakie window.
 """
 function cpu_blit!(image_plot, frame::AbstractMatrix{RGBA{N0f8}})
     # [3] = data Observable (x=img[1], y=img[2], data=img[3]; verified Step 1 REPL)
-    image_plot[3][] = reverse(permutedims(frame), dims=2)
+    image_plot[3][] = _orient_for_display(frame)
     return nothing
 end

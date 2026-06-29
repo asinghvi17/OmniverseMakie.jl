@@ -1,7 +1,7 @@
 module OmniverseMakie
 
 using Makie, GeometryBasics, Colors, ColorTypes, FixedPointNumbers, LinearAlgebra
-using GLMakie            # M5: host window for interactive_display
+import GLMakie           # M5: host window for interactive_display (all uses are qualified)
 import LibOVRTX
 import ComputePipeline   # :ovrtx_renderobject diff node (register_computation!/mark_resolved!)
 import PNGFiles          # M3.3: write an image `color` to a temp PNG for an OmniPBR texture
