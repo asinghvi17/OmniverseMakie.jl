@@ -72,3 +72,9 @@ include("m4_glass_test.jl")
 
 # M5.1 — bounded ovrtx step! (timeout_ns kwarg on enqueue_wait/step!).
 include("m5_bounded_step_test.jl")
+
+# M5.2 — cpu_blit! orientation (subprocess, offscreen GL).
+include("m5_blit_test.jl")
+
+# M5.3 — interactive_display shows non-black RTX frame in a real GLMakie window (subprocess).
+include("m5_viewport_test.jl")

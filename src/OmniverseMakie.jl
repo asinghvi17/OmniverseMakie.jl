@@ -1,6 +1,7 @@
 module OmniverseMakie
 
 using Makie, GeometryBasics, Colors, ColorTypes, FixedPointNumbers, LinearAlgebra
+using GLMakie            # M5: host window for interactive_display
 import LibOVRTX
 import ComputePipeline   # :ovrtx_renderobject diff node (register_computation!/mark_resolved!)
 import PNGFiles          # M3.3: write an image `color` to a temp PNG for an OmniPBR texture
@@ -17,6 +18,13 @@ include("translation/meshes.jl")    # to_ovrtx_object (Makie.Mesh → UsdGeomMes
 include("translation/primitives.jl") # to_ovrtx_object (scatter/meshscatter/lines/surface)
 include("compute.jl")            # OvrtxRObj (Screen.plot2robj references it) — before screen.jl
 include("screen.jl")             # Screen, open-stage colorbuffer, insert!/insertplots!, activate!
+
+# M5 interactive viewport: cpu_blit!, ViewportSession, interactive_display.
+# camera_loop.jl is a stub here; Task 3 fills it.
+include("interactive/blit.jl")
+include("interactive/viewport.jl")
+include("interactive/camera_loop.jl")
+export interactive_display
 
 # Re-export every Makie name verbatim (GLMakie/src/GLMakie.jl:36-41).
 for name in names(Makie, all = true)

@@ -30,10 +30,13 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300)
             "OM_USDA"                   => _HELPER_USDA,
             "PATH"                      => get(ENV, "PATH", ""),
             "HOME"                      => get(ENV, "HOME", ""),
-            # GLMakie (added in M5) cannot precompile on a headless server
-            # (GLFW needs a display). Setting AUTO=0 skips the startup
-            # auto-precompile so the subprocess can still load OmniverseMakie
-            # (which does not import GLMakie itself).
+            # GLMakie (M5) needs a real X display for GL context creation.
+            # Forward the Xwayland display variables proven to work on this host.
+            "DISPLAY"                   => get(ENV, "DISPLAY", ":0"),
+            "XAUTHORITY"                => get(ENV, "XAUTHORITY", "/run/user/1000/.mutter-Xwaylandauth.QRQ4Q3"),
+            "XDG_RUNTIME_DIR"           => get(ENV, "XDG_RUNTIME_DIR", "/run/user/1000"),
+            # GLMakie cannot precompile without a display available.  AUTO=0 skips
+            # startup auto-precompile so the subprocess loads OmniverseMakie cleanly.
             "JULIA_PKG_PRECOMPILE_AUTO" => "0",
         )
         out = IOBuffer()
