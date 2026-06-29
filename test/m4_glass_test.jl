@@ -56,3 +56,14 @@ const _M4_GLASS_PROG = read(joinpath(@__DIR__, "m4_glass_prog.jl"), String)
     mdk = match(r"CENTER_DARK=(\d+)", output)
     @test mdk !== nothing && parse(Int, mdk.captures[1]) > 50
 end
+
+const _M4_GLASS_LIVE_PROG = read(joinpath(@__DIR__, "m4_glass_live_prog.jl"), String)
+
+@testset "M4 LIVE glass material edit routes to OmniGlass inputs (subprocess)" begin
+    exitcode, output = run_ovrtx_subprocess(_M4_GLASS_LIVE_PROG; timeout = 600)
+    @info "M4 glass-live subprocess output" output
+    @test exitcode == 0
+    @test contains(output, "OK_GLASS_LIVE")
+    mmad = match(r"MEANABSDIFF=([0-9.eE+\-]+)", output)
+    @test mmad !== nothing && parse(Float64, mmad.captures[1]) > 0.01
+end

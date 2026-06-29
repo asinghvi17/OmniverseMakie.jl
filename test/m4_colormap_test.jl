@@ -54,3 +54,14 @@ const _M4_COLORMAP_PROG = read(joinpath(@__DIR__, "m4_colormap_prog.jl"), String
     mbk = match(r"COLOR_BUCKETS=(\d+)", output)
     @test mbk !== nothing && parse(Int, mbk.captures[1]) >= 6
 end
+
+const _M4_COLORMAP_LIVE_PROG = read(joinpath(@__DIR__, "m4_colormap_live_prog.jl"), String)
+
+@testset "M4 LIVE numeric-color edit re-maps via colormap (subprocess)" begin
+    exitcode, output = run_ovrtx_subprocess(_M4_COLORMAP_LIVE_PROG; timeout = 600)
+    @info "M4 colormap-live subprocess output" output
+    @test exitcode == 0
+    @test contains(output, "OK_COLORMAP_LIVE")
+    mmad = match(r"MEANABSDIFF=([0-9.eE+\-]+)", output)
+    @test mmad !== nothing && parse(Float64, mmad.captures[1]) > 0.004
+end

@@ -328,8 +328,8 @@ _model_to_usd_xform(m) = Float64.(collect(m'))
 
 # Constant or per-vertex displayColor → a 3-lane color3f[] write on the referenced prim
 # (spike-proven honored).  One element per colour, `shape = [ncolors]`.
-function _push_displaycolor!(r, prim, scaled_color)
-    values, _ = _displaycolor_from_scaled(scaled_color, 0)
+function _push_displaycolor!(r, prim, plot, scaled_color)
+    values, _ = _scaled_to_display(plot, scaled_color, 0)   # numeric `scaled_color` → plot colormap
     rgbs = values isa AbstractVector && !isempty(values) && first(values) isa Union{Tuple,AbstractVector} ?
         values : [values]
     flat = Vector{Float32}(undef, 3 * length(rgbs))
@@ -400,8 +400,8 @@ end
 # Constant `(r,g,b)` Float32 base colour from a resolved `:scaled_color` for a
 # MATERIALIZED plot: a single colour is used directly; a per-vertex colour collapses to
 # its average (OmniPBR has no per-vertex diffuse base — the M3.2 stretch fallback).
-function _materialized_base_rgb(scaled_color)
-    values, interp = _displaycolor_from_scaled(scaled_color, 0)
+function _materialized_base_rgb(plot, scaled_color)
+    values, interp = _scaled_to_display(plot, scaled_color, 0)   # numeric `scaled_color` → plot colormap
     if interp == "constant"
         return (Float32(values[1]), Float32(values[2]), Float32(values[3]))
     end
@@ -413,15 +413,19 @@ function _materialized_base_rgb(scaled_color)
             Float32(sum(v[3] for v in values) / n))
 end
 
-# Route a changed `:material` (the resolved `Attributes`) to live OmniPBR shader-input
-# writes: map each material key to its OmniPBR input name (reusing the M3.2
-# `_merge_material_input!` mapping), then `write_shader_input!` each SCALAR / color3f
-# input.  Texture-asset live-swaps (`diffuse_texture`, …) are OUT of M3.4 scope (only
-# scalar/color3f writes are proven here) — a texture-bearing change is `@warn`ed + skipped.
-function _push_material!(r, shader_prim::AbstractString, material_attrs)
+# Route a changed `:material` (the resolved `Attributes`) to live shader-input writes on the
+# plot's material KIND: map each material key to its input name — OmniPBR via the M3.2
+# `_merge_material_input!`, OmniGlass via `_merge_glass_input!` — then `write_shader_input!`
+# each SCALAR / color3f input.  Texture-asset live-swaps (`diffuse_texture`, …) are OUT of
+# M3.4 scope (only scalar/color3f writes are proven here) — a texture change is `@warn`ed + skipped.
+function _push_material!(r, shader_prim::AbstractString, kind::Symbol, material_attrs)
     inputs = Dict{String,Any}()
     for k in keys(material_attrs)
-        _merge_material_input!(inputs, Symbol(k), Makie.to_value(material_attrs[k]), false, false)
+        if kind === :glass
+            _merge_glass_input!(inputs, Symbol(k), Makie.to_value(material_attrs[k]))
+        else
+            _merge_material_input!(inputs, Symbol(k), Makie.to_value(material_attrs[k]), false, false)
+        end
     end
     for (input_name, v) in inputs
         if v isa AbstractString
@@ -441,7 +445,7 @@ function _push_material!(r, shader_prim::AbstractString, material_attrs)
 end
 
 """
-    push_to_ovrtx!(screen, robj, name::Symbol, value) -> Bool
+    push_to_ovrtx!(screen, robj, plot, name::Symbol, value) -> Bool
 
 Route ONE changed compute output to its minimal in-place USD write on the referenced
 prim `robj.prim_path` (no re-author):
@@ -458,7 +462,7 @@ prim `robj.prim_path` (no re-author):
 
 Returns `true` if a write was issued (an unrouted `name` is a no-op → `false`).
 """
-function push_to_ovrtx!(screen, robj::OvrtxRObj, name::Symbol, value)
+function push_to_ovrtx!(screen, robj::OvrtxRObj, plot, name::Symbol, value)
     r       = screen.renderer
     prim    = robj.prim_path
     binding = get(robj.bindings, name, nothing)   # M2.4: persistent hot-path binding (or nothing)
@@ -485,11 +489,12 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, name::Symbol, value)
         _push_faces!(r, prim, value)
     elseif name === :scaled_color
         if robj.material_shader === nothing
-            _push_displaycolor!(r, prim, value)                  # USD-native displayColor (unchanged)
+            _push_displaycolor!(r, prim, plot, value)            # USD-native displayColor
         else
-            # M3.4: materialized → re-write the OmniPBR base colour in place (constant only).
-            _write_shader_input!(r, robj.material_shader, "diffuse_color_constant",
-                                 _materialized_base_rgb(value))
+            # M3.4: materialized → re-write the base colour in place (constant only) on the
+            # correct material KIND (OmniGlass `glass_color` vs OmniPBR `diffuse_color_constant`).
+            _write_shader_input!(r, robj.material_shader, _base_color_input(_material_kind(plot)),
+                                 _materialized_base_rgb(plot, value))
         end
     elseif name === :material
         # M3.4: a live `plot.material[]` edit re-writes the pre-authored shader's inputs.
@@ -500,7 +505,7 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, name::Symbol, value)
                    supported (a runtime material swap needs a root re-author) — skipped."
             routed = false
         else
-            _push_material!(r, robj.material_shader, value)
+            _push_material!(r, robj.material_shader, _material_kind(plot), value)
         end
     elseif name === :visible
         _push_visibility!(r, prim, value)
@@ -650,7 +655,7 @@ function register_ovrtx_robj!(screen, scene, plot)
                     for name in keys(args)
                         name === :ovrtx_screen && continue
                         changed[name] || continue                    # minimal-delta gate
-                        push_to_ovrtx!(scr, robj, name, args[name])
+                        push_to_ovrtx!(scr, robj, plot, name, args[name])
                     end
                 end
             end

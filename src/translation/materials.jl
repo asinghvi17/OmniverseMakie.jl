@@ -427,6 +427,33 @@ function _material_kind(plot)
     return (haskey(mat, :glass) && Makie.to_value(mat[:glass]) === true) ? :glass : :omnipbr
 end
 
+# Merge ONE glass `material=` key/value into `inputs` (mapped to its OmniGlass input name) —
+# the OmniGlass counterpart of `_merge_material_input!`.  Shared by the author path
+# (`_glass_inputs_from`) and the LIVE `:material` push (`_push_material!`, kind=:glass), so a
+# live glass edit writes OmniGlass input names, not OmniPBR ones.
+function _merge_glass_input!(inputs::AbstractDict, key::Symbol, value)
+    if key === :base_color || key === :color
+        inputs["glass_color"] = _rgb(Makie.to_color(value))
+    elseif key === :ior
+        inputs["glass_ior"] = value
+    elseif key === :roughness
+        inputs["frosting_roughness"] = value
+    elseif key === :thin_walled
+        inputs["thin_walled"] = value === true
+    elseif key === :glass
+        # the material-KIND flag — not itself an OmniGlass input.
+    else
+        @warn "OmniverseMakie: glass `material=` ignores key `$(key)` (OmniGlass takes \
+               glass_color / ior / roughness / thin_walled)."
+    end
+    return inputs
+end
+
+# The OmniPBR/OmniGlass shader input that carries a plot's base COLOUR — used by the LIVE
+# `:scaled_color` push to re-write the base colour in place on the correct material kind
+# (OmniGlass `glass_color` vs OmniPBR `diffuse_color_constant`).
+_base_color_input(kind::Symbol) = kind === :glass ? "glass_color" : "diffuse_color_constant"
+
 """
     _glass_inputs_from(plot) -> Dict{String,Any}
 
@@ -445,21 +472,7 @@ function _glass_inputs_from(plot)
     mat = _plot_material(plot)
     if mat !== nothing
         for k in keys(mat)
-            kk = Symbol(k)
-            kk === :glass && continue
-            v = Makie.to_value(mat[k])
-            if kk === :base_color || kk === :color
-                inputs["glass_color"] = _rgb(Makie.to_color(v))
-            elseif kk === :ior
-                inputs["glass_ior"] = v
-            elseif kk === :roughness
-                inputs["frosting_roughness"] = v
-            elseif kk === :thin_walled
-                inputs["thin_walled"] = v === true
-            else
-                @warn "OmniverseMakie: glass `material=` ignores key `$(kk)` (OmniGlass takes \
-                       glass_color / ior / roughness / thin_walled)."
-            end
+            _merge_glass_input!(inputs, Symbol(k), Makie.to_value(mat[k]))
         end
     end
     get!(inputs, "glass_ior", 1.491f0)
