@@ -174,7 +174,10 @@ OV.write_shader_input!(r::Renderer, shader_prim::AbstractString, name::AbstractS
 
 ---
 
-**M3 GATE:** OmniPBR materials (base + metallic/roughness/emissive/opacity + image textures) author under `/World/Looks` + bind via `material:binding`; `color`/`material=` compose; live edits + runtime swap go through the M2 diff path (no re-author); plain-color plots are byte-unchanged; materials apply across Mesh/Surface/MeshScatter/Lines. ✅ → **M4 (Examples gallery)** — which consumes these materials.
+**M3 GATE:** OmniPBR materials (base + metallic/roughness/emissive/opacity + image textures) author under `/World/Looks` + bind via `material:binding`; `color`/`material=` compose; **live edits of the pre-authored material** (color + `material=` params) go through the M2 diff path (no re-author, `ROOT_OPENS==1`); plain-color plots are byte-unchanged; materials apply across Mesh/Surface/MeshScatter/Lines/Scatter. ✅ → **M4 (Examples gallery)** — which consumes these materials.
+
+> **GATE reconciliation (M3.1 finding):** the original "runtime swap" wording is delivered as **live edits of the pre-authored material**, not arbitrary re-binding to a brand-new material. Because a `UsdShade Material` must be PRE-AUTHORED at open-time (a material added to the open stage is not bindable) AND the open-stage model forbids re-authoring the root for an edit, a true swap to a not-pre-authored material is infeasible without a root re-author — carried to a later milestone. Live color + material-param edits (the valuable subset) ARE delivered and tested.
+> **Primitive deviations (accepted, see ledger):** (a) materialized MeshScatter/Scatter render as a **merged `UsdGeomMesh`** (ovrtx does not honor materials on a `UsdGeomPointInstancer`; non-materialized scatter stays on the instancer, byte-unchanged) — loses instancing for large-N materialized scatter (carry); (b) `material=` on Lines/Scatter is enabled via a global `Makie.attribute_name_allowlist()` append at `__init__`.
 
 ---
 
