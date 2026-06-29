@@ -10,9 +10,9 @@
 #
 # Type mapping (fully tested: DirectionalLight, PointLight, AmbientLight;
 # best-effort: RectLight, SpotLight, EnvironmentLight):
-#   DirectionalLight → UsdLuxDistantLight  (intensity = 3000 × max-channel)
-#   PointLight       → UsdLuxSphereLight   (intensity = 10000 × max-channel, radius = 1)
-#   AmbientLight     → UsdLuxDomeLight     (intensity = 1000 × max-channel)
+#   DirectionalLight → UsdLuxDistantLight  (intensity = 750 × max-channel)
+#   PointLight       → UsdLuxSphereLight   (intensity = 2500 × max-channel, radius = 1)
+#   AmbientLight     → UsdLuxDomeLight     (intensity = 250 × max-channel)
 #   RectLight        → UsdLuxRectLight     [best-effort; orient + translate from fields]
 #   SpotLight        → UsdLuxSphereLight   + ShapingAPI [best-effort]
 #   EnvironmentLight → UsdLuxDomeLight     [best-effort; texture image deferred to M4]
@@ -53,12 +53,17 @@ light_prim_path(light, index::Int) = "/World/" * light_prim_name(light, index)
 
 # Intensity scale factor (max-channel × scale) per Makie light type — kept in ONE
 # place so `usda_light` (bake) and `_light_render_state` (live sync) never drift.
-_light_intensity_scale(::Makie.DirectionalLight) = 3000.0
-_light_intensity_scale(::Makie.PointLight)       = 10000.0
-_light_intensity_scale(::Makie.AmbientLight)     = 1000.0
-_light_intensity_scale(::Makie.RectLight)        = 3000.0
-_light_intensity_scale(::Makie.SpotLight)        = 10000.0
-_light_intensity_scale(_)                        = 1000.0
+# CALIBRATION (2026-06-29): reduced 4× from the initial scales (Directional 3000, Point
+# 10000, Ambient/dome 1000, Rect 3000, Spot 10000).  ovrtx's RT2 path does NOT honor the
+# camera's exposure/auto-exposure attributes (verified — setting them changes nothing), so
+# the INPUT RADIANCE (this scale) is the only brightness lever and nothing auto-compensates.
+# The original intensities were ~4× too hot vs RPRMakie and washed lit surfaces to white.
+_light_intensity_scale(::Makie.DirectionalLight) = 750.0
+_light_intensity_scale(::Makie.PointLight)       = 2500.0
+_light_intensity_scale(::Makie.AmbientLight)     = 250.0
+_light_intensity_scale(::Makie.RectLight)        = 750.0
+_light_intensity_scale(::Makie.SpotLight)        = 2500.0
+_light_intensity_scale(_)                        = 250.0
 
 # ------------------------------------------------------------------
 # _direction_to_xform — orientation matrix for directional lights
@@ -133,9 +138,9 @@ Each returned string starts with 4-space indent (direct child of `/World`) and e
 with `}\\n\\n` so blocks can be concatenated and placed directly in the `World` Xform.
 
 Type mapping summary:
-  DirectionalLight → UsdLuxDistantLight   intensity=3000×max
-  PointLight       → UsdLuxSphereLight    intensity=10000×max, radius=1
-  AmbientLight     → UsdLuxDomeLight      intensity=1000×max
+  DirectionalLight → UsdLuxDistantLight   intensity=750×max
+  PointLight       → UsdLuxSphereLight    intensity=2500×max, radius=1
+  AmbientLight     → UsdLuxDomeLight      intensity=250×max
   RectLight        → UsdLuxRectLight      [best-effort]
   SpotLight        → UsdLuxSphereLight    + ShapingAPI cone [best-effort]
   EnvironmentLight → UsdLuxDomeLight      (texture image deferred to M4) [best-effort]

@@ -46,10 +46,10 @@ using Test
     @test contains(s3, "DomeLight")
     @test contains(s3, "AmbientLight_0")
 
-    # Intensity scaling: max-channel × scale (3000 × 0.5 = 1500.0)
+    # Intensity scaling: max-channel × scale (750 × 0.5 = 375.0) — scales recalibrated 4× down
     dl_dim = OmniverseMakie.DirectionalLight(OmniverseMakie.RGBf(0.5f0, 0.5f0, 0.5f0), OmniverseMakie.Vec3f(-1f0, 0f0, 0f0), false)
     s4 = OmniverseMakie.usda_light(dl_dim, 1)
-    @test contains(s4, "1500.0")
+    @test contains(s4, "375.0")
 
     # Multiple lights of same type → unique names via index
     al2 = OmniverseMakie.AmbientLight(OmniverseMakie.RGBf(0.2f0, 0.2f0, 0.2f0))
