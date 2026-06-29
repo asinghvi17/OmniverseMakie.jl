@@ -208,12 +208,12 @@ right-side-up).  No vertical flip is applied.  Verified empirically by
 `test/m1_orientation_test.jl` (red_row ≈ 103 < blue_row ≈ 306 for boxes at
 world +Z vs −Z).
 """
-function render_to_matrix(r::Renderer, product::AbstractString; warmup::Int=64)
+function render_to_matrix(r::Renderer, product::AbstractString;
+                         warmup::Int=64, timeout_ns::UInt64 = L.OVRTX_TIMEOUT_INFINITE.time_out_ns)
     for s in 1:(warmup - 1)
-        sr = step!(r, product)
-        close(sr)
+        sr = step!(r, product; timeout_ns); close(sr)
     end
-    sr = step!(r, product)
+    sr = step!(r, product; timeout_ns)
     pixels, W, H = try
         map_cpu(sr, "LdrColor")
     finally

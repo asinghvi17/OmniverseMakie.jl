@@ -78,3 +78,7 @@ include("m5_blit_test.jl")
 
 # M5.3 — interactive_display shows non-black RTX frame in a real GLMakie window (subprocess).
 include("m5_viewport_test.jl")
+
+# M5.3 — live camera loop: on_render_tick! syncs camera/lights/plots, resets RT2 on change,
+# accumulates when idle, and blits the bounded-step frame (subprocess).
+include("m5_camera_loop_test.jl")

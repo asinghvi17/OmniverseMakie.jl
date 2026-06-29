@@ -80,5 +80,11 @@ function interactive_display(fig_or_scene; size = (800, 600), steps_per_tick = 2
     img = image!(ax, reverse(permutedims(frame), dims=2))
     glscr = GLMakie.Screen(); display(glscr, glf)   # real visible window
 
-    return ViewportSession(screen, glscr, img, cam_scene, steps_per_tick, screen.config.warmup, nothing)
+    # Per-frame hook on GLMakie's render task (spike §2). Must NOT Consume(true).
+    session = ViewportSession(screen, glscr, img, cam_scene, steps_per_tick, screen.config.warmup, nothing)
+    session.tick_listener = on(glscr.render_tick) do _
+        on_render_tick!(session)
+        return Makie.Consume(false)
+    end
+    return session
 end
