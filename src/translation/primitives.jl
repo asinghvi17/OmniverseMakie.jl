@@ -336,15 +336,22 @@ function _surface_colors(plot, zs)
 end
 
 # Per-vertex parametric `st` UVs for a TEXTURED materialized surface, in the SAME i-major
-# order as `_surface_mesh` points: u = (i-1)/(nx-1) along the first grid axis, v =
-# (j-1)/(ny-1) along the second.  (M4 follow-up — lets `surface!(…; color=image)` sample a
-# `diffuse_texture` like a textured `mesh!`; without `st` the bound texture sampled nothing
-# and the surface rendered white.)
+# order as `_surface_mesh` points.  Matches GLMakie's surface-texture convention (VERIFIED by
+# comparing a GLMakie render of an equirectangular earth against ours): the texture's
+# HORIZONTAL axis (u, image columns) tracks the SECOND grid axis (j); the VERTICAL axis
+# (v, image rows) tracks the FIRST grid axis (i) and is FLIPPED (i=1 → v=1, the image's top
+# row) to match the texture's bottom-left `st` origin.
+# This was previously `u←i, v←j` (no flip), which ROTATED every textured surface 90° — e.g. a
+# `lat=i / lon=j` earth sphere sampled longitude along the image's HEIGHT, laying the continents
+# on their side (reported on submarineCables).  The earlier sphere/mesh-earth orientation fix
+# never touched this path — mesh spheres get Makie's own `:texturecoordinates`, surfaces get
+# these.  (M4 follow-up — lets `surface!(…; color=image)` sample a `diffuse_texture` like a
+# textured `mesh!`; without `st` the bound texture sampled nothing and the surface rendered white.)
 function _surface_texcoords(nx, ny)
     st = Vector{Vec2f}(undef, nx * ny)
     for i in 1:nx, j in 1:ny
-        u = nx == 1 ? 0.0f0 : Float32((i - 1) / (nx - 1))
-        v = ny == 1 ? 0.0f0 : Float32((j - 1) / (ny - 1))
+        u = ny == 1 ? 0.0f0 : Float32((j - 1) / (ny - 1))   # texture horizontal (image cols) ← 2nd grid axis (j)
+        v = nx == 1 ? 0.0f0 : Float32((nx - i) / (nx - 1))  # texture vertical   (image rows) ← 1st grid axis (i), flipped
         st[(i - 1) * ny + j] = Vec2f(u, v)
     end
     return st
