@@ -1,6 +1,6 @@
 # Ported from references/RPRMakieNotes/scripts/earth_ina_julia_box.jl (Lazaro Alonso).
 # Earth-textured sphere inside a coloured Cornell box with 4 emissive corner lights.
-# EmissiveMaterial corners → material=(; emissive=c); earth texture via circshift+color=img'.
+# EmissiveMaterial corners → material=(; emissive=c); earth texture via circshift+color=img.
 using OmniverseMakie, GeometryBasics, Colors, FileIO
 
 SphereTess(; o = Point3f(0), r = 1, tess = 64) = uv_normal_mesh(Tesselation(Sphere(o, r), tess))
@@ -28,9 +28,9 @@ function scene_earth_ina_julia_box()
     mesh!(ax, Rect3(Vec3f(-1, -1, -1.1), Vec3f(0.1, 2, 2.2));
           color = RGB(0.522, 0.522, 0.522))                          # side wall, grey
 
-    # Earth sphere — texture via circshift + color = img' (backend auto-emits diffuse_texture + st)
+    # Earth sphere — texture via circshift + color = img (backend auto-emits diffuse_texture + st)
     mesh!(ax, SphereTess(; o = Point3f(0.5, 0, 0), r = 0.85);
-          color = circshift(earth_img, (0, 3800))')
+          color = circshift(earth_img, (0, 3800)))
 
     # Emissive corner spheres — EmissiveMaterial → material=(; emissive=c)
     # HDR emissive colour (65× white); plain white for displayColor

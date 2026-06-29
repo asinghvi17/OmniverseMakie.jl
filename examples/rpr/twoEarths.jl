@@ -1,5 +1,5 @@
 # Ported from references/RPRMakieNotes/scripts/twoEarths.jl (Lazaro Alonso).
-# Two earth-textured spheres side by side in a single LScene; color=earth_img' auto-emits diffuse_texture.
+# Two earth-textured spheres side by side in a single LScene; color=earth_img auto-emits diffuse_texture.
 # Original was pure GLMakie (no RPR materials, no lights) — AmbientLight + PointLight added for RTX path tracer.
 # PointLight arg order: color-first (OmniverseMakie convention), position-second.
 using OmniverseMakie, GeometryBasics, Colors, FileIO
@@ -18,9 +18,9 @@ function scene_twoEarths()
     fig = Figure(; size = (1600, 1200))
     ax  = LScene(fig[1, 1]; show_axis = false, scenekw = (; lights = lights))
 
-    # Two earth spheres side by side; color=earth_img' → auto diffuse_texture in RTX backend
-    mesh!(ax, SphereTess(; o = Point3f(-1.2, 0, 0)); color = earth_img')
-    mesh!(ax, SphereTess(; o = Point3f( 1.2, 0, 0)); color = earth_img')
+    # Two earth spheres side by side; color=earth_img → auto diffuse_texture in RTX backend
+    mesh!(ax, SphereTess(; o = Point3f(-1.2, 0, 0)); color = earth_img)
+    mesh!(ax, SphereTess(; o = Point3f( 1.2, 0, 0)); color = earth_img)
 
     # Camera: sit at y=8, look at origin, Z-up — frames both spheres side by side along X
     update_cam!(ax.scene, Vec3f(0, 8, 0), Vec3f(0, 0, 0), Vec3f(0, 0, 1))

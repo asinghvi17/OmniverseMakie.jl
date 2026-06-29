@@ -1,6 +1,6 @@
 # Ported from references/RPRMakieNotes/scripts/uberMExample.jl (Lazaro Alonso).
 # Earth-textured sphere (UberMaterial metallic=0/roughness=0.1) on a white plane under grey dome.
-# RPR.UberMaterial → material=(; metallic, roughness); color=earth_img' auto-emits diffuse_texture.
+# RPR.UberMaterial → material=(; metallic, roughness); color=earth_img auto-emits diffuse_texture.
 # PointLight arg order swapped: original was position-first; OmniverseMakie wants color-first.
 using OmniverseMakie, GeometryBasics, Colors, FileIO
 
@@ -17,8 +17,8 @@ function scene_uberMExample()
     ax  = LScene(fig[1, 1]; show_axis = false, scenekw = (; lights = lights))
 
     # Earth sphere: UberMaterial(reflection_metalness=0.0, reflection_roughness=0.1) →
-    # material=(; metallic=0.0f0, roughness=0.1f0); color=earth_img' → auto diffuse_texture
-    mesh!(ax, SphereTess(); color = earth_img', material = (; metallic = 0.0f0, roughness = 0.1f0))
+    # material=(; metallic=0.0f0, roughness=0.1f0); color=earth_img → auto diffuse_texture
+    mesh!(ax, SphereTess(); color = earth_img, material = (; metallic = 0.0f0, roughness = 0.1f0))
 
     # Plane: DiffuseMaterial → drop material= entirely (USD displayColor matte)
     mesh!(ax, plane; color = :white)

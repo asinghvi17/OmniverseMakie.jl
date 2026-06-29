@@ -37,4 +37,6 @@ end
 
 function assert_transparentM(img)
     assert_nonblack(img, "transparentM"; frac = 0.03)
+    @assert color_fraction(img, :blue) > 0.01 "FAIL: transparentM expected the blue transparent sphere; blue_fraction=$(color_fraction(img, :blue))"
+    println("  blue_fraction=", color_fraction(img, :blue))
 end

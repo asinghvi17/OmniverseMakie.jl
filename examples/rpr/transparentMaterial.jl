@@ -1,6 +1,6 @@
 # Ported from references/RPRMakieNotes/scripts/transparentMaterial.jl (Lazaro Alonso).
 # Earth-textured transparent sphere (opacity=0.75) over a white inner sphere + gainsboro plane.
-# UberMaterial(transparency=Vec4f(0.25)) → material=(; opacity=0.75f0); earth texture via color=earth_img'.
+# UberMaterial(transparency=Vec4f(0.25)) → material=(; opacity=0.75f0); earth texture via color=earth_img.
 using OmniverseMakie, GeometryBasics, Colors, FileIO
 
 SphereTess(; o = Point3f(0), r = 1, tess = 64) = uv_normal_mesh(Tesselation(Sphere(o, r), tess))
@@ -20,8 +20,8 @@ function scene_transparentMaterial()
     # Inner white sphere — DiffuseMaterial → plain color= (no material= kwarg)
     mesh!(ax, SphereTess(; o = Point3f(0), r = 0.75); color = 0.85colorant"white")
 
-    # Outer earth sphere — UberMaterial(transparency=Vec4f(0.25)) → opacity=0.75; texture via color=img'
-    mesh!(ax, SphereTess(); color = earth_img', material = (; opacity = 0.75f0))
+    # Outer earth sphere — UberMaterial(transparency=Vec4f(0.25)) → opacity=0.75; texture via color=img
+    mesh!(ax, SphereTess(); color = earth_img, material = (; opacity = 0.75f0))
 
     # Ground plane — DiffuseMaterial → plain color= (no material= kwarg)
     mesh!(ax, plane; color = :gainsboro)
