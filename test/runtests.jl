@@ -69,3 +69,6 @@ include("m4_surface_texture_test.jl")
 
 # M4 follow-up — true refractive glass via OmniGlass (material=(; glass=true, …)).
 include("m4_glass_test.jl")
+
+# M5.1 — bounded ovrtx step! (timeout_ns kwarg on enqueue_wait/step!).
+include("m5_bounded_step_test.jl")

@@ -39,11 +39,12 @@ end
 # Async lifecycle: enqueue (ovrtx_enqueue_result_t) -> wait_op
 # ------------------------------------------------------------------
 
-function enqueue_wait(r::Renderer, enq, op::AbstractString)
+function enqueue_wait(r::Renderer, enq, op::AbstractString;
+                     timeout_ns::UInt64 = L.OVRTX_TIMEOUT_INFINITE.time_out_ns)
     r.alive || error("enqueue_wait called on a closed Renderer")
     L.check(enq, op)
     wr = Ref{L.ovrtx_op_wait_result_t}()
-    L.check(L.ovrtx_wait_op(r.ptr, enq.op_index, L.OVRTX_TIMEOUT_INFINITE, wr), op * ":wait")
+    L.check(L.ovrtx_wait_op(r.ptr, enq.op_index, L.ovrtx_timeout_t(timeout_ns), wr), op * ":wait")
     return wr[]
 end
 
@@ -107,12 +108,13 @@ across the ccall and the wait.
 Returns a `StepResult`; the caller is responsible for closing it (or letting
 the finalizer run).
 """
-function step!(r::Renderer, product::AbstractString; dt::Float64=1/60)
+function step!(r::Renderer, product::AbstractString;
+              dt::Float64=1/60, timeout_ns::UInt64 = L.OVRTX_TIMEOUT_INFINITE.time_out_ns)
     rp = L.ovx_string_t[ L.ovx_string(product) ]
     GC.@preserve product rp begin
         set = L.ovrtx_render_product_set_t(pointer(rp), Csize_t(1))
         h = Ref{L.ovrtx_step_result_handle_t}(0)
-        enqueue_wait(r, L.ovrtx_step(r.ptr, set, dt, h), "step")
+        enqueue_wait(r, L.ovrtx_step(r.ptr, set, dt, h), "step"; timeout_ns)
         sr = StepResult(r, h[], true)
         finalizer(close, sr)
         return sr

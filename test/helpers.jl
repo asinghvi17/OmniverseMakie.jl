@@ -26,10 +26,15 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300)
         end
         cmd = setenv(
             `julia --project=$(_HELPER_REPO_ROOT) $script`,
-            "OVRTX_LIBRARY_PATH" => _HELPER_OVRTX_LIB,
-            "OM_USDA"            => _HELPER_USDA,
-            "PATH"               => get(ENV, "PATH", ""),
-            "HOME"               => get(ENV, "HOME", ""),
+            "OVRTX_LIBRARY_PATH"        => _HELPER_OVRTX_LIB,
+            "OM_USDA"                   => _HELPER_USDA,
+            "PATH"                      => get(ENV, "PATH", ""),
+            "HOME"                      => get(ENV, "HOME", ""),
+            # GLMakie (added in M5) cannot precompile on a headless server
+            # (GLFW needs a display). Setting AUTO=0 skips the startup
+            # auto-precompile so the subprocess can still load OmniverseMakie
+            # (which does not import GLMakie itself).
+            "JULIA_PKG_PRECOMPILE_AUTO" => "0",
         )
         out = IOBuffer()
         err = IOBuffer()
