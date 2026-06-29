@@ -99,11 +99,14 @@ end
 # ------------------------------------------------------------------
 
 """
-    step!(r::Renderer, product::AbstractString; dt=1/60) -> StepResult
+    step!(r::Renderer, product::AbstractString; dt=1/60, timeout_ns) -> StepResult
 
 Enqueue and wait for one RT2 render step for the given render product path.
 Both the backing `ovx_string_t` array and the product `String` are preserved
-across the ccall and the wait.
+across the ccall and the wait.  `timeout_ns` sets the maximum wait for the
+async step to complete; it defaults to the infinite-wait constant (preserving
+back-compat) and is set to a bounded value by the M5 interactive camera loop
+to prevent hanging on a slow or stalled render step.
 
 Returns a `StepResult`; the caller is responsible for closing it (or letting
 the finalizer run).
@@ -194,11 +197,13 @@ end
 # ------------------------------------------------------------------
 
 """
-    render_to_matrix(r::Renderer, product::AbstractString; warmup=64) -> Matrix{RGBA{N0f8}}
+    render_to_matrix(r::Renderer, product::AbstractString; warmup=64, timeout_ns) -> Matrix{RGBA{N0f8}}
 
 Run `warmup` RT2 steps on `product` (RT2 needs many samples to converge),
 then map the final frame's `LdrColor` output to a `Matrix{RGBA{N0f8}}` of
-size `(H, W)`.
+size `(H, W)`.  `timeout_ns` is passed to each `step!` call; it defaults to
+the infinite-wait constant (preserving back-compat) and is set to a bounded
+value by the M5 interactive camera loop.
 
 Warmup frames are destroyed immediately.  The final `StepResult` is closed
 after the pixel copy.

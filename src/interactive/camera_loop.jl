@@ -44,7 +44,7 @@ function on_render_tick!(session::ViewportSession)
     # delete!) and clear the flag so it never carries over.
     pending = screen.requires_update
     screen.requires_update = false
-    pull_ovrtx_nodes!(screen, cam_scene)
+    pull_ovrtx_nodes!(screen, screen.scene)
     need_reset = cam_changed || light_changed || screen.requires_update || pending
     screen.requires_update = false
 

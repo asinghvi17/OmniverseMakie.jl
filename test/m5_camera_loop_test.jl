@@ -9,11 +9,11 @@ using Test
 #      steps_per_tick (2) after sync_camera! sees a change.
 #   C. Frame non-black after camera orbit (live blit of the reframed RTX view).
 #
-# Tick sequence to be robust to first-tick pull_ovrtx_nodes! flipping requires_update:
-#   Tick 0, Tick 1 — settling (first tick may legitimately reset; second should be idle)
-#   After Tick 1: capture baseline samples_settle
-#   Tick 2 — idle: assert session.samples > samples_settle
-#   Camera move → Tick 3 — change: assert session.samples == steps_per_tick == 2
+# Deterministic tick sequence (listener detached before manual ticks — no GLMakie auto-ticks):
+#   Tick 0: first pull_ovrtx_nodes! flips requires_update → RESET → samples = steps_per_tick (2)
+#   Tick 1: idle → samples = 4 (baseline samples_settle)
+#   Tick 2: idle → samples = 6 (samples_idle); assert samples_idle > samples_settle
+#   Camera move → Tick 3: RESET → samples = 2; assert samples_after_move == steps_per_tick == 2
 #   GLMakie colorbuffer after Tick 3: assert non-black
 const _M5_LOOP_PROG = """
 using OmniverseMakie, GLMakie, ColorTypes
@@ -25,10 +25,17 @@ GLMakie.activate!()
 session = OM.interactive_display(fig; size = (300, 300), steps_per_tick = 2)
 cam = Makie.cameracontrols(session.cam_scene)
 
-# --- Settling ticks (first pull_ovrtx_nodes! may legitimately flip requires_update) ---
-OM.on_render_tick!(session)   # tick 0: settling
+# Detach the live render_tick listener so GLMakie's own auto-ticks cannot
+# interleave with the manual sequence below.  Production behavior is unchanged
+# (listener remains registered for real sessions); this is test-only teardown.
+off(session.tick_listener)
+
+# --- Deterministic tick sequence ---
+# Tick 0: first pull_ovrtx_nodes! legitimately flips requires_update → reset → samples = steps_per_tick
+OM.on_render_tick!(session)   # tick 0: first tick, reset expected
 println("SAMPLES_0=", session.samples)
-OM.on_render_tick!(session)   # tick 1: settling
+# Tick 1: idle (no change) → samples grows by steps_per_tick
+OM.on_render_tick!(session)   # tick 1: idle accumulation
 samples_settle = session.samples
 println("SAMPLES_SETTLE=", samples_settle)
 
