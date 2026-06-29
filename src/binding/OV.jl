@@ -1,6 +1,5 @@
 module OV
-using ..LibOVRTX
-const L = LibOVRTX
+import ..LibOVRTX
 include("signals.jl")
 using .SignalGuard: with_restored_signals
 
@@ -11,13 +10,13 @@ include("dlpack.jl")
 # ------------------------------------------------------------------
 
 mutable struct Renderer
-    ptr::Ptr{L.ovrtx_renderer_t}
+    ptr::Ptr{LibOVRTX.ovrtx_renderer_t}
     alive::Bool
     function Renderer()
-        cfg  = Ref(L.ovrtx_config_t(Ptr{L.ovrtx_config_entry_t}(C_NULL), Csize_t(0)))
-        rref = Ref{Ptr{L.ovrtx_renderer_t}}(C_NULL)
+        cfg  = Ref(LibOVRTX.ovrtx_config_t(Ptr{LibOVRTX.ovrtx_config_entry_t}(C_NULL), Csize_t(0)))
+        rref = Ref{Ptr{LibOVRTX.ovrtx_renderer_t}}(C_NULL)
         with_restored_signals() do
-            L.check(L.ovrtx_create_renderer(cfg, rref), "create_renderer")
+            LibOVRTX.check(LibOVRTX.ovrtx_create_renderer(cfg, rref), "create_renderer")
         end
         r = new(rref[], true)
         finalizer(close, r)
@@ -25,12 +24,12 @@ mutable struct Renderer
     end
 end
 
-Base.unsafe_convert(::Type{Ptr{L.ovrtx_renderer_t}}, r::Renderer) = r.ptr
+Base.unsafe_convert(::Type{Ptr{LibOVRTX.ovrtx_renderer_t}}, r::Renderer) = r.ptr
 
 function Base.close(r::Renderer)
     r.alive || return
-    L.ovrtx_destroy_renderer(r.ptr)
-    r.ptr = Ptr{L.ovrtx_renderer_t}(C_NULL)   # avoid a dangling pointer via unsafe_convert after close
+    LibOVRTX.ovrtx_destroy_renderer(r.ptr)
+    r.ptr = Ptr{LibOVRTX.ovrtx_renderer_t}(C_NULL)   # avoid a dangling pointer via unsafe_convert after close
     r.alive = false
     return
 end
@@ -40,11 +39,11 @@ end
 # ------------------------------------------------------------------
 
 function enqueue_wait(r::Renderer, enq, op::AbstractString;
-                     timeout_ns::UInt64 = L.OVRTX_TIMEOUT_INFINITE.time_out_ns)
+                     timeout_ns::UInt64 = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns)
     r.alive || error("enqueue_wait called on a closed Renderer")
-    L.check(enq, op)
-    wr = Ref{L.ovrtx_op_wait_result_t}()
-    L.check(L.ovrtx_wait_op(r.ptr, enq.op_index, L.ovrtx_timeout_t(timeout_ns), wr), op * ":wait")
+    LibOVRTX.check(enq, op)
+    wr = Ref{LibOVRTX.ovrtx_op_wait_result_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_wait_op(r.ptr, enq.op_index, LibOVRTX.ovrtx_timeout_t(timeout_ns), wr), op * ":wait")
     return wr[]
 end
 
@@ -60,7 +59,7 @@ The `path` string is preserved across the ccall and the wait via `GC.@preserve`.
 """
 function open_usd!(r::Renderer, path::AbstractString)
     GC.@preserve path begin
-        enqueue_wait(r, L.ovrtx_open_usd_from_file(r.ptr, L.ovx_string(path)), "open_usd")
+        enqueue_wait(r, LibOVRTX.ovrtx_open_usd_from_file(r.ptr, LibOVRTX.ovx_string(path)), "open_usd")
     end
     return nothing
 end
@@ -72,7 +71,7 @@ Open a USD stage from an in-memory USDA string.  Synchronous.
 """
 function open_usd_string!(r::Renderer, usda::AbstractString)
     GC.@preserve usda begin
-        enqueue_wait(r, L.ovrtx_open_usd_from_string(r.ptr, L.ovx_string(usda)), "open_usd_string")
+        enqueue_wait(r, LibOVRTX.ovrtx_open_usd_from_string(r.ptr, LibOVRTX.ovx_string(usda)), "open_usd_string")
     end
     return nothing
 end
@@ -83,13 +82,13 @@ end
 
 mutable struct StepResult
     r::Renderer
-    handle::L.ovrtx_step_result_handle_t
+    handle::LibOVRTX.ovrtx_step_result_handle_t
     open::Bool
 end
 
 function Base.close(sr::StepResult)
     sr.open || return
-    sr.r.alive && L.ovrtx_destroy_results(sr.r.ptr, sr.handle)  # pool already freed if renderer closed
+    sr.r.alive && LibOVRTX.ovrtx_destroy_results(sr.r.ptr, sr.handle)  # pool already freed if renderer closed
     sr.open = false
     return nothing
 end
@@ -112,12 +111,12 @@ Returns a `StepResult`; the caller is responsible for closing it (or letting
 the finalizer run).
 """
 function step!(r::Renderer, product::AbstractString;
-              dt::Float64=1/60, timeout_ns::UInt64 = L.OVRTX_TIMEOUT_INFINITE.time_out_ns)
-    rp = L.ovx_string_t[ L.ovx_string(product) ]
+              dt::Float64=1/60, timeout_ns::UInt64 = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns)
+    rp = LibOVRTX.ovx_string_t[ LibOVRTX.ovx_string(product) ]
     GC.@preserve product rp begin
-        set = L.ovrtx_render_product_set_t(pointer(rp), Csize_t(1))
-        h = Ref{L.ovrtx_step_result_handle_t}(0)
-        enqueue_wait(r, L.ovrtx_step(r.ptr, set, dt, h), "step"; timeout_ns)
+        set = LibOVRTX.ovrtx_render_product_set_t(pointer(rp), Csize_t(1))
+        h = Ref{LibOVRTX.ovrtx_step_result_handle_t}(0)
+        enqueue_wait(r, LibOVRTX.ovrtx_step(r.ptr, set, dt, h), "step"; timeout_ns)
         sr = StepResult(r, h[], true)
         finalizer(close, sr)
         return sr
@@ -134,7 +133,7 @@ end
 Walk outputs → output_frames → output_render_vars and return the output handle
 whose render_var_name matches `name` (e.g. "LdrColor").  Throws if not found.
 """
-function _find_var(outs::L.ovrtx_render_product_set_outputs_t, name::AbstractString)
+function _find_var(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::AbstractString)
     for i in 1:outs.output_count
         po = unsafe_load(outs.outputs, i)            # ovrtx_render_product_output_t
         for f in 1:po.output_frame_count
@@ -164,16 +163,16 @@ unmap, and return `(pixels, W, H)`.
 function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
     sr.r.alive || error("map_cpu: the StepResult's Renderer is already closed")
     # 1. fetch
-    outs = Ref{L.ovrtx_render_product_set_outputs_t}()
-    L.check(L.ovrtx_fetch_results(sr.r.ptr, sr.handle, L.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
+    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
 
     # 2. walk the output tree
     h = _find_var(outs[], name)
 
     # 3. map to CPU
-    mdesc = Ref(L.ovrtx_map_output_description_t(L.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
-    ro    = Ref{L.ovrtx_render_var_output_t}()
-    L.check(L.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, L.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
+    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
+    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
 
     # 4. decode the DLTensor (shape = [H, W, C], dtype = kDLUInt/8/1)
     t0  = unsafe_load(ro[].tensors, 1)          # ovrtx_render_var_tensor_t
@@ -187,7 +186,7 @@ function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
     pixels = copy(raw)   # own the data BEFORE we unmap
 
     # 6. unmap (NOSYNC — CPU, no CUDA stream needed)
-    L.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, L.NOSYNC)
+    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)
 
     return (pixels, W, H)
 end
@@ -214,7 +213,7 @@ right-side-up).  No vertical flip is applied.  Verified empirically by
 world +Z vs −Z).
 """
 function render_to_matrix(r::Renderer, product::AbstractString;
-                         warmup::Int=64, timeout_ns::UInt64 = L.OVRTX_TIMEOUT_INFINITE.time_out_ns)
+                         warmup::Int=64, timeout_ns::UInt64 = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns)
     for s in 1:(warmup - 1)
         sr = step!(r, product; timeout_ns); close(sr)
     end
@@ -238,7 +237,7 @@ Enqueue and wait for an RT2 accumulation reset.  Must be called after any
 geometry or camera change so the path-tracer starts fresh.
 """
 function reset!(r::Renderer; time::Float64=0.0)
-    enqueue_wait(r, L.ovrtx_reset(r.ptr, time), "reset")
+    enqueue_wait(r, LibOVRTX.ovrtx_reset(r.ptr, time), "reset")
     return nothing
 end
 
@@ -250,47 +249,47 @@ end
 # `data` must be a contiguous, OWNED Vector whose bytes back the DLTensor; the
 # caller preprocesses (transpose/flatten for xform, dtype inference for arrays).
 function _write_attribute!(r::Renderer, prim::AbstractString, attr_name::AbstractString,
-                           dtype::L.DLDataType, is_array::Bool, semantic,
+                           dtype::LibOVRTX.DLDataType, is_array::Bool, semantic,
                            data::AbstractVector, shape::Vector{Int64})
     strides = Int64[1]
     prim_s   = String(prim)
-    prim_ovx = L.ovx_string(prim_s)
-    prim_arr = L.ovx_string_t[prim_ovx]
+    prim_ovx = LibOVRTX.ovx_string(prim_s)
+    prim_arr = LibOVRTX.ovx_string_t[prim_ovx]
     name_s   = String(attr_name)
-    name_ovx = L.ovx_string(name_s)
+    name_ovx = LibOVRTX.ovx_string(name_s)
     GC.@preserve prim_s prim_arr name_s data shape strides begin
-        prim_list   = L.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(1))
-        attr_lookup = L.ovx_string_or_token_t(UInt64(0), name_ovx)
-        attr_type   = L.ovrtx_attribute_type_t(dtype, is_array, semantic)
-        bdesc = L.ovrtx_binding_desc_t(
+        prim_list   = LibOVRTX.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(1))
+        attr_lookup = LibOVRTX.ovx_string_or_token_t(UInt64(0), name_ovx)
+        attr_type   = LibOVRTX.ovrtx_attribute_type_t(dtype, is_array, semantic)
+        bdesc = LibOVRTX.ovrtx_binding_desc_t(
             prim_list,
-            L.ovx_primpath_list_t(0),
+            LibOVRTX.ovx_primpath_list_t(0),
             attr_lookup,
             attr_type,
-            L.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
-            L.OVRTX_BINDING_FLAG_NONE,
+            LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
+            LibOVRTX.OVRTX_BINDING_FLAG_NONE,
         )
-        bdoh  = Ref(L.ovrtx_binding_desc_or_handle_t(bdesc, L.ovrtx_attribute_binding_handle_t(0)))
-        dl = L.DLTensor(
+        bdoh  = Ref(LibOVRTX.ovrtx_binding_desc_or_handle_t(bdesc, LibOVRTX.ovrtx_attribute_binding_handle_t(0)))
+        dl = LibOVRTX.DLTensor(
             Ptr{Cvoid}(pointer(data)),
-            L.DLDevice(L.kDLCPU, Int32(0)),
+            LibOVRTX.DLDevice(LibOVRTX.kDLCPU, Int32(0)),
             Int32(1),
             dtype,
             pointer(shape),
             pointer(strides),
             UInt64(0),
         )
-        dl_arr = L.DLTensor[dl]
+        dl_arr = LibOVRTX.DLTensor[dl]
         GC.@preserve dl_arr begin
-            ibuf = Ref(L.ovrtx_input_buffer_t(
+            ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(
                 pointer(dl_arr),
                 UInt64(1),
                 Ptr{UInt8}(C_NULL),
                 Csize_t(0),
-                L.NOSYNC,
-                L.NOSYNC,
+                LibOVRTX.NOSYNC,
+                LibOVRTX.NOSYNC,
             ))
-            enqueue_wait(r, L.ovrtx_write_attribute(r.ptr, bdoh, ibuf, L.OVRTX_DATA_ACCESS_SYNC),
+            enqueue_wait(r, LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
                          "write_attribute($attr_name)")
         end
     end
@@ -319,9 +318,9 @@ function write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Flo
     M = vec(collect(mat'))  # length-16 Vector{Float64}, row-major
 
     # dtype: kDLFloat / 64 bits / lanes=16 → encodes the 4×4 as a single element
-    dtype = L.DLDataType(UInt8(L.kDLFloat), UInt8(64), UInt16(16))
+    dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(64), UInt16(16))
 
-    _write_attribute!(r, prim, "omni:xform", dtype, false, L.OVRTX_SEMANTIC_XFORM_MAT4x4, M, Int64[1])
+    _write_attribute!(r, prim, "omni:xform", dtype, false, LibOVRTX.OVRTX_SEMANTIC_XFORM_MAT4x4, M, Int64[1])
     return nothing
 end
 
@@ -350,11 +349,11 @@ edit, call `OV.reset!` after binding to restart RT2 accumulation before stepping
 function bind_material!(r::Renderer, geom_prim::AbstractString, material_prim::AbstractString)
     r.alive || error("bind_material! on a closed Renderer")
     mat_s = String(material_prim)
-    dtype = L.DLDataType(UInt8(L.kDLUInt), UInt8(128), UInt16(1))
+    dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLUInt), UInt8(128), UInt16(1))
     GC.@preserve mat_s begin
-        data = L.ovx_string_t[L.ovx_string(mat_s)]
+        data = LibOVRTX.ovx_string_t[LibOVRTX.ovx_string(mat_s)]
         _write_attribute!(r, geom_prim, "material:binding", dtype, true,
-                          L.OVRTX_SEMANTIC_PATH_STRING, data, Int64[1])
+                          LibOVRTX.OVRTX_SEMANTIC_PATH_STRING, data, Int64[1])
     end
     return nothing
 end
@@ -389,14 +388,14 @@ function write_shader_input!(r::Renderer, shader_prim::AbstractString, name::Abs
     r.alive || error("write_shader_input! on a closed Renderer")
     attr_name = "inputs:" * String(name)
     if value isa Float32
-        dtype = L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(1))
+        dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(1))
         data  = Float32[value]
     else
-        dtype = L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(3))
+        dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(3))
         data  = Float32[value[1], value[2], value[3]]
     end
     GC.@preserve data begin
-        _write_attribute!(r, shader_prim, attr_name, dtype, false, L.OVRTX_SEMANTIC_NONE,
+        _write_attribute!(r, shader_prim, attr_name, dtype, false, LibOVRTX.OVRTX_SEMANTIC_NONE,
                           data, Int64[1])
     end
     return nothing
@@ -441,31 +440,31 @@ function write_array_attribute!(r::Renderer, prim::AbstractString,
         # owned Float32 vector; one tensor element per aggregate (multi-lane).
         src   = arr isa Vector ? arr : collect(arr)
         data  = collect(reinterpret(Float32, src))   # length = lanes * length(arr)
-        dtype = L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(lanes))
-        _write_attribute!(r, prim, name, dtype, true, L.OVRTX_SEMANTIC_NONE, data, Int64[length(arr)])
+        dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(lanes))
+        _write_attribute!(r, prim, name, dtype, true, LibOVRTX.OVRTX_SEMANTIC_NONE, data, Int64[length(arr)])
         return nothing
     end
 
     # Scalar element types: one lane each.
     dtype = if ET === Float32
-        L.DLDataType(UInt8(L.kDLFloat), UInt8(32), UInt16(1))
+        LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(1))
     elseif ET === Float64
-        L.DLDataType(UInt8(L.kDLFloat), UInt8(64), UInt16(1))
+        LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(64), UInt16(1))
     elseif ET === Int32
-        L.DLDataType(UInt8(L.kDLInt), UInt8(32), UInt16(1))
+        LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLInt), UInt8(32), UInt16(1))
     elseif ET === Int64
-        L.DLDataType(UInt8(L.kDLInt), UInt8(64), UInt16(1))
+        LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLInt), UInt8(64), UInt16(1))
     elseif ET === UInt32
-        L.DLDataType(UInt8(L.kDLUInt), UInt8(32), UInt16(1))
+        LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLUInt), UInt8(32), UInt16(1))
     elseif ET === UInt64
-        L.DLDataType(UInt8(L.kDLUInt), UInt8(64), UInt16(1))
+        LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLUInt), UInt8(64), UInt16(1))
     else
         error("write_array_attribute!: unsupported element type $ET")
     end
 
     data = collect(arr)  # ensure contiguous, owned copy
 
-    _write_attribute!(r, prim, name, dtype, true, L.OVRTX_SEMANTIC_NONE, data, Int64[length(data)])
+    _write_attribute!(r, prim, name, dtype, true, LibOVRTX.OVRTX_SEMANTIC_NONE, data, Int64[length(data)])
     return nothing
 end
 
@@ -488,11 +487,11 @@ function add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::Abstra
     r.alive || error("add_usd_reference! on a closed Renderer")
     layer_s = String(usda)
     path_s  = String(prim_path)
-    h = Ref{L.ovrtx_usd_handle_t}(0)
+    h = Ref{LibOVRTX.ovrtx_usd_handle_t}(0)
     GC.@preserve layer_s path_s begin
         enqueue_wait(r,
-            L.ovrtx_add_usd_reference_from_string(
-                r.ptr, L.ovx_string(layer_s), L.ovx_string(path_s), h),
+            LibOVRTX.ovrtx_add_usd_reference_from_string(
+                r.ptr, LibOVRTX.ovx_string(layer_s), LibOVRTX.ovx_string(path_s), h),
             "add_usd_reference")
     end
     return h[]
@@ -503,8 +502,8 @@ end
 
 Remove the USD layer previously added via `add_usd_reference!`.
 """
-function remove_usd!(r::Renderer, handle::L.ovrtx_usd_handle_t)
-    enqueue_wait(r, L.ovrtx_remove_usd(r.ptr, handle), "remove_usd")
+function remove_usd!(r::Renderer, handle::LibOVRTX.ovrtx_usd_handle_t)
+    enqueue_wait(r, LibOVRTX.ovrtx_remove_usd(r.ptr, handle), "remove_usd")
     return nothing
 end
 
@@ -534,29 +533,29 @@ is non-zero only while a `map_binding`/`unmap!` pair is outstanding.
 """
 mutable struct Binding
     r::Renderer
-    handle::L.ovrtx_attribute_binding_handle_t
+    handle::LibOVRTX.ovrtx_attribute_binding_handle_t
     prim::String
     attr_name::String
-    dtype::L.DLDataType
+    dtype::LibOVRTX.DLDataType
     is_array::Bool
-    semantic::L.ovrtx_attribute_semantic_t
-    map_handle::L.ovrtx_map_handle_t   # non-zero while mapped
+    semantic::LibOVRTX.ovrtx_attribute_semantic_t
+    map_handle::LibOVRTX.ovrtx_map_handle_t   # non-zero while mapped
     alive::Bool
 end
 
 # A zeroed `ovrtx_binding_desc_t`; it is IGNORED whenever `binding_handle != 0`
 # (the header: "If binding_handle is non-zero then it will be used, otherwise
 # binding_desc will be used"), so every map/write through a handle passes this.
-_empty_binding_desc() = L.ovrtx_binding_desc_t(
-    L.ovrtx_prim_list_t(Ptr{L.ovx_string_t}(C_NULL), Csize_t(0)),
-    L.ovx_primpath_list_t(0),
-    L.ovx_string_or_token_t(UInt64(0), L.ovx_string_t(reinterpret(Cstring, C_NULL), Csize_t(0))),
-    L.ovrtx_attribute_type_t(L.DLDataType(UInt8(0), UInt8(0), UInt16(0)), false, L.OVRTX_SEMANTIC_NONE),
-    L.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
-    L.OVRTX_BINDING_FLAG_NONE,
+_empty_binding_desc() = LibOVRTX.ovrtx_binding_desc_t(
+    LibOVRTX.ovrtx_prim_list_t(Ptr{LibOVRTX.ovx_string_t}(C_NULL), Csize_t(0)),
+    LibOVRTX.ovx_primpath_list_t(0),
+    LibOVRTX.ovx_string_or_token_t(UInt64(0), LibOVRTX.ovx_string_t(reinterpret(Cstring, C_NULL), Csize_t(0))),
+    LibOVRTX.ovrtx_attribute_type_t(LibOVRTX.DLDataType(UInt8(0), UInt8(0), UInt16(0)), false, LibOVRTX.OVRTX_SEMANTIC_NONE),
+    LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
+    LibOVRTX.OVRTX_BINDING_FLAG_NONE,
 )
 
-_desc_or_handle(b::Binding) = L.ovrtx_binding_desc_or_handle_t(_empty_binding_desc(), b.handle)
+_desc_or_handle(b::Binding) = LibOVRTX.ovrtx_binding_desc_or_handle_t(_empty_binding_desc(), b.handle)
 
 """
     create_binding(r, prim, name, dtype; array=false, semantic=OVRTX_SEMANTIC_NONE,
@@ -569,28 +568,28 @@ binds a variable-length array attribute; `optimize=true` sets
 (enqueue + wait); the prim list strings are preserved across the call.
 """
 function create_binding(r::Renderer, prim::AbstractString, name::AbstractString,
-                        dtype::L.DLDataType; array::Bool=false,
-                        semantic=L.OVRTX_SEMANTIC_NONE, optimize::Bool=false)
+                        dtype::LibOVRTX.DLDataType; array::Bool=false,
+                        semantic=LibOVRTX.OVRTX_SEMANTIC_NONE, optimize::Bool=false)
     r.alive || error("create_binding on a closed Renderer")
     prim_s   = String(prim)
     name_s   = String(name)
-    prim_arr = L.ovx_string_t[L.ovx_string(prim_s)]
-    handle   = Ref{L.ovrtx_attribute_binding_handle_t}(0)
-    flags    = optimize ? L.OVRTX_BINDING_FLAG_OPTIMIZE : L.OVRTX_BINDING_FLAG_NONE
+    prim_arr = LibOVRTX.ovx_string_t[LibOVRTX.ovx_string(prim_s)]
+    handle   = Ref{LibOVRTX.ovrtx_attribute_binding_handle_t}(0)
+    flags    = optimize ? LibOVRTX.OVRTX_BINDING_FLAG_OPTIMIZE : LibOVRTX.OVRTX_BINDING_FLAG_NONE
     GC.@preserve prim_s prim_arr name_s begin
-        prim_list   = L.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(1))
-        attr_lookup = L.ovx_string_or_token_t(UInt64(0), L.ovx_string(name_s))
-        attr_type   = L.ovrtx_attribute_type_t(dtype, array, semantic)
-        bdesc = L.ovrtx_binding_desc_t(prim_list, L.ovx_primpath_list_t(0),
-            attr_lookup, attr_type, L.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY, flags)
+        prim_list   = LibOVRTX.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(1))
+        attr_lookup = LibOVRTX.ovx_string_or_token_t(UInt64(0), LibOVRTX.ovx_string(name_s))
+        attr_type   = LibOVRTX.ovrtx_attribute_type_t(dtype, array, semantic)
+        bdesc = LibOVRTX.ovrtx_binding_desc_t(prim_list, LibOVRTX.ovx_primpath_list_t(0),
+            attr_lookup, attr_type, LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY, flags)
         bref = Ref(bdesc)
         GC.@preserve bref begin
-            enqueue_wait(r, L.ovrtx_create_attribute_binding(r.ptr, bref, handle),
+            enqueue_wait(r, LibOVRTX.ovrtx_create_attribute_binding(r.ptr, bref, handle),
                          "create_attribute_binding($name)")
         end
     end
     b = Binding(r, handle[], prim_s, name_s, dtype, array, semantic,
-                L.ovrtx_map_handle_t(0), true)
+                LibOVRTX.ovrtx_map_handle_t(0), true)
     finalizer(destroy!, b)
     return b
 end
@@ -602,14 +601,14 @@ Map the binding's internal buffer for a ZERO-COPY write; returns the data pointe
 (valid ONLY until `unmap!`).  Stashes the map handle on `b`.  `ovrtx_map_attribute`
 is synchronous (no enqueue/wait).
 """
-function map_binding(b::Binding; device=L.kDLCPU, device_id::Integer=0)
+function map_binding(b::Binding; device=LibOVRTX.kDLCPU, device_id::Integer=0)
     b.alive || error("map_binding on a destroyed Binding")
     b.map_handle == 0 || error("map_binding: already mapped (call unmap! first)")
     bdoh  = Ref(_desc_or_handle(b))
-    mdesc = L.ovrtx_mapping_desc_t(Int32(device), Int32(device_id))
-    out   = Ref{L.ovrtx_attribute_mapping_t}()
+    mdesc = LibOVRTX.ovrtx_mapping_desc_t(Int32(device), Int32(device_id))
+    out   = Ref{LibOVRTX.ovrtx_attribute_mapping_t}()
     GC.@preserve bdoh begin
-        L.check(L.ovrtx_map_attribute(b.r.ptr, bdoh, mdesc, out), "map_attribute($(b.attr_name))")
+        LibOVRTX.check(LibOVRTX.ovrtx_map_attribute(b.r.ptr, bdoh, mdesc, out), "map_attribute($(b.attr_name))")
     end
     m = out[]
     b.map_handle = m.map_handle
@@ -624,9 +623,9 @@ mapped or when the Renderer is already closed.
 """
 function unmap!(b::Binding)
     b.map_handle == 0 && return nothing
-    b.r.alive && enqueue_wait(b.r, L.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, L.NOSYNC),
+    b.r.alive && enqueue_wait(b.r, LibOVRTX.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, LibOVRTX.NOSYNC),
                               "unmap_attribute")
-    b.map_handle = L.ovrtx_map_handle_t(0)
+    b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
     return nothing
 end
 
@@ -667,13 +666,13 @@ function write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
     strides = Int64[1]
     bdoh    = Ref(_desc_or_handle(b))
     GC.@preserve data shape strides bdoh begin
-        dl = L.DLTensor(Ptr{Cvoid}(pointer(data)), L.DLDevice(L.kDLCPU, Int32(0)),
+        dl = LibOVRTX.DLTensor(Ptr{Cvoid}(pointer(data)), LibOVRTX.DLDevice(LibOVRTX.kDLCPU, Int32(0)),
                         Int32(1), b.dtype, pointer(shape), pointer(strides), UInt64(0))
-        dl_arr = L.DLTensor[dl]
+        dl_arr = LibOVRTX.DLTensor[dl]
         GC.@preserve dl_arr begin
-            ibuf = Ref(L.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
-                       Ptr{UInt8}(C_NULL), Csize_t(0), L.NOSYNC, L.NOSYNC))
-            enqueue_wait(b.r, L.ovrtx_write_attribute(b.r.ptr, bdoh, ibuf, L.OVRTX_DATA_ACCESS_SYNC),
+            ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
+                       Ptr{UInt8}(C_NULL), Csize_t(0), LibOVRTX.NOSYNC, LibOVRTX.NOSYNC))
+            enqueue_wait(b.r, LibOVRTX.ovrtx_write_attribute(b.r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
                          "write_attribute(binding:$(b.attr_name))")
         end
     end
@@ -691,10 +690,10 @@ function destroy!(b::Binding)
     b.alive || return nothing
     if b.r.alive
         b.map_handle == 0 || unmap!(b)
-        enqueue_wait(b.r, L.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle),
+        enqueue_wait(b.r, LibOVRTX.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle),
                      "destroy_attribute_binding")
     end
-    b.map_handle = L.ovrtx_map_handle_t(0)
+    b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
     b.alive = false
     return nothing
 end
