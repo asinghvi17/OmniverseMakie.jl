@@ -201,9 +201,13 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     frame = OV.render_to_matrix(new_screen.renderer, new_screen.product;
                                 warmup = new_screen.config.warmup)
 
-    # 4. Free the OLD ovrtx renderer (avoid GPU leak), then swap in the new Screen.
-    Base.close(session.screen)
-    session.screen = new_screen
+    # 4. Swap in the new Screen FIRST (session stays self-consistent at every point —
+    #    defensive even if a future resize path is not synchronous), then free the OLD
+    #    ovrtx renderer (avoid a GPU leak).  Reset the accumulation counter for the new frame.
+    old_screen      = session.screen
+    session.screen  = new_screen
+    session.samples = new_screen.config.warmup
+    Base.close(old_screen)
 
     # 5. Update the displayed image: delete the old image! (wrong size) and add a new
     #    one spanning the full new viewport.  The campixel! coordinate system already

@@ -79,6 +79,12 @@ println("MP_FORWARDED=", mp_captured[])
 # thread.  We set cam_scene.events.mouseposition directly (GLMakie does not update
 # this) to ensure is_mouseinside(cam_scene) returns true.
 # mousebutton press/release is forwarded via glscene, exercising the forwarding path.
+#
+# LIMITATION: because mouseposition is set directly on cam_scene here, this drag
+# @assert does NOT by itself prove the glscene→cam_scene mouseposition forwarding path.
+# That path is proven by the MOUSEPOSITION FORWARDING proof above (synchronous capture)
+# and by interactive LIVE verification.  This subtest proves mousebutton forwarding and
+# that Camera3D orbits on a drag — do not read it as end-to-end mouseposition coverage.
 eye_before_drag = copy(cam.eyeposition[])
 session.cam_scene.events.mouseposition[] = (150.0, 150.0)   # inside viewport
 session.glscene.events.mousebutton[] =
