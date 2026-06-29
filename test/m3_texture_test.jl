@@ -1,5 +1,10 @@
 using Test
-using GeometryBasics   # uv_normal_mesh / GLTriangleFace (a direct dep; module qualifier)
+# GeometryBasics is the package's own dep, reached via the `OmniverseMakie.` qualifier
+# (the minimal test env declares only CEnum/LibOVRTX/Test; every other test file accesses
+# deps through OmniverseMakie, which is `using`-ed globally by runtests.jl).  `Rect2f` and
+# the Makie surface come from OmniverseMakie's verbatim Makie re-export; only
+# `GeometryBasics.uv_normal_mesh` needs the module binding.
+const GeometryBasics = OmniverseMakie.GeometryBasics
 
 # ---------------------------------------------------------------------------
 # M3.3 — image textures (`color = img` → `diffuse_texture` + the `st` UV primvar)
