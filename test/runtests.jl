@@ -82,3 +82,6 @@ include("m5_viewport_test.jl")
 # M5.3 — live camera loop: on_render_tick! syncs camera/lights/plots, resets RT2 on change,
 # accumulates when idle, and blits the bounded-step frame (subprocess).
 include("m5_camera_loop_test.jl")
+
+# M5 Task 4 — orbit-forwarding: glscene input events drive Camera3D via input_listeners.
+include("m5_orbit_test.jl")
