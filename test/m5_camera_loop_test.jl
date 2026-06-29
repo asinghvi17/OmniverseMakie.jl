@@ -9,11 +9,13 @@ using Test
 #      steps_per_tick (2) after sync_camera! sees a change.
 #   C. Frame non-black after camera orbit (live blit of the reframed RTX view).
 #
-# Deterministic tick sequence (listener detached before manual ticks — no GLMakie auto-ticks):
-#   Tick 0: first pull_ovrtx_nodes! flips requires_update → RESET → samples = steps_per_tick (2)
-#   Tick 1: idle → samples = 4 (baseline samples_settle)
-#   Tick 2: idle → samples = 6 (samples_idle); assert samples_idle > samples_settle
-#   Camera move → Tick 3: RESET → samples = 2; assert samples_after_move == steps_per_tick == 2
+# Deterministic tick sequence (listener detached before manual ticks — no GLMakie auto-ticks).
+# interactive_display's warmup consumes the initial `requires_update` (see viewport.jl), so a
+# static tick does NOT reset.  The assertions test INVARIANTS, not exact sample counts (the
+# starting value tracks `warmup`):
+#   Ticks 0–2: idle (no camera/scene change) → samples grows by steps_per_tick each tick
+#   Tick 2 (samples_idle) > Tick 1 (samples_settle)        → idle accumulation holds
+#   Camera move → Tick 3: RESET → samples == steps_per_tick (2)
 #   GLMakie colorbuffer after Tick 3: assert non-black
 const _M5_LOOP_PROG = """
 using OmniverseMakie, GLMakie, ColorTypes
@@ -31,8 +33,8 @@ cam = Makie.cameracontrols(session.cam_scene)
 off(session.tick_listener)
 
 # --- Deterministic tick sequence ---
-# Tick 0: first pull_ovrtx_nodes! legitimately flips requires_update → reset → samples = steps_per_tick
-OM.on_render_tick!(session)   # tick 0: first tick, reset expected
+# Tick 0: settle tick — interactive_display's warmup already consumed the initial build flag, so idle.
+OM.on_render_tick!(session)   # tick 0: settle (idle, no reset)
 println("SAMPLES_0=", session.samples)
 # Tick 1: idle (no change) → samples grows by steps_per_tick
 OM.on_render_tick!(session)   # tick 1: idle accumulation

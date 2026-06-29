@@ -30,8 +30,11 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300)
             "OM_USDA"                   => _HELPER_USDA,
             "PATH"                      => get(ENV, "PATH", ""),
             "HOME"                      => get(ENV, "HOME", ""),
-            # GLMakie (M5) needs a real X display for GL context creation.
-            # Forward the Xwayland display variables proven to work on this host.
+            # GLMakie (M5) needs a real X display for GL context creation.  Forward the
+            # Xwayland display vars (ENV first).  DEV-BOX DEFAULTS: the XAUTHORITY fallback is
+            # session-specific (mutter regenerates the `.mutter-Xwaylandauth.*` suffix each
+            # Wayland login) and XDG_RUNTIME_DIR hardcodes UID 1000 — same dev-box-only tier as
+            # _HELPER_OVRTX_LIB / _HELPER_USDA above; on a fresh session or CI, set these in ENV.
             "DISPLAY"                   => get(ENV, "DISPLAY", ":0"),
             "XAUTHORITY"                => get(ENV, "XAUTHORITY", "/run/user/1000/.mutter-Xwaylandauth.QRQ4Q3"),
             "XDG_RUNTIME_DIR"           => get(ENV, "XDG_RUNTIME_DIR", "/run/user/1000"),

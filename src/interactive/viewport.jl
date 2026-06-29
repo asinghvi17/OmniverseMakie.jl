@@ -84,6 +84,12 @@ function interactive_display(fig_or_scene; size = (800, 600), steps_per_tick = 2
 
     # 3. First ovrtx frame (full warmup for a clean initial image).
     frame = OV.render_to_matrix(screen.renderer, screen.product; warmup = screen.config.warmup)
+    # The eager `insertplots!` build flipped `screen.requires_update`; the warmup render
+    # above already drew that built geometry, so consume the flag here (mirrors how
+    # `colorbuffer` consumes it).  Otherwise the FIRST `on_render_tick!` would treat it as a
+    # pending change and redundantly `OV.reset!`, discarding this clean warmup frame for a
+    # noisy `steps_per_tick`-sample one before idle ticks refine it back.
+    screen.requires_update = false
 
     # 4. Display: a single pixel-perfect Scene (campixel!) holding one full-viewport
     #    image! of the RTX frame.  The orientation transform matches cpu_blit!
