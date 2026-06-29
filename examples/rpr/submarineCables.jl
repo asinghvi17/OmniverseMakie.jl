@@ -79,9 +79,8 @@ function scene_submarineCables()
     fig = Figure(; size = (1000, 1000))
     ax  = LScene(fig[1, 1]; show_axis = false, scenekw = (; lights = lights))
 
-    # Earth sphere via surface!. NOTE: the RTX backend does not (yet) carry an image texture
-    # through `surface!` (only `mesh!` does), so this globe renders WHITE — the coloured cable
-    # routes + landing points are the subject and read clearly against it.
+    # Earth sphere via surface! — color=earth_img → an OmniPBR diffuse_texture sampled over the
+    # grid's parametric st UVs (textured globe), with the coloured cable routes overlaid.
     surface!(ax, xe, ye, ze; color = earth_img)
 
     # Landing points: colored by index with :plasma colormap

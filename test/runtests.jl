@@ -63,3 +63,6 @@ include("m3_material_live_test.jl")
 # M4 follow-up — numeric color + colormap on scatter/lines/per-vertex-mesh
 # (_scaled_to_display maps the numeric :scaled_color through the plot colormap).
 include("m4_colormap_test.jl")
+
+# M4 follow-up — image textures on surface! (_surface_texcoords emits the grid st UVs).
+include("m4_surface_texture_test.jl")

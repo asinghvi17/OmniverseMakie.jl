@@ -335,6 +335,21 @@ function _surface_colors(plot, zs)
     return displaycolor_for(plot, nx * ny)
 end
 
+# Per-vertex parametric `st` UVs for a TEXTURED materialized surface, in the SAME i-major
+# order as `_surface_mesh` points: u = (i-1)/(nx-1) along the first grid axis, v =
+# (j-1)/(ny-1) along the second.  (M4 follow-up — lets `surface!(…; color=image)` sample a
+# `diffuse_texture` like a textured `mesh!`; without `st` the bound texture sampled nothing
+# and the surface rendered white.)
+function _surface_texcoords(nx, ny)
+    st = Vector{Vec2f}(undef, nx * ny)
+    for i in 1:nx, j in 1:ny
+        u = nx == 1 ? 0.0f0 : Float32((i - 1) / (nx - 1))
+        v = ny == 1 ? 0.0f0 : Float32((j - 1) / (ny - 1))
+        st[(i - 1) * ny + j] = Vec2f(u, v)
+    end
+    return st
+end
+
 """
     to_ovrtx_object(screen, scene, plot::Makie.Surface) -> Union{UInt64,Nothing}
 
@@ -355,9 +370,14 @@ function to_ovrtx_object(screen, scene, plot::Makie.Surface)
         # `displayColor` (the `nothing` sentinel) so the OmniPBR material (PRE-AUTHORED in
         # /World/Looks, BOUND by `register_ovrtx_robj!`'s empty-inputs branch) governs
         # shading.  Surface has NO diff node ⇒ a STATIC material (no live edit) — fine.
+        # M4 follow-up: a TEXTURED surface (image `color` / `*_texture`) samples the grid's
+        # parametric `st` UVs — without them the bound `diffuse_texture` sampled nothing and
+        # the surface rendered white.
+        texcoords = _needs_texcoords(plot) ? _surface_texcoords(size(zs)...) : nothing
         usda = usda_mesh(points, faces0, normals, nothing;
                          model                = plot.model[],
-                         normal_interpolation = "vertex")
+                         normal_interpolation = "vertex",
+                         texcoords            = texcoords)
         return OV.add_usd_reference!(screen.renderer, usda, path)
     end
 
