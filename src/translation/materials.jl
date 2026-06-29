@@ -118,12 +118,32 @@ at runtime via `OV.add_usd_reference!` does NOT make the material bindable in ou
 build (a silent no-op for `material:binding`).  `OV.bind_material!` then binds it at
 runtime once the stage is open.
 """
-function usda_omnipbr_material(name::AbstractString, inputs::AbstractDict)
+usda_omnipbr_material(name::AbstractString, inputs::AbstractDict) =
+    _usda_mdl_material(name, "OmniPBR.mdl", "OmniPBR", inputs)
+
+"""
+    usda_glass_material(name, inputs) -> String
+
+Emit a TRUE-GLASS `UsdShade Material` backed by the bundled `OmniGlass.mdl` (subIdentifier
+"OmniGlass") — refraction via `glass_ior`, tint via `glass_color`, optional
+`frosting_roughness`/`thin_walled`.  Selected when a plot sets `material=(; glass = true, …)`
+(M4 follow-up); composed into `/World/Looks` and bound exactly like the OmniPBR materials.
+Unlike the OmniPBR `opacity` (a flat alpha cut-out), OmniGlass actually refracts.
+"""
+usda_glass_material(name::AbstractString, inputs::AbstractDict) =
+    _usda_mdl_material(name, "OmniGlass.mdl", "OmniGlass", inputs)
+
+# Author ONE MDL-backed `UsdShade Material` named `name`, sourced from `mdl_asset`
+# (subIdentifier `subid`), with `inputs` typed by value (NTuple{3}→color3f, Bool→bool,
+# AbstractString→asset, else→float).  Shared by the OmniPBR + OmniGlass authoring; the OmniPBR
+# output is byte-identical to the pre-M4 `usda_omnipbr_material`.
+function _usda_mdl_material(name::AbstractString, mdl_asset::AbstractString,
+                           subid::AbstractString, inputs::AbstractDict)
     lines = String[]
     for (k, v) in inputs
         if v isa NTuple{3}                     # color3f
             push!(lines, "                color3f inputs:$k = ($(v[1]), $(v[2]), $(v[3]))")
-        elseif v isa Bool                      # bool (enable_emission/_opacity, project_uvw)
+        elseif v isa Bool                      # bool (enable_emission/_opacity, project_uvw, thin_walled)
             push!(lines, "                bool inputs:$k = $(v ? 1 : 0)")   # — must precede Real/float
         elseif v isa AbstractString            # asset (texture)
             push!(lines, "                asset inputs:$k = @$(v)@")
@@ -138,8 +158,8 @@ function usda_omnipbr_material(name::AbstractString, inputs::AbstractDict)
             def Shader "Shader"
             {
                 uniform token info:implementationSource = "sourceAsset"
-                uniform asset info:mdl:sourceAsset = @OmniPBR.mdl@
-                uniform token info:mdl:sourceAsset:subIdentifier = "OmniPBR"
+                uniform asset info:mdl:sourceAsset = @$(mdl_asset)@
+                uniform token info:mdl:sourceAsset:subIdentifier = "$(subid)"
 $(join(lines, "\n"))
                 token outputs:out
             }
@@ -399,6 +419,53 @@ function _average_rgb(plot, color::AbstractVector)
     return vals  # `_displaycolor` already collapsed to a constant tuple
 end
 
+# M4 follow-up — material KIND.  A plot whose `material=(; glass = true, …)` is set wants TRUE
+# refractive glass (OmniGlass) instead of the OmniPBR `opacity` alpha cut-out.
+function _material_kind(plot)
+    mat = _plot_material(plot)
+    mat === nothing && return :omnipbr
+    return (haskey(mat, :glass) && Makie.to_value(mat[:glass]) === true) ? :glass : :omnipbr
+end
+
+"""
+    _glass_inputs_from(plot) -> Dict{String,Any}
+
+Compose an OmniGlass input Dict for a `material=(; glass = true, …)` plot: `glass_color` ←
+`color` / `material=(; base_color=…)` (default OmniGlass white), `glass_ior` ←
+`material=(; ior=…)` (default 1.491), `frosting_roughness` ← `material=(; roughness=…)`,
+`thin_walled` ← `material=(; thin_walled=…)`.  The `glass` flag itself and any unmapped key
+are skipped (with a `@warn`).
+"""
+function _glass_inputs_from(plot)
+    inputs = Dict{String,Any}()
+    color  = _plot_color(plot)
+    if color !== nothing && !(color isa AbstractArray)          # a scalar base tint (not an image/per-vertex)
+        inputs["glass_color"] = _rgb(Makie.to_color(color))
+    end
+    mat = _plot_material(plot)
+    if mat !== nothing
+        for k in keys(mat)
+            kk = Symbol(k)
+            kk === :glass && continue
+            v = Makie.to_value(mat[k])
+            if kk === :base_color || kk === :color
+                inputs["glass_color"] = _rgb(Makie.to_color(v))
+            elseif kk === :ior
+                inputs["glass_ior"] = v
+            elseif kk === :roughness
+                inputs["frosting_roughness"] = v
+            elseif kk === :thin_walled
+                inputs["thin_walled"] = v === true
+            else
+                @warn "OmniverseMakie: glass `material=` ignores key `$(kk)` (OmniGlass takes \
+                       glass_color / ior / roughness / thin_walled)."
+            end
+        end
+    end
+    get!(inputs, "glass_ior", 1.491f0)
+    return inputs
+end
+
 """
     materialized_looks_usda(root_scene) -> String
 
@@ -428,7 +495,10 @@ function _collect_materialized_plot!(frags::Vector{String}, plot)
     if isempty(plot.plots)                       # atomic plot
         if is_materialized(plot)
             name = "Mat_$(objectid(plot))"
-            push!(frags, usda_omnipbr_material(name, material_inputs_from(plot)))
+            frag = _material_kind(plot) === :glass ?
+                usda_glass_material(name, _glass_inputs_from(plot)) :
+                usda_omnipbr_material(name, material_inputs_from(plot))
+            push!(frags, frag)
         end
     else                                         # composite → recurse into children
         foreach(p -> _collect_materialized_plot!(frags, p), plot.plots)

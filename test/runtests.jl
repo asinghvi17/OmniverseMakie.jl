@@ -66,3 +66,6 @@ include("m4_colormap_test.jl")
 
 # M4 follow-up — image textures on surface! (_surface_texcoords emits the grid st UVs).
 include("m4_surface_texture_test.jl")
+
+# M4 follow-up — true refractive glass via OmniGlass (material=(; glass=true, …)).
+include("m4_glass_test.jl")

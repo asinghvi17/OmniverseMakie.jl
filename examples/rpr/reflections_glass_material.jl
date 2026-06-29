@@ -1,5 +1,5 @@
 # Ported from references/RPRMakieNotes/scripts/reflections_glass_material.jl (Lazaro Alonso).
-# Room box with a glass sphere (Cornell-box style). RPR.Glass → OmniPBR opacity material.
+# Room box with a glass sphere (Cornell-box style). RPR.Glass → true OmniGlass (refractive).
 # NOTE: the original loads ./lights/envLightImage.exr for EnvironmentLight — the backend does
 # NOT honor image env maps. A neutral 1×1 grey60 dome is used instead (best-effort dome).
 using OmniverseMakie, GeometryBasics, Colors
@@ -25,9 +25,9 @@ function scene_reflections_glass_material()
     mesh!(ax, Rect3(Vec3f(-1, -1, -1.1), Vec3f(0.1, 2, 2.2));
           color = RGB(0.522, 0.522, 0.522))
 
-    # glass sphere — RPR.Glass → OmniPBR opacity/roughness/metallic
+    # glass sphere — RPR.Glass → TRUE refractive OmniGlass (material=(; glass=true, ior))
     mesh!(ax, SphereTess(; o = Point3f(0.5, 0, 0), r = 0.5);
-          material = (; opacity = 0.15f0, roughness = 0.0f0, metallic = 0.0f0))
+          material = (; glass = true, ior = 1.5f0))
 
     cam = cameracontrols(ax.scene)
     cam.eyeposition[] = Vec3f(10.0, 0.0, 0.5)
