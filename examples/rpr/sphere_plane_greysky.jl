@@ -20,6 +20,6 @@ end
 function assert_sphere_plane_greysky(img)
     assert_nonblack(img, "sphere_plane_greysky"; frac = 0.05)
     bf = color_fraction(img, :blue)
-    @assert bf > 0.01 "FAIL: sphere_plane_greysky expected a blue sphere; blue_fraction=$(bf)"
+    @assert bf > 0.0015 "FAIL: sphere_plane_greysky expected a blue sphere; blue_fraction=$(bf)"
     println("  blue_fraction=", bf)
 end

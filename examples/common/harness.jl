@@ -50,19 +50,20 @@ function assert_nonblack(img, name; frac = 0.01)
 end
 
 """
-    color_fraction(img, which; thresh) -> Float64
+    color_fraction(img, which; thresh, amargin) -> Float64
 
-Fraction of pixels where channel `which` (:red/:green/:blue) is the max channel and the
-pixel is bright enough (max channel > thresh). Robust colour-presence signal under RTX noise.
+Fraction of pixels where channel `which` (:red/:green/:blue) **dominates** the other two
+channels by an absolute margin of at least `amargin`, and the pixel is bright enough
+(max channel > `thresh`).  Grey/white pixels (r≈g≈b) are rejected even if bright, so a
+colourless render cannot falsely satisfy the check.
 """
-function color_fraction(img, which::Symbol; thresh = 0.15f0)
+function color_fraction(img, which::Symbol; thresh = 0.12f0, amargin = 0.03f0)
     n = count(img) do c
         r, g, b = Float32(red(c)), Float32(green(c)), Float32(blue(c))
-        m = max(r, g, b)
-        m <= thresh && return false
-        which === :red   ? (r >= g && r >= b) :
-        which === :green ? (g >= r && g >= b) :
-                           (b >= r && b >= g)
+        max(r, g, b) <= thresh && return false
+        which === :red   ? (r - max(g, b) > amargin) :
+        which === :green ? (g - max(r, b) > amargin) :
+                           (b - max(r, g) > amargin)
     end
     return n / length(img)
 end

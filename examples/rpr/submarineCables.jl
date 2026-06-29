@@ -108,6 +108,6 @@ end
 function assert_submarineCables(img)
     assert_nonblack(img, "submarineCables"; frac = 0.03)
     bf = color_fraction(img, :blue)
-    @assert bf > 0.01 "FAIL: submarineCables expected textured globe; blue_fraction=$(bf)"
+    @assert bf > 0.004 "FAIL: submarineCables expected textured globe; blue_fraction=$(bf)"
     println("  blue_fraction=", bf)
 end

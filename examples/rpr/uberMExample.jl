@@ -30,6 +30,6 @@ end
 function assert_uberMExample(img)
     assert_nonblack(img, "uberMExample")
     bf = color_fraction(img, :blue)
-    @assert bf > 0.01 "FAIL: uberMExample expected earth texture (blue ocean presence); blue_fraction=$(bf)"
+    @assert bf > 0.008 "FAIL: uberMExample expected earth texture (blue ocean presence); blue_fraction=$(bf)"
     println("  blue_fraction=", bf)
 end

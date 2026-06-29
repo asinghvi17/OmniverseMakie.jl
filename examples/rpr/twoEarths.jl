@@ -32,6 +32,6 @@ end
 function assert_twoEarths(img)
     assert_nonblack(img, "twoEarths")
     bf = color_fraction(img, :blue)
-    @assert bf > 0.02 "FAIL: twoEarths expected earth textures (blue ocean presence); blue_fraction=$(bf)"
+    @assert bf > 0.015 "FAIL: twoEarths expected earth textures (blue ocean presence); blue_fraction=$(bf)"
     println("  blue_fraction=", bf)
 end

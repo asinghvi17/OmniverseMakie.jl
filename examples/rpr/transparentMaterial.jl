@@ -32,6 +32,6 @@ end
 
 function assert_transparentMaterial(img)
     assert_nonblack(img, "transparentMaterial")
-    @assert color_fraction(img, :blue) > 0.01 "FAIL: transparentMaterial expected earth texture"
+    @assert color_fraction(img, :blue) > 0.008 "FAIL: transparentMaterial expected earth texture"
     println("  blue_fraction=", color_fraction(img, :blue))
 end

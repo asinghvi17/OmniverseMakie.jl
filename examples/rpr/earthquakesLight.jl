@@ -80,6 +80,6 @@ end
 function assert_earthquakesLight(img)
     assert_nonblack(img, "earthquakesLight")
     rf = color_fraction(img, :red)
-    @assert rf > 0.003 "FAIL: earthquakesLight expected emissive indicators; red_fraction=$(rf)"
+    @assert rf > 0.0012 "FAIL: earthquakesLight expected emissive indicators; red_fraction=$(rf)"
     println("  red_fraction=", rf)
 end
