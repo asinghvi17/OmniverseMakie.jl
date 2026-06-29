@@ -47,7 +47,8 @@ function scene_earthquakes()
     # Earthquake scatter: numeric color → :nuuk colormap
     meshscatter!(ax, toPoints3D;
         markersize = ms ./ 12 .+ 0.006,
-        color      = cmap_colors(mag, :nuuk))
+        color      = mag,
+        colormap   = :nuuk)
 
     # NOTE: the original's glass box frame is dropped here — our OmniPBR `opacity` glass
     # renders as a bright opaque panel (no true refraction) that washes out the globe of

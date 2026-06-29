@@ -50,21 +50,6 @@ function assert_nonblack(img, name; frac = 0.01)
 end
 
 """
-    cmap_colors(values, cmap; crange=extrema(values)) -> Vector
-
-Pre-map numeric `values` through colormap `cmap` to explicit per-element colours.
-Use INSTEAD of `color=values, colormap=cmap` on meshscatter!/lines!/linesegments! — the
-RTX backend does not colormap-map a numeric `scaled_color` vector for those plot types, so
-the scene supplies resolved colours (the visual result is identical). `cmap` may be a
-Symbol (e.g. `:nuuk`) or a colormap.
-"""
-function cmap_colors(values, cmap; crange = extrema(values))
-    cm = Makie.to_colormap(cmap)
-    lo, hi = Float32(first(crange)), Float32(last(crange))
-    return [Makie.interpolated_getindex(cm, Float32(v), (lo, hi)) for v in values]
-end
-
-"""
     color_fraction(img, which; thresh) -> Float64
 
 Fraction of pixels where channel `which` (:red/:green/:blue) is the max channel and the

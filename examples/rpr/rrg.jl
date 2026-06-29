@@ -69,11 +69,15 @@ function scene_rrg()
     ax  = LScene(fig[1, 1]; show_axis = false, scenekw = (; lights = lights))
 
     linesegments!(ax, segm;
-        color     = cmap_colors(weights, cmap; crange = (adjmin, adjmax)),
-        linewidth = abs.(weights))
+        color      = weights,
+        colormap   = cmap,
+        colorrange = (adjmin, adjmax),
+        linewidth  = abs.(weights))
 
     meshscatter!(ax, x, y, z;
-        color      = cmap_colors(diagValues, cmap; crange = (adjmin, adjmax)),
+        color      = diagValues,
+        colormap   = cmap,
+        colorrange = (adjmin, adjmax),
         markersize = abs.(diagValues) ./ 90)
 
     # DiffuseMaterial → plain color= (drop material=)

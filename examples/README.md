@@ -78,14 +78,10 @@ adaptations:
   convention is transposed relative to ours, so the originals' `img'` transpose is dropped —
   with it, the texture renders rotated 90°. Note: image textures are carried through `mesh!`
   but **not** `surface!`, so `submarineCables`' globe renders white (the cable routes are the
-  subject); and a numeric `color`+`colormap` on `meshscatter!`/`lines!` is pre-resolved via
-  `cmap_colors` (the RTX backend does not yet map a numeric color vector for those plots).
+  subject).
 - **Lights** keep `PointLight`/`EnvironmentLight`; note `PointLight` is `PointLight(color,
   position)` here. Image-based environment maps are best-effort (a neutral dome) — the key/
   fill point lights carry the scenes' lighting.
-- **Colormaps on `meshscatter!`/`lines!`/`linesegments!`** are pre-resolved to explicit
-  per-element colours via the `cmap_colors` helper (`examples/common/harness.jl`), since the
-  RTX backend does not yet colormap-map a numeric color vector for those plot types.
 - **Assets** are fetched once into the gitignored `examples/assets/` by `fetch_assets.jl`
   (never downloaded at render time); scenes resolve them via `asset(scene, relpath)`.
 
@@ -94,7 +90,7 @@ adaptations:
 ```
 examples/
   Project.toml          # own env (dev-deps OmniverseMakie + example deps)
-  common/harness.jl     # run_example, asset(), property-assert helpers, cmap_colors
+  common/harness.jl     # run_example, asset(), property-assert helpers
   common/run_one.jl     # renders ONE scene in a subprocess + asserts
   fetch_assets.jl       # one-time asset setup (copies + downloads)
   run_all.jl            # the gallery runner / gate

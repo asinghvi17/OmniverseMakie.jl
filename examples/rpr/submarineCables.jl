@@ -86,7 +86,8 @@ function scene_submarineCables()
 
     # Landing points: colored by index with :plasma colormap
     meshscatter!(ax, toPoints3D;
-        color      = cmap_colors(1:length(toPoints3D), :plasma),
+        color      = 1:length(toPoints3D),
+        colormap   = :plasma,
         markersize = 0.005)
 
     # Cable routes: one lines! call per segment, colours cycled from the default palette

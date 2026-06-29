@@ -53,7 +53,8 @@ function scene_earthquakesLight()
     # Earthquake scatter: numeric colour → :nuuk colormap, sized by normalised magnitude
     meshscatter!(ax, toPoints3D;
         markersize = ms ./ 14 .+ 0.004,
-        color      = cmap_colors(mag, :nuuk))
+        color      = mag,
+        colormap   = :nuuk)
 
     # Earth sphere: color=earth_img → auto diffuse_texture in RTX backend
     mesh!(ax, SphereTess(); color = earth_img)

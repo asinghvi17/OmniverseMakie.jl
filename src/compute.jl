@@ -114,6 +114,22 @@ _displaycolor_from_scaled(cs::AbstractArray{<:Colorant}, _n)  = ([_rgb(c) for c 
 # Fallback (e.g. a single packed value): treat as one constant colour.
 _displaycolor_from_scaled(c, _n) = (_rgb(Makie.to_color(c)), "constant")
 
+# M4 follow-up: a NUMERIC `scaled_color` vector (colour = numbers + a colormap, as on a
+# colour-mapped `meshscatter!`/`lines!`/`linesegments!`/per-vertex `mesh!`) must be mapped
+# THROUGH the plot's colormap — the bare `_displaycolor_from_scaled` fallback
+# `_rgb(to_color(::Vector{Float32}))` cannot (it `red()`s the whole vector → MethodError).
+# Resolve it here from the plot's `colormap` + `colorrange` (mirroring the M1
+# `displaycolor_for`/`_displaycolor` numeric path via `interpolated_getindex`); a Colorant or
+# scalar `scaled_color` defers to the byte-unchanged `_displaycolor_from_scaled`.
+function _scaled_to_display(plot, sc, n)
+    if sc isa AbstractVector{<:Real}
+        cmap   = Makie.to_colormap(plot.colormap[])
+        crange = _colorrange(plot, sc)
+        return ([_rgb(Makie.interpolated_getindex(cmap, Float32(v), crange)) for v in sc], "vertex")
+    end
+    return _displaycolor_from_scaled(sc, n)
+end
+
 # ------------------------------------------------------------------
 # texcoords (`st` UV primvar) for a textured materialized mesh (M3.3)
 # ------------------------------------------------------------------
@@ -182,7 +198,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
     end
 
     # Non-materialized: the M1 USD-native `displayColor` path, byte-unchanged.
-    values, interp = _displaycolor_from_scaled(args[:scaled_color], length(points))
+    values, interp = _scaled_to_display(plot, args[:scaled_color], length(points))
     usda = usda_mesh(points, faces0, normals, values;
                      model                = args[:model_f32c],
                      normal_interpolation = "vertex",
@@ -214,7 +230,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Scatter, args)
         robj.material_shader = material_prim_path(plot) * "/Shader"
         return robj
     end
-    values, interp = _displaycolor_from_scaled(args[:scaled_color], n)
+    values, interp = _scaled_to_display(plot, args[:scaled_color], n)
     proto_color     = interp == "constant" ? values  : nothing
     instancer_color = interp == "constant" ? nothing : values
     usda = _usda_pointinstancer(pos, scales, nothing, instancer_color,
@@ -248,7 +264,7 @@ function author_usd_prim!(screen, scene, plot::Makie.MeshScatter, args)
         robj.material_shader = material_prim_path(plot) * "/Shader"
         return robj
     end
-    values, interp = _displaycolor_from_scaled(args[:scaled_color], n)
+    values, interp = _scaled_to_display(plot, args[:scaled_color], n)
     proto_color     = interp == "constant" ? values  : nothing
     instancer_color = interp == "constant" ? nothing : values
     proto = _mesh_proto_body(mpts, mfaces, mnrm, proto_color)
@@ -275,7 +291,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Lines, args)
         robj.material_shader = material_prim_path(plot) * "/Shader"
         return robj
     end
-    values, interp = _displaycolor_from_scaled(args[:scaled_color], n)
+    values, interp = _scaled_to_display(plot, args[:scaled_color], n)
     usda  = _usda_basiscurves(pts, [n], width, values, interp; model = args[:model_f32c])
     h = OV.add_usd_reference!(screen.renderer, usda, path)
     return OvrtxRObj(path, h)
@@ -296,7 +312,7 @@ function author_usd_prim!(screen, scene, plot::Makie.LineSegments, args)
         robj.material_shader = material_prim_path(plot) * "/Shader"
         return robj
     end
-    values, interp = _displaycolor_from_scaled(args[:scaled_color], length(pts2))
+    values, interp = _scaled_to_display(plot, args[:scaled_color], length(pts2))
     usda  = _usda_basiscurves(pts2, fill(2, nseg), width, values, interp; model = args[:model_f32c])
     h = OV.add_usd_reference!(screen.renderer, usda, path)
     return OvrtxRObj(path, h)
