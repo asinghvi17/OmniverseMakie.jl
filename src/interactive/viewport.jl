@@ -116,5 +116,102 @@ function interactive_display(fig_or_scene; size = (800, 600), steps_per_tick = 2
         on_render_tick!(session)
         return Makie.Consume(false)
     end
+
+    # 7. Window-resize hook: when the GLMakie window is resized, rebuild the ovrtx
+    #    renderer at the new resolution (resize_viewport!) and update the image! plot.
+    #    Fires on glscene.events.window_area (Rect2), which GLMakie updates via the
+    #    GLFW window-size callback whenever the window is resized.  The initial fire
+    #    at display time carries the current size (== fb_size) and is a no-op.
+    session.resize_listener = on(glscene.events.window_area) do area
+        w, h = Int.(widths(area))
+        (w, h) == session.screen.fb_size && return   # no change — skip
+        w > 0 && h > 0                  || return   # guard against degenerate sizes
+        resize_viewport!(session, (w, h))
+        return nothing
+    end
+
     return session
+end
+
+# ------------------------------------------------------------------
+# Teardown
+# ------------------------------------------------------------------
+
+"""
+    Base.close(session::ViewportSession) -> Nothing
+
+Tear down the interactive viewport: detach all listeners, close the GLMakie window,
+then close the underlying ovrtx `Screen` (renderer + bindings).
+
+Idempotent: a second `close` is a safe no-op (listener guards + `renderer.alive`
+check in `Base.close(::Screen)` absorb repeated calls).
+"""
+function Base.close(session::ViewportSession)
+    session.tick_listener   === nothing || off(session.tick_listener)
+    session.resize_listener === nothing || off(session.resize_listener)
+    for l in session.input_listeners; off(l); end
+    empty!(session.input_listeners)
+    session.tick_listener   = nothing
+    session.resize_listener = nothing
+    try
+        isopen(session.glscreen) && close(session.glscreen)
+    catch e
+        @warn "M5: error closing GLMakie screen" exception=e
+    end
+    Base.close(session.screen)   # ovrtx Screen LAST (bindings then renderer — M1 teardown order)
+    return nothing
+end
+
+# ------------------------------------------------------------------
+# Window resize
+# ------------------------------------------------------------------
+
+"""
+    resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int}) -> Nothing
+
+Rebuild the ovrtx renderer at the new size `(W, H)` and refresh the displayed
+image.  Called by the `resize_listener` on `glscene.events.window_area`.
+
+Steps:
+1. Resize the root cam scene so the new `Screen` picks up the new resolution.
+2. Build + author a new open-stage ovrtx `Screen`, render a warmup frame.
+3. Close the OLD ovrtx `Screen` (free the GPU renderer — avoid a leak).
+4. Swap in the new screen and update the full-viewport `image!` plot to the
+   new dimensions (delete old, create new — avoids image! range-change edge cases).
+"""
+function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
+    cam_scene = session.cam_scene
+    root_scene = Makie.root(cam_scene)  # the figure/root scene passed to insertplots!
+
+    # 1. Resize the root scene so Screen() picks up the new resolution.
+    Makie.resize!(root_scene, W, H)
+
+    # 2. Build + author the new ovrtx Screen (same sequence as interactive_display).
+    new_screen = Screen(cam_scene)
+    if new_screen.fb_size != (W, H)
+        @warn "M5 resize: expected fb_size $((W, H)), got $(new_screen.fb_size)"
+    end
+    author_root_from_scene!(new_screen, cam_scene; resolution = new_screen.fb_size)
+    new_screen.last_camera = _camera_snapshot(cam_scene)
+    new_screen.last_lights = _lights_snapshot(cam_scene.compute[:lights][])
+    new_screen.authored    = true
+    Makie.insertplots!(new_screen, root_scene)
+
+    # 3. Render a warmup frame at the new size.
+    frame = OV.render_to_matrix(new_screen.renderer, new_screen.product;
+                                warmup = new_screen.config.warmup)
+
+    # 4. Free the OLD ovrtx renderer (avoid GPU leak), then swap in the new Screen.
+    Base.close(session.screen)
+    session.screen = new_screen
+
+    # 5. Update the displayed image: delete the old image! (wrong size) and add a new
+    #    one spanning the full new viewport.  The campixel! coordinate system already
+    #    covers 0..W, 0..H after the GLMakie window resize.
+    delete!(session.glscene, session.image_plot)
+    new_img = image!(session.glscene, 0 .. W, 0 .. H,
+                     reverse(permutedims(frame), dims = 2); interpolate = false)
+    session.image_plot = new_img
+
+    return nothing
 end

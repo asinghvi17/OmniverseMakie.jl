@@ -18,20 +18,18 @@
 const _M5_STEP_TIMEOUT_NS = UInt64(10_000_000_000)
 
 """
-    on_render_tick!(session::ViewportSession) -> Nothing
+    _on_render_tick_impl!(session::ViewportSession) -> Nothing
 
-Per-frame live camera loop (M5 Task 3).  Called on every GLMakie render tick via
-the `render_tick` Observable listener registered in `interactive_display`.
+Core implementation of the per-frame live camera loop (M5 Task 3).  Called from
+`on_render_tick!`, which wraps this in a try/catch to keep the window alive even
+on transient render errors.
 
 Pushes live camera/light/plot deltas to the open ovrtx stage, resets RT2
 accumulation only when something changed (else keeps accumulating), runs
 `steps_per_tick` bounded accumulation steps, and blits the result to the
 GLMakie image plot.
-
-Must NOT Consume events — the caller wraps this in `on(glscr.render_tick) do _`
-and returns `Makie.Consume(false)`.
 """
-function on_render_tick!(session::ViewportSession)
+function _on_render_tick_impl!(session::ViewportSession)
     screen    = session.screen
     cam_scene = session.cam_scene
 
@@ -62,5 +60,26 @@ function on_render_tick!(session::ViewportSession)
 
     # CPU blit: update the GLMakie image! plot's data Observable → texture re-upload.
     cpu_blit!(session.image_plot, frame)
+    return nothing
+end
+
+"""
+    on_render_tick!(session::ViewportSession) -> Nothing
+
+Per-frame live camera loop (M5 Task 3).  Called on every GLMakie render tick via
+the `render_tick` Observable listener registered in `interactive_display`.
+
+Wraps `_on_render_tick_impl!` in a try/catch so that a single bad frame does NOT
+crash the window.  Up to `maxlog=5` warnings are printed; the window stays alive.
+
+Must NOT Consume events — the caller wraps this in `on(glscr.render_tick) do _`
+and returns `Makie.Consume(false)`.
+"""
+function on_render_tick!(session::ViewportSession)
+    try
+        _on_render_tick_impl!(session)
+    catch e
+        @warn "M5: render-tick frame failed (window kept alive)" exception=(e, catch_backtrace()) maxlog=5
+    end
     return nothing
 end
