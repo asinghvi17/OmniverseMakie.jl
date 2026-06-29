@@ -76,7 +76,10 @@ adaptations:
   `material=(; metallic, roughness, opacity)`.
 - **Image textures** are passed in **natural orientation** (`color = img`). RPRMakie's UV
   convention is transposed relative to ours, so the originals' `img'` transpose is dropped —
-  with it, the texture renders rotated 90°.
+  with it, the texture renders rotated 90°. Note: image textures are carried through `mesh!`
+  but **not** `surface!`, so `submarineCables`' globe renders white (the cable routes are the
+  subject); and a numeric `color`+`colormap` on `meshscatter!`/`lines!` is pre-resolved via
+  `cmap_colors` (the RTX backend does not yet map a numeric color vector for those plots).
 - **Lights** keep `PointLight`/`EnvironmentLight`; note `PointLight` is `PointLight(color,
   position)` here. Image-based environment maps are best-effort (a neutral dome) — the key/
   fill point lights carry the scenes' lighting.
