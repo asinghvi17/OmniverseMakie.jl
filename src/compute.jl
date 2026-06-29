@@ -81,11 +81,23 @@ plot_prim_path(scene2scope::AbstractDict, scene, plot) =
 # (`Symbol[]`) and build once via the M1 `to_ovrtx_object` path.
 # M3.4: `:material` is tracked so a live `plot.material[]` edit fires the diff node and
 # re-writes the pre-authored OmniPBR shader inputs (push route below).  It resolves as a
-# graph output for every Mesh (a plain mesh's value is `nothing` / an empty material and
-# never changes, so it never pushes — no regression to the displayColor path).
+# graph output for every Mesh AND MeshScatter (a plain plot's value is `nothing` / an
+# empty material and never changes, so it never pushes — no regression to the displayColor
+# path).  `consumed_inputs` dispatches on TYPE only and `register_ovrtx_robj!` registers
+# the node for EVERY plot of that type (materialized or not), so a tracked input MUST
+# resolve for a NON-materialized plot too — else `register_computation!` raises "Inputs
+# [:material] not found" and breaks ALL plots of that type.
+# M3 final-review (MCP-verified): `:material` resolves for a non-materialized Mesh /
+# MeshScatter (→ `nothing`) but NOT for a non-materialized Scatter / Lines / LineSegments
+# (Makie only registers `:material` on those when a `material=` kwarg is given).  So
+# `:material` is tracked for Mesh + MeshScatter only; a live material-PARAM edit on a
+# MATERIALIZED Scatter/Lines/LineSegments is therefore still a no-op (documented
+# limitation — see test/m3_material_live_test.jl).  A live `color` edit on those types
+# still works (their materialized build sets `robj.material_shader` and `:scaled_color`
+# is tracked).
 consumed_inputs(::Makie.Mesh)         = [:positions_transformed_f32c, :model_f32c, :faces, :normals, :scaled_color, :material, :visible]
 consumed_inputs(::Makie.Scatter)      = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
-consumed_inputs(::Makie.MeshScatter)  = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
+consumed_inputs(::Makie.MeshScatter)  = [:positions_transformed_f32c, :model_f32c, :scaled_color, :material, :visible]
 consumed_inputs(::Makie.Lines)        = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
 consumed_inputs(::Makie.LineSegments) = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
 consumed_inputs(::Any)                = Symbol[]

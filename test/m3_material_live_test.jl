@@ -76,3 +76,50 @@ const _M34_MATERIAL_LIVE_PROG = read(joinpath(@__DIR__, "m3_material_live_prog.j
     mo = match(r"ROOT_OPENS=(\d+)", output)
     @test mo !== nothing && parse(Int, mo.captures[1]) == 1
 end
+
+# ---------------------------------------------------------------------------
+# M3 final-review fix — live material-PARAM edits on a MATERIALIZED *MeshScatter*
+# (not just a Mesh).  `:material` is a graph input for Mesh AND MeshScatter, so adding
+# it to `consumed_inputs(::Makie.MeshScatter)` routes a live `plot.material[]` edit
+# through the M2 diff path (→ `_push_material!` on the pre-authored `Mat_<id>/Shader`)
+# WITHOUT re-authoring (`ROOT_OPENS == 1`).  Before the fix this edit was a silent no-op.
+#
+# (Scatter/Lines/LineSegments do NOT expose `:material` as a graph input for a
+# non-materialized plot — KeyError on resolve — so `:material` is intentionally NOT in
+# their `consumed_inputs`; a live material-param edit on those types remains unsupported.)
+#
+# Body: test/m3_meshscatter_material_live_prog.jl.
+# ---------------------------------------------------------------------------
+
+const _M3_MESHSCATTER_MATERIAL_LIVE_PROG =
+    read(joinpath(@__DIR__, "m3_meshscatter_material_live_prog.jl"), String)
+
+@testset "M3 live material-param edit on a materialized MeshScatter (subprocess)" begin
+    exitcode, output = run_ovrtx_subprocess(_M3_MESHSCATTER_MATERIAL_LIVE_PROG; timeout = 900)
+    @info "M3 meshscatter material-live subprocess output" output
+    @test exitcode == 0
+    @test contains(output, "OK_MESHSCATTER_MATERIAL_LIVE")
+
+    # The shader prim was recorded on the OvrtxRObj.
+    @test contains(output, "MATERIAL_SHADER=/World/Looks/Mat_")
+
+    # Exactly one minimal :material push, and exactly the two changed shader inputs.
+    @test contains(output, "PUSH_MATERIAL=Dict(:material => 1)")
+    @test contains(output, "SHADER_MATERIAL=[\"metallic_constant\", \"reflection_roughness_constant\"]")
+
+    # The render CHANGED (glossy metal → matte dielectric) and the matte surface shows its
+    # purer diffuse base (blue base MORE saturated once the specular wash is gone).
+    mch = match(r"CHANGED_A_vs_B=(\d+)", output)
+    @test mch !== nothing && parse(Int, mch.captures[1]) > 300
+    msa = match(r"SAT_A=([0-9.eE+\-]+)", output)
+    msb = match(r"SAT_B=([0-9.eE+\-]+)", output)
+    if msa !== nothing && msb !== nothing
+        @test parse(Float64, msb.captures[1]) > parse(Float64, msa.captures[1])
+    else
+        @test false
+    end
+
+    # The stage was authored EXACTLY ONCE across both renders (live writes only).
+    mo = match(r"ROOT_OPENS=(\d+)", output)
+    @test mo !== nothing && parse(Int, mo.captures[1]) == 1
+end
