@@ -131,12 +131,14 @@ end
 # ------------------------------------------------------------------
 
 """
-    _find_var(outs::ovrtx_render_product_set_outputs_t, name) -> ovrtx_render_var_output_handle_t
+    _find_var_opt(outs::ovrtx_render_product_set_outputs_t, name) -> handle | nothing
 
 Walk outputs → output_frames → output_render_vars and return the output handle
-whose render_var_name matches `name` (e.g. "LdrColor").  Throws if not found.
+whose render_var_name matches `name` (e.g. "LdrColor"), or `nothing` if absent.
+Used by `read_pick_hit`, where a missing `ovrtx_pick_hit` var (no pick enqueued)
+is an expected, non-error case.
 """
-function _find_var(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::AbstractString)
+function _find_var_opt(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::AbstractString)
     for i in 1:outs.output_count
         po = unsafe_load(outs.outputs, i)            # ovrtx_render_product_output_t
         for f in 1:po.output_frame_count
@@ -147,7 +149,19 @@ function _find_var(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::Abst
             end
         end
     end
-    error("render var '$name' not found in step outputs")
+    return nothing
+end
+
+"""
+    _find_var(outs::ovrtx_render_product_set_outputs_t, name) -> ovrtx_render_var_output_handle_t
+
+Like `_find_var_opt` but throws if `name` is not found (the contract `map_cpu`,
+`map_cpu_f32`, and `map_cuda` rely on — LdrColor/HdrColor are always present).
+"""
+function _find_var(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::AbstractString)
+    h = _find_var_opt(outs, name)
+    h === nothing && error("render var '$name' not found in step outputs")
+    return h
 end
 
 # ------------------------------------------------------------------
@@ -317,6 +331,269 @@ closed.
 function unmap_cuda(sr::StepResult, map_handle; stream::Csize_t = Csize_t(0), done_event::Csize_t = Csize_t(0))
     sync = LibOVRTX.ovrtx_cuda_sync_t(stream, done_event)
     sr.r.alive && LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, map_handle, sync)
+    return nothing
+end
+
+# ==================================================================
+# Picking — M6.B native ray-query pick (CPU-only)
+#
+# `enqueue_pick_query` registers a pixel-rect pick for the NEXT `step!` on a
+# product; that step yields a synthetic `ovrtx_pick_hit` render var (CPU-mapped
+# ONLY — an ovrtx restriction; the payload is tiny so there is no device path).
+# `read_pick_hit` decodes its uint32 params (magic/version/hitCount) and named
+# tensors into `PickHit`s; `path_resolver`/`resolve_prim_path` turn a hit's
+# `primpath_id` into the authored prim-path string via the path-dictionary vtable.
+#
+# ABI VERIFIED in a REPL against references/ovrtx/tests/docs/c/
+# test_picking_selection.cpp + helpers.h (docs_resolve_primpath):
+#   - params: `ovrtx_render_var_param_t` carries a VALUE `name::ovx_string_t` and
+#     a VALUE `dl::DLTensor`; each pick param is a scalar kDLUInt/32 (read at
+#     p.dl.data).  (C `find_param` uses `param.name` / `&param.dl`.)
+#   - tensors: `ovrtx_render_var_tensor_t` carries a POINTER `name::Ptr{ovx_string_t}`
+#     and a POINTER `dl::Ptr{DLTensor}` — deref both.  (C `find_tensor` uses
+#     `*tensor.name` / `tensor.dl`.)  Verified dtypes/shapes (n = hitCount):
+#       primPath           kDLUInt/64  ndim=1 [n]
+#       objectType         kDLUInt/32  ndim=1 [n]
+#       geometryInstanceId kDLUInt/64  ndim=1 [n]   ← 64-bit on the wire, NOT 32
+#       worldPositionM     kDLFloat/64 ndim=2 [n,3] row-major
+#       worldNormal        kDLFloat/32 ndim=2 [n,3] row-major
+#   - resolution: `path_dictionary_vtable_t.get_tokens_from_paths` /
+#     `.get_strings_from_tokens` are `Ptr{Cvoid}` fn-pointers called through
+#     `@ccall $fp(...)`.  `out_tokens_per_path` points INTO the caller's token
+#     buffer, so the buffer is `GC.@preserve`d across BOTH calls.
+# ==================================================================
+
+"""
+    enqueue_pick_query(r::Renderer, product, (left,top,right,bottom); flags=UInt32(0)) -> Nothing
+
+Register a pick query over the pixel rect (left/top inclusive, right/bottom
+exclusive, in RenderProduct pixel coords) for the NEXT `step!` that renders
+`product`.  Synchronous (enqueue + wait, mirroring the C picking reference which
+waits on the enqueue op before stepping), so the `product` bytes only need to
+outlive this call.  Read the result after the next `step!` with `read_pick_hit`.
+If several queries are enqueued for one product before a step, the last wins.
+"""
+function enqueue_pick_query(r::Renderer, product::AbstractString, rect::NTuple{4,Int};
+                            flags::UInt32 = UInt32(0))
+    r.alive || error("enqueue_pick_query on a closed Renderer")
+    prod_s = String(product)
+    GC.@preserve prod_s begin
+        desc = Ref(LibOVRTX.ovrtx_pick_query_desc_t(LibOVRTX.ovx_string(prod_s),
+                   Int32(rect[1]), Int32(rect[2]), Int32(rect[3]), Int32(rect[4]), flags))
+        enqueue_wait(r, LibOVRTX.ovrtx_enqueue_pick_query(r.ptr, desc), "enqueue_pick_query")
+    end
+    return nothing
+end
+
+"""
+    PickHit
+
+One viewport pick hit.  `primpath_id` is an `ovx_primpath_t` id — resolve it to a
+prim-path string with `resolve_prim_path`.  `instance_id` is the wire
+`geometryInstanceId` (a 64-bit id; `0` for a single non-instanced geometry).
+`world_position`/`normal` are in world space (the C reference asserts only that
+they are finite — for a prim at the world origin they read `(0,0,0)`).
+"""
+const PickHit = NamedTuple{(:primpath_id, :object_type, :instance_id, :world_position, :normal),
+                           Tuple{UInt64, UInt32, UInt64, NTuple{3,Float64}, NTuple{3,Float32}}}
+
+# Find a pick-hit PARAM by name and read its scalar uint32 value.  Params carry a
+# VALUE name + VALUE dl (verified), distinct from tensors.
+function _pick_param_u32(out::LibOVRTX.ovrtx_render_var_output_t, name::AbstractString)
+    for i in 1:out.num_params
+        p = unsafe_load(out.params, i)               # ovrtx_render_var_param_t (by value)
+        String(p.name) == name && return unsafe_load(Ptr{UInt32}(p.dl.data))
+    end
+    error("pick-hit param '$name' not found")
+end
+
+# Find a pick-hit TENSOR by name and return its DLTensor (deref'd).  Tensors carry
+# a POINTER name + POINTER dl (verified), distinct from params.
+function _pick_tensor(out::LibOVRTX.ovrtx_render_var_output_t, name::AbstractString)
+    for i in 1:out.num_tensors
+        t = unsafe_load(out.tensors, i)              # ovrtx_render_var_tensor_t (by value)
+        t.name == C_NULL && continue
+        String(unsafe_load(t.name)) == name && return unsafe_load(t.dl)
+    end
+    error("pick-hit tensor '$name' not found")
+end
+
+"""
+    read_pick_hit(sr::StepResult) -> Vector{PickHit}
+
+Decode the `ovrtx_pick_hit` render var produced by the `step!` that consumed a
+prior `enqueue_pick_query`.  Returns one `PickHit` per hit; an EMPTY vector when
+no pick was enqueued for this step (the var is absent) or the magic/version
+header does not match.  CPU-only map (an ovrtx restriction); the map is always
+released (try/finally), never `map_cuda`.
+"""
+function read_pick_hit(sr::StepResult)::Vector{PickHit}
+    sr.r.alive || error("read_pick_hit on a closed Renderer")
+    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
+    h = _find_var_opt(outs[], LibOVRTX.OVRTX_RENDER_VAR_PICK_HIT)
+    h === nothing && return PickHit[]                    # no pick was enqueued for this step
+    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
+    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro),
+                   "map_render_var_output(pick_hit)")
+    out  = ro[]
+    hits = PickHit[]
+    try
+        magic   = _pick_param_u32(out, "magic")
+        version = _pick_param_u32(out, "version")
+        (magic == LibOVRTX.OVRTX_PICK_HIT_MAGIC && version == LibOVRTX.OVRTX_PICK_HIT_VERSION) || return PickHit[]
+        n = Int(_pick_param_u32(out, "hitCount"))
+        n == 0 && return hits
+        prim = _pick_tensor(out, "primPath")             # kDLUInt/64  [n]
+        otyp = _pick_tensor(out, "objectType")           # kDLUInt/32  [n]
+        inst = _pick_tensor(out, "geometryInstanceId")   # kDLUInt/64  [n]
+        wpos = _pick_tensor(out, "worldPositionM")       # kDLFloat/64 [n,3] row-major
+        wnrm = _pick_tensor(out, "worldNormal")          # kDLFloat/32 [n,3] row-major
+        pprim = Ptr{UInt64}(prim.data);  potyp = Ptr{UInt32}(otyp.data);  pinst = Ptr{UInt64}(inst.data)
+        pwp   = Ptr{Float64}(wpos.data); pwn   = Ptr{Float32}(wnrm.data)
+        for i in 1:n
+            base = (i - 1) * 3
+            push!(hits, (primpath_id    = unsafe_load(pprim, i),
+                         object_type    = unsafe_load(potyp, i),
+                         instance_id    = unsafe_load(pinst, i),
+                         world_position = (unsafe_load(pwp, base + 1), unsafe_load(pwp, base + 2), unsafe_load(pwp, base + 3)),
+                         normal         = (unsafe_load(pwn, base + 1), unsafe_load(pwn, base + 2), unsafe_load(pwn, base + 3))))
+        end
+    finally
+        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, out.map_handle, LibOVRTX.NOSYNC)
+    end
+    return hits
+end
+
+"""
+    PathResolver
+
+Wraps the renderer's `path_dictionary_instance_t` (from `ovrtx_get_path_dictionary`)
+plus its loaded vtable, so `resolve_prim_path` can dispatch the two `static inline`
+path-dictionary functions through their raw function pointers.  Build one with
+`path_resolver(r)`; valid while the renderer's stage composition is unchanged.
+"""
+struct PathResolver
+    pd::Base.RefValue{LibOVRTX.path_dictionary_instance_t}
+    vt::LibOVRTX.path_dictionary_vtable_t
+end
+
+"""
+    path_resolver(r::Renderer) -> PathResolver
+
+Fetch the renderer's path dictionary and load its vtable (one fetch, reused for
+many `resolve_prim_path` calls).
+"""
+function path_resolver(r::Renderer)
+    r.alive || error("path_resolver on a closed Renderer")
+    pd = Ref{LibOVRTX.path_dictionary_instance_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_get_path_dictionary(r.ptr, pd), "get_path_dictionary")
+    return PathResolver(pd, unsafe_load(pd[].vtable))
+end
+
+"""
+    resolve_prim_path(pr::PathResolver, id::UInt64) -> String
+
+Resolve one `ovx_primpath_t` id (a `PickHit.primpath_id`) to its `/A/B/C` prim
+path via the path-dictionary vtable: `get_tokens_from_paths`, then per token
+`get_strings_from_tokens`, joining the pieces with `/`.  Returns `""` if the
+dictionary cannot resolve `id`.  Reimplements helpers.h `docs_resolve_primpath`.
+"""
+function resolve_prim_path(pr::PathResolver, id::UInt64)::String
+    ctx        = Ptr{Cvoid}(pr.pd[].context)
+    idref      = Ref(id)
+    token_buf  = Vector{UInt64}(undef, 64)
+    out_tokens = Ref{Ptr{UInt64}}(C_NULL)
+    out_ntok   = Ref{Csize_t}(0)
+    out_nproc  = Ref{Csize_t}(0)
+    # out_tokens points INTO token_buf; keep it (and idref) preserved across BOTH ccalls.
+    GC.@preserve token_buf idref begin
+        res = @ccall $(pr.vt.get_tokens_from_paths)(
+            ctx::Ptr{Cvoid}, idref::Ptr{UInt64}, Csize_t(1)::Csize_t,
+            pointer(token_buf)::Ptr{UInt64}, Csize_t(64)::Csize_t,
+            out_tokens::Ptr{Ptr{UInt64}}, out_ntok::Ptr{Csize_t}, out_nproc::Ptr{Csize_t}
+            )::LibOVRTX.ovx_api_result_t
+        res.status == LibOVRTX.OVX_API_SUCCESS ||
+            error("path get_tokens_from_paths failed: $(String(res.error))")
+        out_nproc[] == 0 && return ""                    # id absent from the dictionary
+        ntok = Int(out_ntok[]); toks = out_tokens[]
+        io = IOBuffer()
+        for i in 1:ntok
+            s  = Ref{LibOVRTX.ovx_string_t}()
+            r2 = @ccall $(pr.vt.get_strings_from_tokens)(
+                ctx::Ptr{Cvoid}, (toks + (i - 1) * sizeof(UInt64))::Ptr{UInt64},
+                Csize_t(1)::Csize_t, s::Ptr{LibOVRTX.ovx_string_t}
+                )::LibOVRTX.ovx_api_result_t
+            r2.status == LibOVRTX.OVX_API_SUCCESS ||
+                error("path get_strings_from_tokens failed: $(String(r2.error))")
+            print(io, "/", String(s[]))
+        end
+        return String(take!(io))
+    end
+end
+
+# ------------------------------------------------------------------
+# Selection-outline writers (M6.B) — group assignment + per-group styling
+# ------------------------------------------------------------------
+
+"""
+    set_selection_outline_group!(r, prim_paths::Vector{String}, group_ids::Vector{UInt8}) -> Nothing
+
+Write the per-prim `omni:selectionOutlineGroup` (uint8) attribute on each prim in
+`prim_paths` (parallel `group_ids`): group `0` clears, `1..255` assign a selection
+group.  One multi-prim `ovrtx_write_attribute` (kDLUInt/8, shape `[N]`, semantic
+NONE), mirroring the C `ovrtx_set_selection_outline_group` inline helper.  Group
+tracking works regardless of the renderer's selection-outline config; an outline
+is only DRAWN when that config was enabled at renderer creation.
+"""
+function set_selection_outline_group!(r::Renderer, prim_paths::Vector{String}, group_ids::Vector{UInt8})
+    r.alive || error("set_selection_outline_group! on a closed Renderer")
+    n = length(prim_paths)
+    n == length(group_ids) ||
+        error("set_selection_outline_group!: prim_paths ($n) and group_ids ($(length(group_ids))) length mismatch")
+    n == 0 && return nothing
+    prim_arr = LibOVRTX.ovx_string_t[LibOVRTX.ovx_string(s) for s in prim_paths]
+    name_s   = String(LibOVRTX.OVRTX_ATTR_NAME_SELECTION_OUTLINE_GROUP)
+    shape    = Int64[n]
+    strides  = Int64[1]
+    dtype    = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLUInt), UInt8(8), UInt16(1))
+    GC.@preserve prim_paths prim_arr group_ids name_s shape strides begin
+        prim_list   = LibOVRTX.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(n))
+        attr_lookup = LibOVRTX.ovx_string_or_token_t(UInt64(0), LibOVRTX.ovx_string(name_s))
+        attr_type   = LibOVRTX.ovrtx_attribute_type_t(dtype, false, LibOVRTX.OVRTX_SEMANTIC_NONE)
+        bdesc = LibOVRTX.ovrtx_binding_desc_t(prim_list, LibOVRTX.ovx_primpath_list_t(0), attr_lookup,
+            attr_type, LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY, LibOVRTX.OVRTX_BINDING_FLAG_NONE)
+        bdoh = Ref(LibOVRTX.ovrtx_binding_desc_or_handle_t(bdesc, LibOVRTX.ovrtx_attribute_binding_handle_t(0)))
+        dl = LibOVRTX.DLTensor(Ptr{Cvoid}(pointer(group_ids)), LibOVRTX.DLDevice(LibOVRTX.kDLCPU, Int32(0)),
+            Int32(1), dtype, pointer(shape), pointer(strides), UInt64(0))
+        dl_arr = LibOVRTX.DLTensor[dl]
+        GC.@preserve dl_arr begin
+            ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
+                       Ptr{UInt8}(C_NULL), Csize_t(0), LibOVRTX.NOSYNC, LibOVRTX.NOSYNC))
+            enqueue_wait(r, LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
+                         "set_selection_outline_group")
+        end
+    end
+    return nothing
+end
+
+"""
+    set_selection_group_styles!(r, group_ids::Vector{UInt8}, styles::Vector{ovrtx_selection_group_style_t}) -> Nothing
+
+Set the visual style (outline + fill RGBA, each in `[0,1]`) for each selection
+group id (parallel arrays).  Per-group colors are runtime state; global outline
+width and fill mode are renderer-creation config.  Synchronous (enqueue + wait).
+"""
+function set_selection_group_styles!(r::Renderer, group_ids::Vector{UInt8},
+                                     styles::Vector{LibOVRTX.ovrtx_selection_group_style_t})
+    r.alive || error("set_selection_group_styles! on a closed Renderer")
+    length(group_ids) == length(styles) ||
+        error("set_selection_group_styles!: group_ids ($(length(group_ids))) and styles ($(length(styles))) length mismatch")
+    GC.@preserve group_ids styles begin
+        enqueue_wait(r, LibOVRTX.ovrtx_set_selection_group_styles(r.ptr, pointer(group_ids),
+                     pointer(styles), Csize_t(length(group_ids))), "set_selection_group_styles")
+    end
     return nothing
 end
 

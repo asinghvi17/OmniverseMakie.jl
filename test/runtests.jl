@@ -108,3 +108,8 @@ include("m6_gpu_blit_test.jl")
 # roundtrip + host tonemap).  Manual present! is the sole driver on one task/context
 # (render loop stopped) to avoid the render-task/main-task interop race (subprocess, CUDA+GL).
 include("m6_bench_test.jl")
+
+# M6.B Task 1 — ovrtx pick-query FFI: enqueue_pick_query → step! → read_pick_hit →
+# path_resolver/resolve_prim_path resolve the center-pixel hit to the mesh plot's
+# authored prim path (CPU-only map, no GLMakie/CUDA) (subprocess).
+include("m6b_pick_ffi_test.jl")
