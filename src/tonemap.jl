@@ -1,1 +1,26 @@
-# M6.A Task 2 fills this — shared HDR tonemap math.
+# Shared HDR → display tonemap.  Pure Float32 scalar math so BOTH the CPU host path
+# (Task 2) and the CUDA kernel (Task 4) call the identical functions.
+@inline _aces(x::Float32) = clamp((x*(2.51f0x+0.03f0)) / (x*(2.43f0x+0.59f0)+0.14f0), 0f0, 1f0)
+@inline _srgb(c::Float32) = c <= 0.0031308f0 ? 12.92f0c : 1.055f0*c^(1f0/2.4f0) - 0.055f0
+@inline _u8(c::Float32)   = N0f8(clamp(c, 0f0, 1f0))
+
+"""
+    tonemap(rgb::NTuple{3,Float32}, exposure::Float32) -> RGBA{N0f8}
+
+`sRGB( ACES( 2^exposure · rgb ) )`.  `exposure` is in stops (EV); 0 = no change.
+"""
+@inline function tonemap(rgb::NTuple{3,Float32}, exposure::Float32)
+    s = exp2(exposure)
+    RGBA{N0f8}(_u8(_srgb(_aces(s*rgb[1]))), _u8(_srgb(_aces(s*rgb[2]))), _u8(_srgb(_aces(s*rgb[3]))), N0f8(1))
+end
+
+# Broadcast a [C,W,H] float HDR buffer (channel-fastest, as map_cpu/map_cuda return)
+# into an [H,W] RGBA{N0f8} display matrix, top-left origin (matches render_to_matrix).
+function tonemap_frame(hdr::AbstractArray{Float32,3}, exposure::Float32)
+    C, W, H = size(hdr)
+    out = Matrix{RGBA{N0f8}}(undef, H, W)
+    @inbounds for j in 1:W, i in 1:H
+        out[i, j] = tonemap((hdr[1,j,i], hdr[2,j,i], hdr[3,j,i]), exposure)
+    end
+    return out
+end

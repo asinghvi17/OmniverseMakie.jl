@@ -89,3 +89,6 @@ include("m5_orbit_test.jl")
 # M6.A Task 1 — GLMakie package extension: using OmniverseMakie alone must NOT load
 # GLMakie/CUDA; interactive_display errors helpfully until GLMakie is loaded.
 include("m6_ext_load_test.jl")
+
+# M6.A Task 2 — host tonemap unit tests (ACES + sRGB + exposure, pure math, no GPU).
+include("m6_tonemap_test.jl")

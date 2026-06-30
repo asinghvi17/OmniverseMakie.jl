@@ -195,6 +195,80 @@ function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
 end
 
 # ------------------------------------------------------------------
+# map_cpu_f32 — like map_cpu but returns a Float32 [C,W,H] array.
+# HdrColor is kDLFloat/16 (verified: dtype.code=kDLFloat, dtype.bits=16);
+# we read via Ptr{Float16} and convert to Float32 for the tonemap path.
+# ------------------------------------------------------------------
+
+"""
+    map_cpu_f32(sr::StepResult, name) -> (pixels::Array{Float32,3}, W::Int, H::Int)
+
+Like `map_cpu` but returns a `Float32` array suitable for the HDR tonemap path.
+`HdrColor` is kDLFloat/16 on the wire; we read via `Ptr{Float16}` and
+convert to Float32 before returning (copy happens before unmap).
+
+`pixels` is a 3-D `Array{Float32}` with layout `[C=4, W, H]` (channel-fastest).
+"""
+function map_cpu_f32(sr::StepResult, name::AbstractString)
+    sr.r.alive || error("map_cpu_f32 on a closed Renderer")
+    # 1. fetch
+    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
+
+    # 2. walk the output tree
+    h = _find_var(outs[], name)
+
+    # 3. map to CPU
+    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
+    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
+
+    # 4. decode the DLTensor (shape = [H, W, C], dtype = kDLFloat/16/1 for HdrColor)
+    t0  = unsafe_load(ro[].tensors, 1)
+    dlt = unsafe_load(t0.dl)
+    H   = Int(unsafe_load(dlt.shape, 1))
+    W   = Int(unsafe_load(dlt.shape, 2))
+    C   = Int(unsafe_load(dlt.shape, 3))
+
+    # 5. wrap as non-owning Float16 view [C, W, H]; convert to Float32 and copy before unmap.
+    raw16  = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
+    pixels = Float32.(raw16)   # own the data BEFORE we unmap; Float16 → Float32
+
+    # 6. unmap (NOSYNC — CPU, no CUDA stream needed)
+    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)
+
+    return (pixels, W, H)
+end
+
+# ------------------------------------------------------------------
+# render_hdr_to_array — convenience: warmup + map_cpu_f32 + return raw HDR
+# ------------------------------------------------------------------
+
+"""
+    render_hdr_to_array(r::Renderer, product::AbstractString; warmup=64, timeout_ns) -> Array{Float32,3}
+
+Run `warmup` RT2 steps on `product`, then map the final frame's `HdrColor` output
+and return a `Float32` array of size `(C=4, W, H)` (channel-fastest).
+The caller is responsible for tonemapping (see `tonemap_frame`).
+
+`HdrColor` is a linear-space kDLFloat/16 output (verified via the C API tests);
+the data is converted to Float32 before return.
+"""
+function render_hdr_to_array(r::Renderer, product::AbstractString;
+                             warmup::Int=64, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
+    for s in 1:(warmup - 1)
+        sr = step!(r, product; timeout_ns); close(sr)
+    end
+    sr = step!(r, product; timeout_ns)
+    pixels, W, H = try
+        map_cpu_f32(sr, "HdrColor")
+    finally
+        close(sr)
+    end
+    return pixels  # [C, W, H] Float32
+end
+
+# ------------------------------------------------------------------
 # render_to_matrix — convenience: warmup + map + reshape
 # ------------------------------------------------------------------
 

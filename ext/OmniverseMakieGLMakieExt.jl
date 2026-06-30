@@ -4,7 +4,8 @@ using OmniverseMakie, GLMakie
 using OmniverseMakie: Makie, RGBA, N0f8, ColorTypes
 # main-module internals the moved code uses (bare names in the original src/interactive/*.jl):
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
-    _scene_for_camera, interactive_display
+    _scene_for_camera, interactive_display, present!, on_render_tick!
+using OmniverseMakie: tonemap, tonemap_frame
 using Makie: Consume, MouseButtonEvent  # event types used by the input forwarders
 
 # ===== moved verbatim from src/interactive/blit.jl =====
@@ -73,6 +74,7 @@ Fields:
   - `tick_listener`         — the `render_tick` per-frame hook (Observables listener)
   - `input_listeners::Vector`— glscene→cam_scene event-forwarding listeners (orbit/zoom)
   - `resize_listener`       — window-resize hook (set in Task 4); `nothing` otherwise
+  - `exposure::Float32`    — EV exposure in stops (0 = no change); used by the HDR tonemap path
 """
 mutable struct ViewportSession
     screen::Screen                  # the open-stage ovrtx Screen
@@ -85,6 +87,7 @@ mutable struct ViewportSession
     tick_listener                   # render_tick listener
     input_listeners::Vector         # glscene→cam_scene forwarding listeners
     resize_listener                 # set in Task 4; nothing here
+    exposure::Float32               # EV stops for ACES tonemap (Task 2 HDR path)
 end
 
 # Input events forwarded from the display window into the 3-D camera scene so the
@@ -110,7 +113,7 @@ Calls `GLMakie.activate!()` (switches the active Makie backend to GLMakie for th
 window); call `OmniverseMakie.activate!()` afterwards to restore the ovrtx backend for
 offscreen `save`/`colorbuffer` use.
 """
-function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size = (800, 600), steps_per_tick = 2)
+function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size = (800, 600), steps_per_tick = 2, exposure = 0f0)
     scene     = fig_or_scene isa Makie.Figure ? fig_or_scene.scene : fig_or_scene
     cam_scene = something(_scene_for_camera(scene), scene)
 
@@ -124,8 +127,9 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
         error("interactive_display: expected fb_size $(size), got $(screen.fb_size)")
     _author_screen!(screen, cam_scene, scene)
 
-    # 3. First ovrtx frame (full warmup for a clean initial image).
-    frame = OV.render_to_matrix(screen.renderer, screen.product; warmup = screen.config.warmup)
+    # 3. First ovrtx frame (full warmup for a clean initial image) via HDR path.
+    frame = tonemap_frame(OV.render_hdr_to_array(screen.renderer, screen.product;
+                          warmup = screen.config.warmup), exposure)
     # The eager `insertplots!` build flipped `screen.requires_update`; the warmup render
     # above already drew that built geometry, so consume the flag here (mirrors how
     # `colorbuffer` consumes it).  Otherwise the FIRST `on_render_tick!` would treat it as a
@@ -154,7 +158,7 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
 
     session = ViewportSession(screen, glscr, glscene, img, cam_scene,
                               steps_per_tick, screen.config.warmup,
-                              nothing, input_listeners, nothing)
+                              nothing, input_listeners, nothing, exposure)
 
     # 6. Per-frame hook on GLMakie's render task. Must NOT Consume(true).
     session.tick_listener = on(glscr.render_tick) do _
@@ -238,9 +242,9 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     end
     _author_screen!(new_screen, cam_scene, root_scene)
 
-    # 3. Render a warmup frame at the new size.
-    frame = OV.render_to_matrix(new_screen.renderer, new_screen.product;
-                                warmup = new_screen.config.warmup)
+    # 3. Render a warmup frame at the new size via HDR path.
+    frame = tonemap_frame(OV.render_hdr_to_array(new_screen.renderer, new_screen.product;
+                          warmup = new_screen.config.warmup), session.exposure)
 
     # 4. Swap in the new Screen FIRST (session stays self-consistent at every point —
     #    defensive even if a future resize path is not synchronous), then free the OLD
@@ -285,6 +289,26 @@ end
 """Bounded step timeout: 10 s — long enough for a normal RT2 step, short enough not to hang."""
 const _M5_STEP_TIMEOUT_NS = UInt64(10_000_000_000)
 
+# ------------------------------------------------------------------
+# present! — CPU HDR blit: HdrColor → host tonemap → image! data
+# ------------------------------------------------------------------
+
+"""
+    OmniverseMakie.present!(session::ViewportSession) -> Nothing
+
+CPU blit: render `HdrColor` (float16) from the open ovrtx stage, tonemap to
+`RGBA{N0f8}` via ACES + sRGB + `session.exposure`, and update the GLMakie
+image! plot's data Observable (triggering a texture re-upload).
+"""
+function OmniverseMakie.present!(session::ViewportSession)
+    hdr = OV.render_hdr_to_array(session.screen.renderer, session.screen.product;
+                                  warmup = session.steps_per_tick,
+                                  timeout_ns = _M5_STEP_TIMEOUT_NS)
+    frame = tonemap_frame(hdr, session.exposure)   # [H, W] RGBA{N0f8}
+    cpu_blit!(session.image_plot, frame)
+    return nothing
+end
+
 """
     _on_render_tick_impl!(session::ViewportSession) -> Nothing
 
@@ -307,14 +331,9 @@ function _on_render_tick_impl!(session::ViewportSession)
         session.samples = 0
     end
 
-    # Bounded accumulation step (timeout_ns prevents hanging on a slow step).
-    frame = OV.render_to_matrix(screen.renderer, screen.product;
-                                warmup = session.steps_per_tick,
-                                timeout_ns = _M5_STEP_TIMEOUT_NS)
+    # HDR accumulation step + tonemap + CPU blit via present!.
+    present!(session)
     session.samples += session.steps_per_tick
-
-    # CPU blit: update the GLMakie image! plot's data Observable → texture re-upload.
-    cpu_blit!(session.image_plot, frame)
     return nothing
 end
 
@@ -330,7 +349,7 @@ crash the window.  Up to `maxlog=5` warnings are printed; the window stays alive
 Must NOT Consume events — the caller wraps this in `on(glscr.render_tick) do _`
 and returns `Makie.Consume(false)`.
 """
-function on_render_tick!(session::ViewportSession)
+function OmniverseMakie.on_render_tick!(session::ViewportSession)
     try
         _on_render_tick_impl!(session)
     catch e

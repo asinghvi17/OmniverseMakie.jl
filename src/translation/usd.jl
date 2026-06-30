@@ -340,7 +340,7 @@ def "Render" (
         {
             rel camera = <$(camera_path)>
 $(rtx_lines)
-            rel orderedVars = </Render/Vars/LdrColor>
+            rel orderedVars = [</Render/Vars/LdrColor>, </Render/Vars/HdrColor>]
             uniform int2 resolution = ($(W), $(H))
         }
     }
@@ -361,6 +361,13 @@ $(rtx_lines)
         )
         {
             uniform string sourceName = "LdrColor"
+        }
+        def RenderVar "HdrColor" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            uniform string sourceName = "HdrColor"
         }
     }
 }

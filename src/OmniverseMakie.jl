@@ -23,6 +23,7 @@ include("tonemap.jl")            # shared HDR tonemap math (Task 2)
 # module only DECLARES the generics; the GLMakie ext adds the methods.
 function interactive_display end
 function present! end
+function on_render_tick! end
 export interactive_display
 
 # Errors helpfully when no GLMakie extension is loaded (no method otherwise).
