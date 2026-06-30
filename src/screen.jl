@@ -21,6 +21,7 @@ mutable struct Screen <: Makie.MakieScreen
     last_camera::Any                         # snapshot (eye,target,up,fov) last WRITTEN — change detect
     last_lights::Any                         # snapshot of per-light render-state last WRITTEN
     path_resolver::Union{Nothing,OV.PathResolver}  # M6.B: cached path-dictionary resolver (lazy, once per renderer)
+    _outline_styled::Bool                    # M6.B: true once the default selection-outline style was installed (once per Screen)
 end
 
 # ------------------------------------------------------------------
@@ -54,6 +55,7 @@ function Screen(scene::Makie.Scene, config::ScreenConfig)
         nothing,   # last_camera
         nothing,   # last_lights
         nothing,   # path_resolver (M6.B: built lazily on first pick)
+        false,     # _outline_styled (M6.B: default style installed lazily on first select!)
     )
 end
 
@@ -532,6 +534,71 @@ function Makie.pick_sorted(scene::Makie.Scene, screen::Screen, xy, range)
     h = pick_hit(screen, Makie.Vec{2,Float64}(xy))
     return h === nothing ? Tuple{Makie.AbstractPlot,Int}[] : [(h.plot, h.index)]
 end
+
+# ------------------------------------------------------------------
+# M6.B — select! / clear_selection! selection-outline API
+#
+# `select!(screen, plot; group)` assigns a plot's prim to a selection-outline group (default 1)
+# so the RTX outline pipeline draws a high-contrast ring around it; `clear_selection!` removes it
+# (group 0).  The drawn highlight needs the creation-time `selection_outline=true` renderer config
+# (`ScreenConfig.selection_outline`); on a Screen built without it, `select!` warns ONCE and is a
+# no-op (pick DATA still works regardless — only the highlight needs the flag).  A default orange
+# style is installed ONCE per Screen the first time a selection is made.
+# ------------------------------------------------------------------
+
+# Default high-contrast outline style: orange edge (matches the ovrtx C reference
+# `DEFAULT_SELECTION_STYLE`, test_picking_selection.cpp:54) + transparent fill (the default
+# fill mode is EDGE_ONLY, so only the outline color is drawn).
+const _OUTLINE_ORANGE = (1.0f0, 0.6f0, 0.0f0, 1.0f0)
+
+# Install the default group-1 orange outline style ONCE per Screen (idempotent via
+# `_outline_styled`).  Returns whether this Screen can draw an outline at all — i.e. it was
+# created with `selection_outline=true` — which is the select!/clear gate.
+function _ensure_outline_style!(screen::Screen)
+    screen.config.selection_outline || return false
+    if !screen._outline_styled                      # one-time per Screen
+        OV.set_selection_group_styles!(screen.renderer, UInt8[0x01],
+            [LibOVRTX.ovrtx_selection_group_style_t(_OUTLINE_ORANGE, (0f0, 0f0, 0f0, 0f0))])
+        screen._outline_styled = true
+    end
+    return true
+end
+
+"""
+    select!(screen::Screen, plot; group::UInt8 = 0x01)
+
+Highlight `plot`'s prim with a selection outline (group `group`, default 1), installing the
+default orange outline style once per Screen.  No-op (warns once, `maxlog=1`) on a Screen built
+without `selection_outline=true`, or when `plot` is not a registered render object.  Returns
+`nothing`.
+"""
+function select!(screen::Screen, plot; group::UInt8 = 0x01)
+    if !_ensure_outline_style!(screen)
+        @warn "select!: Screen built without selection_outline=true; no highlight drawn" maxlog=1
+        return nothing
+    end
+    robj = get(screen.plot2robj, objectid(plot), nothing)
+    robj === nothing && return nothing
+    OV.set_selection_outline_group!(screen.renderer, [robj.prim_path], UInt8[group])
+    return nothing
+end
+
+"""
+    clear_selection!(screen::Screen[, plot])
+
+Remove the selection outline from `plot` (group 0), or — with no `plot` — from every
+currently-tracked plot.  Returns `nothing`.
+"""
+function clear_selection!(screen::Screen, plot)
+    robj = get(screen.plot2robj, objectid(plot), nothing)
+    robj === nothing && return nothing
+    OV.set_selection_outline_group!(screen.renderer, [robj.prim_path], UInt8[0x00])
+    return nothing
+end
+clear_selection!(screen::Screen) =                # clear ALL currently-tracked plots
+    for robj in values(screen.plot2robj)
+        OV.set_selection_outline_group!(screen.renderer, [robj.prim_path], UInt8[0x00])
+    end
 
 # ------------------------------------------------------------------
 # activate! — register OmniverseMakie as the current Makie backend

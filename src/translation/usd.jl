@@ -296,7 +296,22 @@ function author_render_root!(screen;
                               scopes_str::String    = "")
     W, H       = resolution
     cam_name   = split(camera_path, "/")[end]   # last segment → prim name under /World
-    rtx_lines  = rtx_settings_usda(screen.config)
+    # M6.B selection-outline integration (VERIFIED by rendering, Task 4): the RTX selection
+    # outline pass is (1) fully SUPPRESSED by the explicit post-process `apiSchemas` list and
+    # (2) drawn UNSTYLED/WHITE (not the group's styled colour) when `HdrColor` is an ordered
+    # AOV.  So a `selection_outline=true` Screen authors a LEANER RenderProduct: no post-process
+    # apiSchemas, no `omni:rtx:*` settings (which require those schemas), LdrColor-only.  The
+    # DEFAULT (selection_outline=false) branch reproduces the pre-M6.B USDA byte-for-byte, so
+    # every non-selection render path is unchanged; HdrColor-based GPU-direct present! is simply
+    # not combined with outline highlighting (it falls back to the CPU/LdrColor blit).
+    _outline   = screen.config.selection_outline
+    rtx_lines  = _outline ? "" : rtx_settings_usda(screen.config)
+    rp_schemas = _outline ? "" :
+        "            prepend apiSchemas = [\"OmniRtxSettingsCommonAdvancedAPI_1\", \"OmniRtxSettingsRtAdvancedAPI_1\", \"OmniRtxSettingsPtAdvancedAPI_1\", \"OmniRtxPostColorGradingAPI_1\", \"OmniRtxPostChromaticAberrationAPI_1\", \"OmniRtxPostBloomPhysicalAPI_1\", \"OmniRtxPostMatteObjectAPI_1\", \"OmniRtxPostCompositingAPI_1\", \"OmniRtxPostDofAPI_1\", \"OmniRtxPostMotionBlurAPI_1\", \"OmniRtxPostTvNoiseAPI_1\", \"OmniRtxPostTonemapIrayReinhardAPI_1\", \"OmniRtxPostDebugSettingsAPI_1\", \"OmniRtxDebugSettingsAPI_1\"]\n"
+    ordered_vars = _outline ? "[</Render/Vars/LdrColor>]" :
+                              "[</Render/Vars/LdrColor>, </Render/Vars/HdrColor>]"
+    hdr_var    = _outline ? "" :
+        "        def RenderVar \"HdrColor\" (\n            hide_in_stage_window = true\n            no_delete = true\n        )\n        {\n            uniform string sourceName = \"HdrColor\"\n        }\n"
 
     usda = """#usda 1.0
 (
@@ -333,14 +348,13 @@ def "Render" (
     def "OVMakie"
     {
         def RenderProduct "RenderProduct" (
-            prepend apiSchemas = ["OmniRtxSettingsCommonAdvancedAPI_1", "OmniRtxSettingsRtAdvancedAPI_1", "OmniRtxSettingsPtAdvancedAPI_1", "OmniRtxPostColorGradingAPI_1", "OmniRtxPostChromaticAberrationAPI_1", "OmniRtxPostBloomPhysicalAPI_1", "OmniRtxPostMatteObjectAPI_1", "OmniRtxPostCompositingAPI_1", "OmniRtxPostDofAPI_1", "OmniRtxPostMotionBlurAPI_1", "OmniRtxPostTvNoiseAPI_1", "OmniRtxPostTonemapIrayReinhardAPI_1", "OmniRtxPostDebugSettingsAPI_1", "OmniRtxDebugSettingsAPI_1"]
-            hide_in_stage_window = true
+$(rp_schemas)            hide_in_stage_window = true
             no_delete = true
         )
         {
             rel camera = <$(camera_path)>
 $(rtx_lines)
-            rel orderedVars = [</Render/Vars/LdrColor>, </Render/Vars/HdrColor>]
+            rel orderedVars = $(ordered_vars)
             uniform int2 resolution = ($(W), $(H))
         }
     }
@@ -362,14 +376,7 @@ $(rtx_lines)
         {
             uniform string sourceName = "LdrColor"
         }
-        def RenderVar "HdrColor" (
-            hide_in_stage_window = true
-            no_delete = true
-        )
-        {
-            uniform string sourceName = "HdrColor"
-        }
-    }
+$(hdr_var)    }
 }
 """
     OV.open_usd_string!(screen.renderer, usda)
