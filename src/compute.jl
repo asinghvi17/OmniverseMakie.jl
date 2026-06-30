@@ -26,16 +26,22 @@ open stage.  Records:
                  plot.  Set in `author_usd_prim!`'s materialized branch and read by
                  `push_to_ovrtx!` to route a live `color`/`material` edit to a
                  `write_shader_input!` on the open stage (M3.4) instead of `displayColor`.
+- `plot`       — M6.B: the SOURCE Makie plot this render object was authored from.
+                 `nothing` until set at the `plot2robj` insert sites (`register_ovrtx_robj!`),
+                 so it rides that map's lifecycle — no extra lockstep.  `pick_hit` uses it to
+                 turn `path2plot`'s `objectid(plot)` back into the `Plot` object
+                 (`_plot_for_objectid`) without a third parallel registry.
 """
 mutable struct OvrtxRObj
     prim_path::String
     usd_handle::UInt64
     bindings::Dict{Symbol,Any}
     material_shader::Union{String,Nothing}
+    plot::Union{Nothing,Makie.AbstractPlot}
 end
 
 OvrtxRObj(prim_path::AbstractString, usd_handle::Integer) =
-    OvrtxRObj(String(prim_path), UInt64(usd_handle), Dict{Symbol,Any}(), nothing)
+    OvrtxRObj(String(prim_path), UInt64(usd_handle), Dict{Symbol,Any}(), nothing, nothing)
 
 # ==================================================================
 # M2.2 — the :ovrtx_renderobject diff node + push_to_ovrtx! (diff driver)
@@ -623,6 +629,7 @@ function register_ovrtx_robj!(screen, scene, plot)
             OV.bind_material!(screen.renderer, path, material_prim_path(plot))
             robj.material_shader = material_prim_path(plot) * "/Shader"
         end
+        robj.plot = plot                                    # M6.B: objectid→Plot for pick resolution
         screen.plot2robj[objectid(plot)] = robj
         screen.path2plot[robj.prim_path] = objectid(plot)   # M6.B: keep the reverse map in lockstep
         return robj
@@ -667,6 +674,7 @@ function register_ovrtx_robj!(screen, scene, plot)
 
     built = attr[:ovrtx_renderobject][]                              # force resolve → (re)build on `screen`
     if built !== nothing
+        built.plot = plot                                           # M6.B: objectid→Plot for pick resolution
         screen.plot2robj[objectid(plot)] = built
         screen.path2plot[built.prim_path] = objectid(plot)          # M6.B: reverse map in lockstep
     end

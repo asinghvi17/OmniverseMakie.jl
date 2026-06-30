@@ -20,6 +20,7 @@ mutable struct Screen <: Makie.MakieScreen
     authored::Bool                           # true once the root stage has been opened
     last_camera::Any                         # snapshot (eye,target,up,fov) last WRITTEN — change detect
     last_lights::Any                         # snapshot of per-light render-state last WRITTEN
+    path_resolver::Union{Nothing,OV.PathResolver}  # M6.B: cached path-dictionary resolver (lazy, once per renderer)
 end
 
 # ------------------------------------------------------------------
@@ -52,6 +53,7 @@ function Screen(scene::Makie.Scene, config::ScreenConfig)
         false,     # authored
         nothing,   # last_camera
         nothing,   # last_lights
+        nothing,   # path_resolver (M6.B: built lazily on first pick)
     )
 end
 
@@ -385,6 +387,151 @@ Makie.backend_showable(::Type{Screen}, ::MIME"image/png")  = true
 # JPEG showability: `Base.showable(MIME"image/jpeg", fig) = true` so Jupyter and
 # `Base.show(io, MIME"image/jpeg", fig)` work.
 Makie.backend_showable(::Type{Screen}, ::MIME"image/jpeg") = true
+
+# ------------------------------------------------------------------
+# M6.B — Makie pick protocol over the native ray-query AOV pick
+#
+# `pick_hit` enqueues a 1-pixel ovrtx pick at a Makie pixel, steps the renderer, decodes
+# the hit, resolves its prim path to the owning plot, and computes the Makie element index.
+# `Makie.pick`/`pick_closest`/`pick_sorted` are the standard backend overrides on top of it
+# (so DataInspector and `pick(fig, xy)` compose).  Picking core has NO GLMakie/CUDA dep.
+# ------------------------------------------------------------------
+
+# Pick step timeout (ns).  The pick consumes one render step (after which RT2 accumulation
+# restarts — expected); 10 s is generous for the 1-pixel query + decode.
+const _PICK_TIMEOUT_NS = UInt64(10_000_000_000)
+
+# Map a Makie pixel (BOTTOM-left origin, Float64, over `fb_size`) to an ovrtx RenderProduct
+# pixel (TOP-left origin, Int, left/top-inclusive).
+#
+# VERIFIED EMPIRICALLY (M6.B Task 3, off-center marker): x maps straight through; y is
+# FLIPPED (`H - y`).  A marker placed off the vertical center was located three ways that
+# agree — `Makie.project` (Makie bottom-left), the LdrColor framebuffer row (top-left), and
+# the pick FFI's reported pixel — and the ovrtx row that returned the marker was
+# `H - round(y)`, never `round(y)` (that row was background).  Getting this flip wrong would
+# silently pick the wrong pixel, so it is also locked by an off-center assertion in
+# `test/m6b_pick_test.jl`.
+function _to_ovrtx_pixel(xy, fb_size)
+    W, H = fb_size
+    px = clamp(round(Int, xy[1]), 0, W - 1)
+    py = clamp(H - round(Int, xy[2]), 0, H - 1)   # ← verified y-flip
+    return (px, py)
+end
+
+# instance_id (ovrtx `geometryInstanceId`) → Makie element index.  Scatter/MeshScatter map
+# the 0-based instance to a 1-based point index; every other plot kind (Mesh / Lines /
+# LineSegments / Surface / materialized-merged scatter) is plot-level → index 0.
+#
+# VERIFIED LIMITATION (M6.B Task 3): ovrtx's USD PointInstancer pick collapses to the
+# prototype — EVERY instance reports `geometryInstanceId == 0` (and `worldPosition ==
+# (0,0,0)`), even with `OVRTX_PICK_FLAG_INCLUDE_TRACKED_INFO` — so the per-point index is
+# NOT recoverable today and a multi-point scatter pick yields index 1 for any point.  The
+# `Int(instance_id)+1` formula is kept because it is exact for a single-point marker (the
+# acceptance case) and forward-compatible should a future ovrtx surface real instance ids.
+function _element_index(plot, instance_id::UInt64)::Int
+    return (plot isa Makie.Scatter || plot isa Makie.MeshScatter) ? Int(instance_id) + 1 : 0
+end
+
+# Build + cache the renderer's PathResolver ONCE per Screen.  The path dictionary is a LIVE
+# renderer handle (its context pointer stays valid for the renderer's life and reflects
+# stage edits), so one resolver serves every pick — not rebuilt per query.  A rebuilt Screen
+# (resize) starts with `path_resolver === nothing` and lazily builds its own.
+function path_resolver_for(screen::Screen)
+    pr = screen.path_resolver
+    pr === nothing || return pr
+    pr = OV.path_resolver(screen.renderer)
+    screen.path_resolver = pr
+    return pr
+end
+
+# Resolve a hit prim path to the owning plot's `objectid` by walking UP the path until a
+# `path2plot` entry matches.  A Mesh hit resolves to the plot prim exactly (`/World/plot_<id>`),
+# but a Scatter/MeshScatter hit resolves to the PointInstancer PROTOTYPE child
+# (`/World/plot_<id>/proto`, verified) — stripping trailing components recovers the plot.
+# `path2plot` holds only plot prims (never scopes/scenes/cameras), and plot prims are siblings
+# (never nested in one another), so the FIRST ancestor that matches is unambiguously the plot.
+# Also handles a subscene plot (`/World/Scene_<sid>/plot_<pid>/…`).
+function _path_to_oid(screen::Screen, path::AbstractString)
+    isempty(path) && return nothing
+    p = String(path)
+    while true
+        oid = get(screen.path2plot, p, nothing)
+        oid === nothing || return oid
+        i = findlast('/', p)
+        (i === nothing || i <= 1) && return nothing   # reached the root with no plot ancestor
+        p = p[1:(i - 1)]
+    end
+end
+
+# objectid(plot) → the `Plot` object, via the `plot` reference stored on its `OvrtxRObj`
+# (set at the `plot2robj` insert sites — so this rides that map's lifecycle with no extra
+# registry to keep in lockstep).  `nothing` if the objectid is unknown or unset.
+function _plot_for_objectid(screen::Screen, oid::UInt64)
+    robj = get(screen.plot2robj, oid, nothing)
+    return robj === nothing ? nothing : robj.plot
+end
+
+"""
+    pick_hit(screen::Screen, xy) -> Union{Nothing, NamedTuple{(:plot,:index,:world_position,:normal)}}
+
+Enqueue a 1-pixel native ray-query pick at Makie pixel `xy` (bottom-left origin, over
+`screen.fb_size`), step the renderer once, and decode the closest hit:
+
+- map `xy` to the ovrtx RenderProduct pixel (`_to_ovrtx_pixel` — verified y-flip),
+- `OV.enqueue_pick_query` → `OV.step!` → `OV.read_pick_hit`,
+- resolve the hit's `primpath_id` to a prim path (cached `PathResolver`), walk it to the
+  owning plot's `objectid` (`_path_to_oid`), then to the `Plot` object (`_plot_for_objectid`),
+- compute the Makie element index (`_element_index`).
+
+Returns `nothing` over background (no hit), or when the hit prim is not a registered plot
+(camera / light / looks).  The pick consumes one step, after which RT2 accumulation restarts
+(expected).
+"""
+function pick_hit(screen::Screen, xy)
+    isopen(screen) || return nothing
+    px, py = _to_ovrtx_pixel(xy, screen.fb_size)
+    OV.enqueue_pick_query(screen.renderer, screen.product, (px, py, px + 1, py + 1))
+    sr = OV.step!(screen.renderer, screen.product; timeout_ns = _PICK_TIMEOUT_NS)
+    hits = try
+        OV.read_pick_hit(sr)
+    finally
+        close(sr)
+    end
+    isempty(hits) && return nothing
+    hit  = hits[1]
+    pr   = path_resolver_for(screen)
+    path = OV.resolve_prim_path(pr, hit.primpath_id)
+    oid  = _path_to_oid(screen, path)
+    oid === nothing && return nothing                 # camera/light/looks prim, not a plot
+    plot = _plot_for_objectid(screen, oid)
+    plot === nothing && return nothing
+    return (plot = plot, index = _element_index(plot, hit.instance_id),
+            world_position = hit.world_position, normal = hit.normal)
+end
+
+"""
+    Makie.pick(scene::Scene, screen::Screen, xy::Vec{2,Float64}) -> (plot_or_nothing, index)
+
+Backend pick: the plot + element index under Makie pixel `xy`, or `(nothing, 0)` over
+background.  Delegates to `pick_hit`.
+"""
+function Makie.pick(::Makie.Scene, screen::Screen, xy::Makie.Vec{2,Float64})
+    h = pick_hit(screen, xy)
+    return h === nothing ? (nothing, 0) : (h.plot, h.index)
+end
+
+# The native ray-query already returns the closest hit at the pixel, so `range` is advisory:
+# pick the pixel directly (more specific than Makie's `pick_closest(::SceneLike, screen, …)`,
+# which would otherwise fan out a Rect2i region pick we don't implement).
+Makie.pick_closest(scene::Makie.Scene, screen::Screen, xy, range) =
+    Makie.pick(scene, screen, Makie.Vec{2,Float64}(xy))
+
+# One native hit at `xy`, wrapped as the distance-sorted `(plot,index)` list DataInspector
+# expects (empty over background).
+function Makie.pick_sorted(scene::Makie.Scene, screen::Screen, xy, range)
+    h = pick_hit(screen, Makie.Vec{2,Float64}(xy))
+    return h === nothing ? Tuple{Makie.AbstractPlot,Int}[] : [(h.plot, h.index)]
+end
 
 # ------------------------------------------------------------------
 # activate! — register OmniverseMakie as the current Makie backend
