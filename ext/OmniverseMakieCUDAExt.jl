@@ -145,9 +145,17 @@ function OmniverseMakie.present!(session, ::Val{:gpu})
     try
         _gpu_present!(session)
     catch e
-        @warn "M6: GPU-direct present! failed — falling back to the CPU blit for this session" exception = (e, catch_backtrace()) maxlog = 1
-        session.blitter = :cpu
-        OmniverseMakie.present!(session, Val(:cpu))   # still update this frame via CPU
+        # Forced GPU (gpu_direct=true): surface the error so the user sees the real GPU bug
+        # instead of silently switching to CPU. The render-tick loop's on_render_tick! outer
+        # try/catch logs it and keeps the window alive — no window crash.
+        # Auto/non-forced (gpu_direct=:auto or false): degrade gracefully to CPU blit.
+        if session.gpu_forced
+            rethrow()
+        else
+            @warn "M6: GPU-direct present! failed — falling back to the CPU blit for this session" exception = (e, catch_backtrace()) maxlog = 1
+            session.blitter = :cpu
+            OmniverseMakie.present!(session, Val(:cpu))   # still update this frame via CPU
+        end
     end
     return nothing
 end

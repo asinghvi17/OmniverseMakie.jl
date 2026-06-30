@@ -79,6 +79,7 @@ Fields:
   - `gpu_state`            — CUDA-ext GPU-direct blit state (a `GPUBlitState`), or `nothing`
                              until the GPU `present!` lazily registers; reset to `:cpu` on
                              GPU-setup failure (graceful CPU fallback)
+  - `gpu_forced::Bool`     — true when gpu_direct=true was forced; surfaces GPU errors instead of falling back
 """
 mutable struct ViewportSession
     screen::Screen                  # the open-stage ovrtx Screen
@@ -94,6 +95,7 @@ mutable struct ViewportSession
     exposure::Float32               # EV stops for ACES tonemap (Task 2 HDR path)
     blitter::Symbol                 # :cpu or :gpu — present! strategy (M6.A Task 4)
     gpu_state                       # CUDA-ext GPUBlitState (lazy) or nothing
+    gpu_forced::Bool                # true when gpu_direct=true was forced; surfaces GPU errors instead of falling back
 end
 
 # Input events forwarded from the display window into the 3-D camera scene so the
@@ -192,11 +194,13 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
 
     # Resolve the per-frame blit strategy (:gpu when CUDA is loaded + functional, else :cpu).
     blitter = _pick_blitter(gpu_direct)
+    # Only the literal `true` counts as forced; :auto and false both allow graceful CPU fallback.
+    gpu_forced = (gpu_direct === true)
 
     session = ViewportSession(screen, glscr, glscene, img, cam_scene,
                               steps_per_tick, screen.config.warmup,
                               nothing, input_listeners, nothing, exposure,
-                              blitter, nothing)
+                              blitter, nothing, gpu_forced)
 
     # 6. Per-frame hook on GLMakie's render task. Must NOT Consume(true).
     session.tick_listener = on(glscr.render_tick) do _
