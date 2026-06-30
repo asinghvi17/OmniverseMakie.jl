@@ -4,7 +4,7 @@ using OmniverseMakie, GLMakie
 using OmniverseMakie: Makie, RGBA, N0f8, ColorTypes
 # main-module internals the moved code uses (bare names in the original src/interactive/*.jl):
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
-    _scene_for_camera, interactive_display, present!, on_render_tick!
+    _scene_for_camera, interactive_display, present!, on_render_tick!, cpu_blit!
 using OmniverseMakie: tonemap, tonemap_frame
 using Makie: Consume, MouseButtonEvent  # event types used by the input forwarders
 
@@ -75,6 +75,10 @@ Fields:
   - `input_listeners::Vector`— glscene→cam_scene event-forwarding listeners (orbit/zoom)
   - `resize_listener`       — window-resize hook (set in Task 4); `nothing` otherwise
   - `exposure::Float32`    — EV exposure in stops (0 = no change); used by the HDR tonemap path
+  - `blitter::Symbol`      — `:cpu` or `:gpu` — selects the `present!` strategy (M6.A Task 4)
+  - `gpu_state`            — CUDA-ext GPU-direct blit state (a `GPUBlitState`), or `nothing`
+                             until the GPU `present!` lazily registers; reset to `:cpu` on
+                             GPU-setup failure (graceful CPU fallback)
 """
 mutable struct ViewportSession
     screen::Screen                  # the open-stage ovrtx Screen
@@ -88,6 +92,8 @@ mutable struct ViewportSession
     input_listeners::Vector         # glscene→cam_scene forwarding listeners
     resize_listener                 # set in Task 4; nothing here
     exposure::Float32               # EV stops for ACES tonemap (Task 2 HDR path)
+    blitter::Symbol                 # :cpu or :gpu — present! strategy (M6.A Task 4)
+    gpu_state                       # CUDA-ext GPUBlitState (lazy) or nothing
 end
 
 # Input events forwarded from the display window into the 3-D camera scene so the
@@ -95,10 +101,38 @@ end
 const _M5_FORWARDED_EVENTS = (:mousebutton, :mouseposition, :scroll, :keyboardbutton)
 
 """
-    interactive_display(fig_or_scene; size=(800,600), steps_per_tick=2) -> ViewportSession
+    _pick_blitter(gpu_direct::Symbol_or_Bool) -> :gpu | :cpu
+
+Resolve the per-frame blit strategy for `interactive_display`.  GPU-direct is
+available only when the CUDA package extension is loaded AND `CUDA.functional()`.
+
+  - `:auto`  → `:gpu` if CUDA is functional, else `:cpu` (the default).
+  - `true`   → `:gpu` if CUDA is functional, else `error` (the caller demanded GPU).
+  - `false`  → `:cpu` (always).
+"""
+function _pick_blitter(gpu_direct)
+    cuda_ready = false
+    try
+        cuda_ready = Base.get_extension(OmniverseMakie, :OmniverseMakieCUDAExt) !== nothing &&
+                     Base.invokelatest(OmniverseMakie._cuda_functional)
+    catch
+        cuda_ready = false
+    end
+    gpu_direct === :auto ? (cuda_ready ? :gpu : :cpu) :
+    gpu_direct === true  ? (cuda_ready ? :gpu : error("gpu_direct=true but CUDA is unavailable (load `using CUDA` and ensure CUDA.functional())")) :
+    :cpu
+end
+
+"""
+    interactive_display(fig_or_scene; size=(800,600), steps_per_tick=2, exposure=0f0, gpu_direct=:auto) -> ViewportSession
 
 Open an interactive, orbit-able GLMakie window showing the live ovrtx RTX render of
 `fig_or_scene`.
+
+`gpu_direct` selects the per-frame blit path (M6.A): `:auto` uses the GPU-direct CUDA
+path when the CUDA extension is loaded and `CUDA.functional()` (else the CPU host
+tonemap path); `true` forces GPU-direct (errors if CUDA is unavailable); `false`
+forces the CPU path.  On GPU-setup failure the session degrades gracefully to `:cpu`.
 
 Authors the open ovrtx stage once (mirrors `colorbuffer`'s open-once path), renders a
 warmup frame, and shows it in a single `campixel!` Scene as a full-viewport `image!`
@@ -113,7 +147,7 @@ Calls `GLMakie.activate!()` (switches the active Makie backend to GLMakie for th
 window); call `OmniverseMakie.activate!()` afterwards to restore the ovrtx backend for
 offscreen `save`/`colorbuffer` use.
 """
-function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size = (800, 600), steps_per_tick = 2, exposure = 0f0)
+function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size = (800, 600), steps_per_tick = 2, exposure = 0f0, gpu_direct = :auto)
     scene     = fig_or_scene isa Makie.Figure ? fig_or_scene.scene : fig_or_scene
     cam_scene = something(_scene_for_camera(scene), scene)
 
@@ -156,9 +190,13 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
         return Makie.Consume(false)
     end for f in _M5_FORWARDED_EVENTS]
 
+    # Resolve the per-frame blit strategy (:gpu when CUDA is loaded + functional, else :cpu).
+    blitter = _pick_blitter(gpu_direct)
+
     session = ViewportSession(screen, glscr, glscene, img, cam_scene,
                               steps_per_tick, screen.config.warmup,
-                              nothing, input_listeners, nothing, exposure)
+                              nothing, input_listeners, nothing, exposure,
+                              blitter, nothing)
 
     # 6. Per-frame hook on GLMakie's render task. Must NOT Consume(true).
     session.tick_listener = on(glscr.render_tick) do _
@@ -202,6 +240,27 @@ function Base.close(session::ViewportSession)
     empty!(session.input_listeners)
     session.tick_listener   = nothing
     session.resize_listener = nothing
+    # M6.A: STOP the GLMakie render loop and WAIT for the render task to finish BEFORE any
+    # teardown.  The background render task fires `render_tick` → `on_render_tick!` →
+    # `present!`; for the GPU-direct path that runs raw CUDA→GL interop on ovrtx/CUDA
+    # resources.  Tearing those down while a tick is in flight is a use-after-free
+    # (segfault).  `stop_renderloop!` joins the task (when called off the render task), so
+    # no `present!` can race the teardown below.  Harmless for the CPU path.
+    try
+        isopen(session.glscreen) && GLMakie.stop_renderloop!(session.glscreen)
+    catch e
+        @warn "M6: error stopping GLMakie render loop" exception=e
+    end
+    # M6.A: unregister the GPU-direct GL texture resource (texture still alive here, render
+    # loop stopped) — must run BEFORE close(glscreen) destroys the texture.
+    if session.gpu_state !== nothing
+        try
+            Base.invokelatest(OmniverseMakie._gpu_teardown!, session.gpu_state)
+        catch e
+            @warn "M6: error tearing down GPU-direct blit state" exception=e
+        end
+        session.gpu_state = nothing
+    end
     try
         isopen(session.glscreen) && close(session.glscreen)
     catch e
@@ -294,13 +353,17 @@ const _M5_STEP_TIMEOUT_NS = UInt64(10_000_000_000)
 # ------------------------------------------------------------------
 
 """
-    OmniverseMakie.present!(session::ViewportSession) -> Nothing
+    OmniverseMakie.present!(session::ViewportSession, ::Val{:cpu}) -> Nothing
 
 CPU blit: render `HdrColor` (float16) from the open ovrtx stage, tonemap to
 `RGBA{N0f8}` via ACES + sRGB + `session.exposure`, and update the GLMakie
 image! plot's data Observable (triggering a texture re-upload).
+
+This is the `:cpu` blit strategy.  The `:gpu` strategy (an on-device tonemap +
+CUDA→GL copy, no host roundtrip) is defined in the CUDA package extension and
+selected via `present!(session, Val(session.blitter))` in `_on_render_tick_impl!`.
 """
-function OmniverseMakie.present!(session::ViewportSession)
+function OmniverseMakie.present!(session::ViewportSession, ::Val{:cpu})
     hdr = OV.render_hdr_to_array(session.screen.renderer, session.screen.product;
                                   warmup = session.steps_per_tick,
                                   timeout_ns = _M5_STEP_TIMEOUT_NS)
@@ -331,8 +394,9 @@ function _on_render_tick_impl!(session::ViewportSession)
         session.samples = 0
     end
 
-    # HDR accumulation step + tonemap + CPU blit via present!.
-    present!(session)
+    # HDR accumulation step + tonemap + blit via the selected strategy (:cpu / :gpu).
+    # The CUDA ext's GPU present! falls back to :cpu (sets session.blitter) on setup failure.
+    present!(session, Val(session.blitter))
     session.samples += session.steps_per_tick
     return nothing
 end

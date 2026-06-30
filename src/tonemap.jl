@@ -2,7 +2,12 @@
 # (Task 2) and the CUDA kernel (Task 4) call the identical functions.
 @inline _aces(x::Float32) = clamp((x*(2.51f0x+0.03f0)) / (x*(2.43f0x+0.59f0)+0.14f0), 0f0, 1f0)
 @inline _srgb(c::Float32) = c <= 0.0031308f0 ? 12.92f0c : 1.055f0*c^(1f0/2.4f0) - 0.055f0
-@inline _u8(c::Float32)   = N0f8(clamp(c, 0f0, 1f0))
+# Non-throwing N0f8 quantization: clamp guarantees [0,1], so build the raw byte directly
+# (round-to-nearest-even, == N0f8(clamp(c,0,1)) — byte-identical across the full grid) and
+# `reinterpret` instead of the checked `N0f8(...)` constructor.  The checked constructor's
+# bounds-throw is dead code here AND its error-message path (Ryu/show) is not GPU-compilable,
+# so this form lets the SAME `tonemap` run unchanged inside the M6 CUDA tonemap kernel.
+@inline _u8(c::Float32)   = reinterpret(N0f8, round(UInt8, clamp(c, 0f0, 1f0) * 255f0))
 
 """
     tonemap(rgb::NTuple{3,Float32}, exposure::Float32) -> RGBA{N0f8}

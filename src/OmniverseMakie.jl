@@ -24,6 +24,17 @@ include("tonemap.jl")            # shared HDR tonemap math (Task 2)
 function interactive_display end
 function present! end
 function on_render_tick! end
+# Declared in the main module (the GLMakie ext adds the method) so `OmniverseMakie.cpu_blit!`
+# resolves for callers/tests; the M6.A Task-1 ext refactor moved its body to the GLMakie ext.
+function cpu_blit! end
+# M6.A: the CUDA extension defines `_cuda_functional() = CUDA.functional()`; the GLMakie
+# ext's `_pick_blitter` calls it (via invokelatest) to decide :gpu vs :cpu.  Declared here
+# so the GLMakie ext can reference `OmniverseMakie._cuda_functional` without a CUDA dep.
+function _cuda_functional end
+# M6.A: the CUDA ext defines `_gpu_teardown!(::GPUBlitState)` (unregister the GL texture
+# resource); the GLMakie ext's `Base.close(::ViewportSession)` calls it when `gpu_state`
+# was set, so the duck-typed GPU state is torn down without naming the CUDA-ext type.
+function _gpu_teardown! end
 export interactive_display
 
 # Errors helpfully when no GLMakie extension is loaded (no method otherwise).

@@ -97,3 +97,8 @@ include("m6_tonemap_test.jl")
 # returning RAW handles (CUdeviceptr + dims + map_handle + wait_event) with no
 # CUDA.jl dep in the main module (subprocess, CUDA).
 include("m6_map_cuda_test.jl")
+
+# M6.A Task 4 — GPU-direct present!: device tonemap kernel (host-vs-kernel agreement is in
+# m6_tonemap_test.jl) + the CUDA→GL on-device blit (interactive_display gpu_direct=true
+# shows a non-black RTX frame via the :gpu path, no CPU roundtrip) (subprocess, CUDA+GL).
+include("m6_gpu_blit_test.jl")
