@@ -32,7 +32,7 @@ LibOVRTX = {path = "lib/LibOVRTX"}
 ColorTypes = "0.11, 0.12"
 Colors = "0.13.1"
 ComputePipeline = "=0.1.8"
-CUDA = "5"
+CUDA = "6.2"
 FixedPointNumbers = "0.8"
 GLMakie = "=0.13.12"
 GeometryBasics = "0.5.11"
