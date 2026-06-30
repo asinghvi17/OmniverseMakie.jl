@@ -1,7 +1,6 @@
 module OmniverseMakie
 
 using Makie, GeometryBasics, Colors, ColorTypes, FixedPointNumbers, LinearAlgebra
-import GLMakie           # M5: host window for interactive_display (all uses are qualified)
 import LibOVRTX
 import ComputePipeline   # :ovrtx_renderobject diff node (register_computation!/mark_resolved!)
 import PNGFiles          # M3.3: write an image `color` to a temp PNG for an OmniPBR texture
@@ -18,13 +17,17 @@ include("translation/meshes.jl")    # to_ovrtx_object (Makie.Mesh → UsdGeomMes
 include("translation/primitives.jl") # to_ovrtx_object (scatter/meshscatter/lines/surface)
 include("compute.jl")            # OvrtxRObj (Screen.plot2robj references it) — before screen.jl
 include("screen.jl")             # Screen, open-stage colorbuffer, insert!/insertplots!, activate!
+include("tonemap.jl")            # shared HDR tonemap math (Task 2)
 
-# M5 interactive viewport: cpu_blit!, ViewportSession, interactive_display.
-# camera_loop.jl is a stub here; Task 3 fills it.
-include("interactive/blit.jl")
-include("interactive/viewport.jl")
-include("interactive/camera_loop.jl")
+# M5/M6 interactive viewport lives in package extensions (GLMakie / CUDA). The main
+# module only DECLARES the generics; the GLMakie ext adds the methods.
+function interactive_display end
+function present! end
 export interactive_display
+
+# Errors helpfully when no GLMakie extension is loaded (no method otherwise).
+interactive_display(::Any; kwargs...) =
+    error("interactive_display requires GLMakie — run `using GLMakie` (and `using CUDA` for GPU-direct).")
 
 # Re-export every Makie name verbatim (GLMakie/src/GLMakie.jl:36-41).
 for name in names(Makie, all = true)
@@ -45,7 +48,10 @@ function __init__()
     # M3.5: make `material=` a backend-universal attribute so it is accepted on Lines /
     # Scatter / LineSegments too (Makie validates undocumented keywords; only mesh-like
     # recipes document `material` natively).
-    _enable_material_attribute!()
+    # Guard: _enable_material_attribute! uses `@eval Makie` which is forbidden when
+    # Julia is generating precompile output (Makie is already closed).  Skip it during
+    # extension precompilation — it will run at actual process load time.
+    ccall(:jl_generating_output, Cint, ()) == 0 && _enable_material_attribute!()
     activate!()
     return
 end

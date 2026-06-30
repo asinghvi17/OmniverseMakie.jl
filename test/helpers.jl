@@ -15,6 +15,11 @@ Write `prog` to a temp `.jl` file, run it as a child `julia --project=<repo>`
 process with the standard ovrtx environment, wait up to `timeout` seconds
 (watchdog kills on expiry), collect stdout, and return `(exitcode, stdout_text)`.
 The temp file is always removed in a `finally` block.
+
+M6.A: The subprocess LOAD_PATH stacks the test project (which has GLMakie in
+[deps]) after the main project (which has it only in [weakdeps]).  This lets
+subprocess programs do `using OmniverseMakie, GLMakie` — GLMakie is found via
+the test project — while `using OmniverseMakie` alone still doesn't load it.
 """
 function run_ovrtx_subprocess(prog::String; timeout::Int=300)
     script = tempname() * ".jl"
@@ -24,6 +29,11 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300)
         open(script, "w") do io
             print(io, prog)
         end
+        # Stack test/ project after the main project so GLMakie (and other test
+        # weakdeps) are loadable without being hard deps of OmniverseMakie itself.
+        _test_dir = joinpath(_HELPER_REPO_ROOT, "test")
+        # "@" = active project (from --project); _test_dir = test env (has GLMakie)
+        _load_path = join(["@", _test_dir, "@v#.#", "@stdlib"], ":")
         cmd = setenv(
             `julia --project=$(_HELPER_REPO_ROOT) $script`,
             "OVRTX_LIBRARY_PATH"        => _HELPER_OVRTX_LIB,
@@ -41,6 +51,9 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300)
             # GLMakie cannot precompile without a display available.  AUTO=0 skips
             # startup auto-precompile so the subprocess loads OmniverseMakie cleanly.
             "JULIA_PKG_PRECOMPILE_AUTO" => "0",
+            # M6.A: stack the test project so GLMakie (a weakdep of OmniverseMakie)
+            # is loadable by subprocess programs that do `using GLMakie`.
+            "JULIA_LOAD_PATH"           => _load_path,
         )
         out = IOBuffer()
         err = IOBuffer()

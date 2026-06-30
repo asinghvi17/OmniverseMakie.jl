@@ -85,3 +85,7 @@ include("m5_camera_loop_test.jl")
 
 # M5 Task 4 — orbit-forwarding: glscene input events drive Camera3D via input_listeners.
 include("m5_orbit_test.jl")
+
+# M6.A Task 1 — GLMakie package extension: using OmniverseMakie alone must NOT load
+# GLMakie/CUDA; interactive_display errors helpfully until GLMakie is loaded.
+include("m6_ext_load_test.jl")

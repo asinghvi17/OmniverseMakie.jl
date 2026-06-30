@@ -1,3 +1,49 @@
+module OmniverseMakieGLMakieExt
+
+using OmniverseMakie, GLMakie
+using OmniverseMakie: Makie, RGBA, N0f8, ColorTypes
+# main-module internals the moved code uses (bare names in the original src/interactive/*.jl):
+import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
+    _scene_for_camera, interactive_display
+using Makie: Consume, MouseButtonEvent  # event types used by the input forwarders
+
+# ===== moved verbatim from src/interactive/blit.jl =====
+# CPU blit (M5): update the image! plot's data Observable from a host frame.
+# GLMakie re-uploads the texture on the data change (spike §5 — idiomatic Makie path).
+#
+# Orientation: our ovrtx frame is Matrix{RGBA{N0f8}}[H,W] with row 1 = top (right-side-up).
+# Makie's image! plots with first dimension = x (horizontal) and second dimension = y
+# (vertical, y increases upward in the default Axis convention).
+#
+# Transform needed to display frame rows as vertical top-to-bottom:
+#   - permutedims(frame): [W,H] — swaps dims so frame rows become y-axis (second dim)
+#   - reverse(..., dims=2): flip second dim to match y-up — data[col, k] = frame[H-k+1, col]
+# Result: data[col, H] (high y = TOP) = frame[1, col] (red); data[col, 1] (low y = BOTTOM) = frame[H, col] (blue).
+#
+# Verified in Step 1 REPL:
+#   img[1][] = EndPoints (x range), img[2][] = EndPoints (y range), img[3][] = Matrix{RGBA{N0f8}}
+#   Data Observable index = [3].  `image!(ax, frame)` — x=img[1], y=img[2], data=img[3].
+
+# single source for the host-frame → Makie-image orientation; cpu_blit!, interactive_display, and resize_viewport! must all use it
+_orient_for_display(frame) = reverse(permutedims(frame), dims = 2)
+
+"""
+    cpu_blit!(image_plot, frame::AbstractMatrix{RGBA{N0f8}}) -> Nothing
+
+Update the GLMakie `image!` plot's data Observable from a host frame, triggering a
+texture re-upload (CPU blit, M5 §5).
+
+The host frame is `[H, W]` top-left origin (row 1 = top).  The transform
+`reverse(permutedims(frame), dims=2)` maps frame rows to Makie's y-axis so the
+image appears right-side-up in the GLMakie window.
+"""
+function cpu_blit!(image_plot, frame::AbstractMatrix{RGBA{N0f8}})
+    # [3] = data Observable (x=img[1], y=img[2], data=img[3]; verified Step 1 REPL)
+    image_plot[3][] = _orient_for_display(frame)
+    return nothing
+end
+
+# ===== moved verbatim from src/interactive/viewport.jl =====
 # Viewport session: opens a real GLMakie window displaying the live ovrtx RTX frame.
 #
 # Display model (M5): the window is a SINGLE bare Scene with a pixel camera
@@ -64,7 +110,7 @@ Calls `GLMakie.activate!()` (switches the active Makie backend to GLMakie for th
 window); call `OmniverseMakie.activate!()` afterwards to restore the ovrtx backend for
 offscreen `save`/`colorbuffer` use.
 """
-function interactive_display(fig_or_scene; size = (800, 600), steps_per_tick = 2)
+function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size = (800, 600), steps_per_tick = 2)
     scene     = fig_or_scene isa Makie.Figure ? fig_or_scene.scene : fig_or_scene
     cam_scene = something(_scene_for_camera(scene), scene)
 
@@ -218,3 +264,79 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
 
     return nothing
 end
+
+# ===== moved verbatim from src/interactive/camera_loop.jl =====
+# Camera loop (M5 Task 3): live render tick — camera sync + ovrtx step + cpu_blit!.
+#
+# Per-frame hook on GLMakie's render task: push live camera/light/plot deltas, reset
+# RT2 accumulation only when something changed (else keep accumulating — progressive
+# refinement), do ONE bounded accumulation step, and blit.
+#
+# Mirrors `colorbuffer`'s per-frame sync/reset logic (screen.jl:342-358) but steps a
+# bounded number of times and blits instead of returning the matrix.  Must NOT Consume
+# events (registered as an observer, not a handler).
+#
+# Accumulation state machine (M5.3):
+#   - idle tick (no camera/light/plot change): session.samples += steps_per_tick
+#     (RT2 keeps accumulating — progressive refinement)
+#   - change tick (sync_camera!/sync_lights!/pull_ovrtx_nodes! saw a delta):
+#     OV.reset! restarts RT2, session.samples = 0, then += steps_per_tick → steps_per_tick
+
+"""Bounded step timeout: 10 s — long enough for a normal RT2 step, short enough not to hang."""
+const _M5_STEP_TIMEOUT_NS = UInt64(10_000_000_000)
+
+"""
+    _on_render_tick_impl!(session::ViewportSession) -> Nothing
+
+Core implementation of the per-frame live camera loop (M5 Task 3).  Called from
+`on_render_tick!`, which wraps this in a try/catch to keep the window alive even
+on transient render errors.
+
+Pushes live camera/light/plot deltas to the open ovrtx stage, resets RT2
+accumulation only when something changed (else keeps accumulating), runs
+`steps_per_tick` bounded accumulation steps, and blits the result to the
+GLMakie image plot.
+"""
+function _on_render_tick_impl!(session::ViewportSession)
+    screen    = session.screen
+    cam_scene = session.cam_scene
+
+    # Push live camera/light/plot deltas; reset RT2 accumulation if anything changed.
+    if _sync_and_needs_reset!(screen, cam_scene)
+        OV.reset!(screen.renderer)
+        session.samples = 0
+    end
+
+    # Bounded accumulation step (timeout_ns prevents hanging on a slow step).
+    frame = OV.render_to_matrix(screen.renderer, screen.product;
+                                warmup = session.steps_per_tick,
+                                timeout_ns = _M5_STEP_TIMEOUT_NS)
+    session.samples += session.steps_per_tick
+
+    # CPU blit: update the GLMakie image! plot's data Observable → texture re-upload.
+    cpu_blit!(session.image_plot, frame)
+    return nothing
+end
+
+"""
+    on_render_tick!(session::ViewportSession) -> Nothing
+
+Per-frame live camera loop (M5 Task 3).  Called on every GLMakie render tick via
+the `render_tick` Observable listener registered in `interactive_display`.
+
+Wraps `_on_render_tick_impl!` in a try/catch so that a single bad frame does NOT
+crash the window.  Up to `maxlog=5` warnings are printed; the window stays alive.
+
+Must NOT Consume events — the caller wraps this in `on(glscr.render_tick) do _`
+and returns `Makie.Consume(false)`.
+"""
+function on_render_tick!(session::ViewportSession)
+    try
+        _on_render_tick_impl!(session)
+    catch e
+        @warn "M5: render-tick frame failed (window kept alive)" exception=(e, catch_backtrace()) maxlog=5
+    end
+    return nothing
+end
+
+end # module OmniverseMakieGLMakieExt
