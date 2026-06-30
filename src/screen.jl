@@ -488,6 +488,14 @@ Enqueue a 1-pixel native ray-query pick at Makie pixel `xy` (bottom-left origin,
 Returns `nothing` over background (no hit), or when the hit prim is not a registered plot
 (camera / light / looks).  The pick consumes one step, after which RT2 accumulation restarts
 (expected).
+
+!!! note "world_position / normal are not populated by this ovrtx"
+    The returned `world_position` and `normal` read `(0,0,0)` — ovrtx does not populate the
+    pick-hit world-position AOV for our render product (a verified renderer constraint, not a
+    decode bug). Do not rely on them; `Makie.pick` uses only `plot` + `index`. The `index` is
+    exact for a single-point scatter marker and plot-level (`0`) otherwise (ovrtx collapses a
+    `UsdGeomPointInstancer` pick to the prototype). Both upgrade for free if a future ovrtx
+    surfaces this data.
 """
 function pick_hit(screen::Screen, xy)
     isopen(screen) || return nothing

@@ -74,8 +74,10 @@ Because we implement the standard `pick`/`pick_closest`/`pick_sorted`, Makie's o
 
 Plot is **always** exact (via `path2plot`). Element index:
 
-- **Scatter / MeshScatter** (non-materialized `UsdGeomPointInstancer`): index = `geometryInstanceId` (instance 0 = scatter point 0). **Exact** — `geometryInstanceId` is well-defined for instancers.
-- **Surface** (`UsdGeomMesh`, i-major grid): map the hit's face/primitive index to the linear `(i-1)*ny + j` index Makie expects. **Exact *iff* a mesh pick hit exposes a per-face/primitive index** (in `geometryInstanceId` or another hit field) — ★ VERIFY in REPL whether ovrtx provides a sub-prim index for a plain `UsdGeomMesh` hit. If it does **not** (the hit only identifies the prim), surface **degrades to plot-level** (index `0`) like Mesh, and the cell-index mapping moves to the follow-up. The plan must include this verification and branch accordingly.
+> **★ Verified outcome (implementation):** a dedicated REPL spike established that ovrtx's native pick **collapses a `UsdGeomPointInstancer` (Scatter/MeshScatter) hit to the prototype** — `geometryInstanceId == 0` for every instance, `worldPosition` is unpopulated, and `OVRTX_PICK_FLAG_INCLUDE_TRACKED_INFO` adds no tensors. A plain `UsdGeomMesh` (Surface) hit likewise exposes no per-face index. Both recovery paths (a tracked instance-index tensor and a world-position→nearest-point fallback) were checked and do not exist in this ovrtx. So **element index is plot-level for every plot kind** as of M6.B; the design intent below is preserved for the record, with the as-built behavior noted per bullet.
+
+- **Scatter / MeshScatter** (non-materialized `UsdGeomPointInstancer`): index = `geometryInstanceId`. **As-built: plot-level** — the index is exact only for a *single-point* marker (`instance_id` is `0` → point `1`). For multi-point scatter every point reports index `1` (the prototype-collapse constraint above). The implementation keeps `Int(instance_id)+1`, which is exact for the single-point case and **forward-compatible** — it auto-upgrades for free if a future ovrtx surfaces real instance ids. *(User decision: Accept the constraint.)*
+- **Surface** (`UsdGeomMesh`, i-major grid): the design called for mapping a per-face index to the linear `(i-1)*ny + j`. **As-built: degraded to plot-level** (index `0`) — VERIFIED that an ovrtx mesh pick hit carries no sub-prim index. The cell-index mapping moves to the follow-up.
 - **Mesh, Lines, LineSegments, materialized (merged-mesh) Scatter/MeshScatter:** return index `0` (plot-level). The per-kind face→vertex / merged-marker-division mapping (and the metadata it needs, e.g. marker face counts) is a documented **follow-up**, not in M6.B.
 
 ## Selection outline
@@ -110,17 +112,18 @@ Add `Screen.path2plot::Dict{String, UInt64}` (prim-path → `objectid(plot)`), p
 
 Core tests are **offscreen subprocess** (no GLMakie needed):
 
-- **Pick correctness:** author a known scene (a cube at a known location + a scatter), build a `Screen`, `Makie.pick` over a pixel known to be on the cube → assert the returned plot **is** the cube plot and `world_position ≈` the expected point; over empty space → `(nothing, 0)`; over a specific scatter point → correct plot **and** the right `geometryInstanceId` index.
+- **Pick correctness:** author a known scene (a cube at a known location + a scatter), build a `Screen`, `Makie.pick` over a pixel known to be on the cube → assert the returned plot **is** the cube plot; over empty space → `(nothing, 0)`; over a single-point scatter marker → correct plot **and** index `1`. *(As-built: `world_position` is unpopulated by this ovrtx — the FFI test asserts it is finite, not exact; multi-point scatter index is plot-level per the verified-outcome note above.)*
 - **Path-dictionary round-trip:** a `primPath` id resolves to the exact `/World/plot_<id>` string (the vtable FFI).
 - **Reverse map:** `path2plot` populated at insert, cleared at delete; 50× churn → baseline (no leak), mirrors the `plot2robj` lifecycle test.
-- **Element index:** scatter point + surface cell exact; mesh/lines = `0` (asserted + documented).
+- **Element index:** single-point scatter → `1`; multi-point scatter, surface, mesh, lines = plot-level `0` (asserted + documented; per the verified prototype-collapse constraint).
 - **Outline:** a `Screen` with `selection_outline=true`; `select!(screen, plot)` then render → assert outline-colored pixels appear around the prim (and `clear_selection!` removes them).
-- **Attachable interaction (subprocess, GLMakie):** `attach_picking!(session)`; drive a synthetic click at a known pixel → assert `on_hit`/`selected` fires with the right plot and the outline is applied. (Account for the M5 GLMakie background-thread event race — test the pick path directly + the wiring synchronously, as M5's orbit test did.)
+- **Attachable interaction (subprocess, GLMakie):** `attach_picking!(session)`; drive the pick handler at a known pixel → assert `on_hit`/`selected` fires with the right plot. (Account for the M5 GLMakie background-thread event race — drive the wiring synchronously via `_pick_at!`, as M5's orbit test did.) *(As-built: the live in-viewport outline is **deferred** — the interactive viewport presents via the HdrColor path, incompatible with the LdrColor-only outline Screen; `interactive_display(; selection_outline=true)` refuses with a clear error, and the test asserts that refusal + the degrade-warn. Live highlight needs the LdrColor-present follow-up; programmatic `select!` + `colorbuffer`/`render_to_matrix` gives outline images today.)*
 
 ## Non-goals (deferred / out of M6.B)
 
 - Per-pixel `pick(rect)` matrix and full marquee/region picking.
 - Full element-index fidelity for Mesh/Lines/merged-marker scatter.
+- **Live in-viewport selection outline** (deferred to a follow-up): the outline forces an LdrColor-only Screen, but the interactive viewport presents via the HdrColor path; a future LdrColor-present path lets `interactive_display(; selection_outline=true)` + `attach_picking!(; outline=true)` highlight live. Today the outline is available offscreen (`select!` + `colorbuffer`/`render_to_matrix`).
 - Hover/DataInspector-by-default (picking is opt-in; DataInspector still works if the user attaches it).
 - Semantic-segmentation AOV path (class-level, needs per-prim labels — not used).
 
@@ -128,6 +131,6 @@ Core tests are **offscreen subprocess** (no GLMakie needed):
 
 1. **Pick FFI** (`OV.jl`): `enqueue_pick_query`, `read_pick_hit` (CPU decode + magic/version), `resolve_prim_path` (path-dictionary vtable — REPL-verify-heavy), outline/style/config helpers.
 2. **Renderer config + reverse map**: `ScreenConfig.selection_outline` + renderer creation with the outline flag; `Screen.path2plot` populated/cleared with `plot2robj`.
-3. **Makie.pick**: `pick`/`pick_closest`/`pick_sorted` + `pick_hit`; coordinate y-flip; element-index extraction (scatter/surface exact).
+3. **Makie.pick**: `pick`/`pick_closest`/`pick_sorted` + `pick_hit`; coordinate y-flip; element-index extraction (single-point scatter exact; multi-point scatter/surface/mesh/lines plot-level, per the verified ovrtx constraint).
 4. **Selection outline API**: `select!`/`clear_selection!` + group styles + the outline render test.
 5. **Attachable interaction** (GLMakie ext): `attach_picking!`/`detach_picking!` + viewport wiring + smoke test.
