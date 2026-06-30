@@ -324,6 +324,12 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     # 5. Update the displayed image: delete the old image! (wrong size) and add a new
     #    one spanning the full new viewport.  The campixel! coordinate system already
     #    covers 0..W, 0..H after the GLMakie window resize.
+    # M6.A Task 5: drop the OLD GPU-direct CUDA-GL registration BEFORE deleting the image!
+    # plot — its GL texture is still alive here (no unregister-of-a-dead-texture, no leak).
+    # GL may recycle the freed texture id, so the explicit unregister + the present!
+    # `!st.registered` re-register guard make resize id-recycle-proof (review A-2).  Guarded
+    # on `gpu_state` (the CUDA ext sets it) so this is a no-op for CPU sessions / no-CUDA.
+    session.gpu_state === nothing || Base.invokelatest(OmniverseMakie.gpu_unregister!, session)
     delete!(session.glscene, session.image_plot)
     new_img = image!(session.glscene, 0 .. W, 0 .. H,
                      _orient_for_display(frame); interpolate = false)

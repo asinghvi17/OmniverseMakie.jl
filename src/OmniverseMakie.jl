@@ -35,6 +35,12 @@ function _cuda_functional end
 # resource); the GLMakie ext's `Base.close(::ViewportSession)` calls it when `gpu_state`
 # was set, so the duck-typed GPU state is torn down without naming the CUDA-ext type.
 function _gpu_teardown! end
+# M6.A Task 5: the CUDA ext defines `gpu_unregister!(session)` — cuGraphicsUnregisterResource
+# the GL-texture resource and clear `registered` (keeping the GPUBlitState so the next GPU
+# present! re-registers).  Declared here so the GLMakie ext's `resize_viewport!` can drop the
+# OLD CUDA-GL registration through the generic BEFORE the image! plot's texture is recreated
+# (GL can recycle a freed texture id, so an explicit unregister makes resize id-recycle-proof).
+function gpu_unregister! end
 export interactive_display
 
 # Errors helpfully when no GLMakie extension is loaded (no method otherwise).

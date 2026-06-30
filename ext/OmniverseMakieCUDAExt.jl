@@ -126,6 +126,30 @@ function OmniverseMakie._gpu_teardown!(st::GPUBlitState)
     return nothing
 end
 
+# M6.A Task 5: resize re-registration hook (duck-typed via OmniverseMakie.gpu_unregister!).
+# resize_viewport! (GLMakie ext) recreates the image! plot — and GL may RECYCLE the freed
+# texture id, so the `st.tex_id != tex.id` check alone can miss a recreated-but-same-id
+# texture (review finding A-2).  This unregisters the OLD CUDA-GL resource while its texture
+# is still alive and clears `registered` (keeping the GPUBlitState), so the next GPU present!
+# re-registers the new texture cleanly (the present! re-register guard also tests
+# `!st.registered`).  No-op when the session never used the GPU path (`gpu_state === nothing`).
+#
+# Threading: resize_viewport! fires from the `window_area` listener on GLMakie's RENDER task,
+# which is the SAME task that ran the GPU present! that registered the resource — so the
+# `cuGraphicsUnregisterResource` here runs on the registering task (no cross-task hazard).
+# `gl_switch_context!` makes the GL context current first (redundant-but-safe on the render
+# task, required when driven manually off the render task, e.g. the benchmark).
+function OmniverseMakie.gpu_unregister!(session)
+    st = session.gpu_state
+    st === nothing && return nothing
+    try
+        st.context === nothing || GLMakie.GLAbstraction.gl_switch_context!(st.context)
+    catch
+    end
+    _unregister!(st)
+    return nothing
+end
+
 # ------------------------------------------------------------------
 # present!(session, ::Val{:gpu}) — the GPU-direct blit
 # ------------------------------------------------------------------
@@ -171,8 +195,8 @@ function _gpu_present!(session)
         st = GPUBlitState(Ref{CC.CUgraphicsResource}(), tex.id, false, CUDA.CuEvent(), tex.context)
         _register!(st, tex)
         session.gpu_state = st
-    elseif st.tex_id != tex.id            # texture recreated (e.g. resize) — re-register
-        _unregister!(st)
+    elseif !st.registered || st.tex_id != tex.id   # explicit unregister (resize) OR recreated/recycled-id texture — re-register
+        _unregister!(st)                            # no-op if already unregistered (registered=false)
         st.context = tex.context
         _register!(st, tex)
     end

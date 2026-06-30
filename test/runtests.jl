@@ -102,3 +102,9 @@ include("m6_map_cuda_test.jl")
 # m6_tonemap_test.jl) + the CUDA→GL on-device blit (interactive_display gpu_direct=true
 # shows a non-black RTX frame via the :gpu path, no CPU roundtrip) (subprocess, CUDA+GL).
 include("m6_gpu_blit_test.jl")
+
+# M6.A Task 5 — GPU-direct vs CPU blit benchmark + gate: times present! at 800×600 and 4K,
+# asserts GPU-direct strictly < CPU at 4K (the on-device tonemap+copy beats the CPU host
+# roundtrip + host tonemap).  Manual present! is the sole driver on one task/context
+# (render loop stopped) to avoid the render-task/main-task interop race (subprocess, CUDA+GL).
+include("m6_bench_test.jl")
