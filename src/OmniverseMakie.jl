@@ -41,6 +41,14 @@ function _gpu_teardown! end
 # OLD CUDA-GL registration through the generic BEFORE the image! plot's texture is recreated
 # (GL can recycle a freed texture id, so an explicit unregister makes resize id-recycle-proof).
 function gpu_unregister! end
+# M6.B Task 5: the GLMakie ext defines the attachable picking interaction on a live
+# `interactive_display` viewport — `attach_picking!`/`detach_picking!` plus the `_pick_at!`
+# helper the click listener (and the test) invoke.  Declared here so all three resolve as
+# `OmniverseMakie.*` without a GLMakie dep in the main module (the ext adds the methods).  NOT
+# exported — opt-in advanced API; callers/tests qualify `OmniverseMakie.attach_picking!`.
+function attach_picking! end
+function detach_picking! end
+function _pick_at! end
 export interactive_display
 
 # Errors helpfully when no GLMakie extension is loaded (no method otherwise).

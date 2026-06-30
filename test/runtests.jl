@@ -122,3 +122,9 @@ include("m6b_pick_test.jl")
 # selection_outline=true Screen draws an orange outline (NEW orange pixels gained vs baseline),
 # clear_selection! removes most of it; on a non-outline Screen select! warns once + no-ops.
 include("m6b_outline_test.jl")
+
+# M6.B Task 5 — attach_picking! attachable interaction on the live viewport: a click runs a
+# native pick → selected[] Observable + on_hit callback (data flow driven synchronously via
+# _pick_at!); interactive_display(selection_outline=true) refuses (LdrColor live-present deferred);
+# attach_picking!(outline=true) degrades on the HdrColor viewport (subprocess, GLMakie).
+include("m6b_attach_test.jl")

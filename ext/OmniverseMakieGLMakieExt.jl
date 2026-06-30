@@ -4,7 +4,8 @@ using OmniverseMakie, GLMakie
 using OmniverseMakie: Makie, RGBA, N0f8, ColorTypes
 # main-module internals the moved code uses (bare names in the original src/interactive/*.jl):
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
-    _scene_for_camera, interactive_display, present!, on_render_tick!, cpu_blit!
+    _scene_for_camera, interactive_display, present!, on_render_tick!, cpu_blit!,
+    attach_picking!, detach_picking!, _pick_at!   # M6.B Task 5: attachable picking interaction
 using OmniverseMakie: tonemap, tonemap_frame
 using Makie: Consume, MouseButtonEvent  # event types used by the input forwarders
 
@@ -149,7 +150,15 @@ Calls `GLMakie.activate!()` (switches the active Makie backend to GLMakie for th
 window); call `OmniverseMakie.activate!()` afterwards to restore the ovrtx backend for
 offscreen `save`/`colorbuffer` use.
 """
-function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size = (800, 600), steps_per_tick = 2, exposure = 0f0, gpu_direct = :auto)
+function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size = (800, 600), steps_per_tick = 2, exposure = 0f0, gpu_direct = :auto, selection_outline::Bool = false)
+    # M6.B Task 5 (scope decision): the live viewport presents via the HdrColor path, but a
+    # selection-outline Screen authors an LdrColor-only RenderProduct (no HdrColor AOV) — so
+    # BOTH the GPU-direct and CPU present paths (which map HdrColor) would throw on it.  Rather
+    # than build a new LdrColor live-present path now, refuse `selection_outline=true` with an
+    # actionable error; offscreen `select!` + `render_to_matrix`/`colorbuffer` give outline
+    # images today.  (LdrColor live-present is a planned follow-up.)  `false` (default) keeps the
+    # viewport a normal HdrColor Screen — behaviour is byte-identical to before this kwarg.
+    selection_outline && throw(ArgumentError("interactive_display(; selection_outline=true) is not yet supported: the live viewport presents via the HdrColor path, but the selection outline requires an LdrColor-only Screen. Use offscreen `select!` + `Makie.colorbuffer`/`render_to_matrix` for outline images, or pass selection_outline=false. (LdrColor live-present is a planned follow-up.)"))
     scene     = fig_or_scene isa Makie.Figure ? fig_or_scene.scene : fig_or_scene
     cam_scene = something(_scene_for_camera(scene), scene)
 
@@ -429,6 +438,146 @@ function OmniverseMakie.on_render_tick!(session::ViewportSession)
     catch e
         @warn "M5: render-tick frame failed (window kept alive)" exception=(e, catch_backtrace()) maxlog=5
     end
+    return nothing
+end
+
+# ===== M6.B Task 5 — attachable picking interaction =====
+# Wire a click on the live viewport to a native AOV pick.  The pick CORE lives in the main
+# module (`OmniverseMakie.pick_hit`, no GLMakie/CUDA dep); this ext only adds the GLMakie input
+# wiring on top of the M5/M6.A `ViewportSession`.
+#
+# Data flow (the deliverable): click → `_pick_at!` → `OmniverseMakie.pick_hit(session.screen, xy)`
+#   → `PickHandle.selected[]` Observable + `on_hit` callback.  Works on the normal HdrColor
+#   viewport Screen regardless of any outline flag.
+#
+# Live in-viewport OUTLINE is DEFERRED (scope decision — see `interactive_display`'s
+# `selection_outline` guard): the viewport Screen is always a normal HdrColor Screen
+# (`config.selection_outline == false`), so `attach_picking!(outline=true)` hits the degrade
+# guard below (`@warn maxlog=1`, falls back to `outline=false`).  The `_pick_at!` outline branch
+# is kept (gated on `config.selection_outline`) so it lights up for free when the LdrColor
+# live-present follow-up lands.
+
+"""
+    mutable struct PickHandle
+
+Handle returned by [`attach_picking!`](@ref).  Holds the click listener and the picking state.
+
+Fields:
+  - `session`               — the `ViewportSession` this handle picks on
+  - `listener`              — the `glscene.events.mousebutton` listener (or `nothing` once detached)
+  - `on_hit`                — user callback `hit -> …` run after each pick (or `nothing`)
+  - `outline::Bool`         — draw a selection outline on the hit (degrades to `false` unless the
+                              viewport Screen was built with `selection_outline=true` — deferred)
+  - `selected::Observable{Any}` — the last hit `(; plot, index, world_position, normal)`, or
+                              `nothing` over background.  Observe it to react to picks.
+  - `last_plot`             — the currently-outlined plot (or `nothing`); cleared on the next pick / detach
+"""
+mutable struct PickHandle
+    session
+    listener
+    on_hit
+    outline::Bool
+    selected::Observable{Any}
+    last_plot
+end
+
+# Max press→release cursor travel (px) still counted as a CLICK rather than a drag.  A left-drag
+# orbits the Camera3D (M5 input forwarding), so a pick must NOT fire on it — only on a clean click.
+const _PICK_CLICK_PX = 5.0
+
+# Current cursor position on the display scene as (Float64, Float64).  `mouseposition` may hold a
+# Point2 or a plain tuple (the M5 forwarders assign tuples); index works for both.
+_mouse_xy(session) = let mp = session.glscene.events.mouseposition[]
+    (Float64(mp[1]), Float64(mp[2]))
+end
+
+# Did the gesture between the recorded press position and the current (release) position move far
+# enough to count as a drag (orbit) rather than a click?  `press_pos` is a Ref captured by the
+# `attach_picking!` listener (kept off the shared ViewportSession struct — picking state stays on
+# the handle/closure).  NaN press (no press seen) ⇒ treat as a click (not a drag).
+function _was_dragging(session, press_pos::Ref)
+    px, py = press_pos[]
+    isnan(px) && return false
+    rx, ry = _mouse_xy(session)
+    return hypot(rx - px, ry - py) > _PICK_CLICK_PX
+end
+
+"""
+    _pick_at!(session, h::PickHandle, xy) -> hit | nothing
+
+Run the pick at display pixel `xy` and publish the result: set `h.selected[]` and invoke
+`h.on_hit`.  Also the test-visible entry point (drive it synchronously to assert the wiring
+without the flaky GLFW background event thread).
+
+`OmniverseMakie.pick_hit` is a renderer query, so this is safe to call from the click listener
+(GLMakie runs event handlers on the render task — same task as `present!`).  The outline branch
+is a no-op on the current viewport (its Screen is a normal HdrColor Screen with
+`config.selection_outline == false`); it is kept for the deferred LdrColor live-present path.
+"""
+function _pick_at!(session, h::PickHandle, xy)
+    hit = OmniverseMakie.pick_hit(session.screen, xy)
+    if h.outline && session.screen.config.selection_outline
+        h.last_plot === nothing || OmniverseMakie.clear_selection!(session.screen, h.last_plot)
+        h.last_plot = hit === nothing ? nothing : hit.plot
+        hit === nothing || OmniverseMakie.select!(session.screen, hit.plot)
+    end
+    h.selected[] = hit
+    h.on_hit === nothing || h.on_hit(hit)
+    return hit
+end
+
+"""
+    attach_picking!(session; on_hit=nothing, outline=false, button=Makie.Mouse.left) -> PickHandle
+
+Attach a click-to-pick interaction to a live `interactive_display` viewport `session`.  A click
+(press+release of `button` without a drag, so it does not fight the M5 left-drag orbit) runs a
+native AOV pick at the cursor and publishes the hit on the returned handle's `selected`
+Observable, also invoking `on_hit(hit)` if given.  `hit` is `(; plot, index, world_position,
+normal)` or `nothing` over background.
+
+`outline=true` is accepted but DEGRADES (warns once) on the current viewport: the live viewport
+presents an HdrColor Screen, which cannot carry the LdrColor-only selection outline, so no
+highlight is drawn (the pick data still works).  The in-viewport outline is a planned follow-up;
+for outline IMAGES use offscreen `select!` + `render_to_matrix`/`colorbuffer`.
+
+Call [`detach_picking!`](@ref) to remove the interaction (it is also torn down when the window
+closes, since the listener lives on `glscene.events`).
+"""
+function attach_picking!(session; on_hit = nothing, outline::Bool = false, button = Makie.Mouse.left)
+    if outline && !session.screen.config.selection_outline
+        @warn "attach_picking!(outline=true) but the viewport was built without selection_outline=true; \
+               no highlight will be drawn (the live in-viewport outline is a deferred follow-up — use \
+               offscreen select! + render_to_matrix/colorbuffer for outline images)" maxlog=1
+        outline = false
+    end
+    h = PickHandle(session, nothing, on_hit, outline, Observable{Any}(nothing), nothing)
+    # Click = press+release without a drag.  Track the press position in a closure Ref so a
+    # release that moved (an orbit drag) does not also fire a pick.  One-way observer; never Consume.
+    press_pos = Ref((NaN, NaN))
+    h.listener = on(session.glscene.events.mousebutton) do ev
+        if ev.button == button
+            if ev.action == Makie.Mouse.press
+                press_pos[] = _mouse_xy(session)
+            elseif ev.action == Makie.Mouse.release && !_was_dragging(session, press_pos)
+                _pick_at!(session, h, _mouse_xy(session))
+            end
+        end
+        return Makie.Consume(false)
+    end
+    return h
+end
+
+"""
+    detach_picking!(h::PickHandle) -> Nothing
+
+Remove the click listener attached by [`attach_picking!`](@ref) and clear any selection outline
+the handle drew.  Idempotent (a second call is a safe no-op).
+"""
+function detach_picking!(h::PickHandle)
+    h.listener === nothing || off(h.listener)
+    h.listener = nothing
+    h.last_plot === nothing || OmniverseMakie.clear_selection!(h.session.screen, h.last_plot)
+    h.last_plot = nothing
     return nothing
 end
 
