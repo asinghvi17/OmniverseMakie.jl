@@ -92,3 +92,8 @@ include("m6_ext_load_test.jl")
 
 # M6.A Task 2 — host tonemap unit tests (ACES + sRGB + exposure, pure math, no GPU).
 include("m6_tonemap_test.jl")
+
+# M6.A Task 3 — OV.map_cuda: map HdrColor as LINEAR CUDA device memory (mode 2),
+# returning RAW handles (CUdeviceptr + dims + map_handle + wait_event) with no
+# CUDA.jl dep in the main module (subprocess, CUDA).
+include("m6_map_cuda_test.jl")

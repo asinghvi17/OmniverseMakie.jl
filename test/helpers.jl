@@ -51,6 +51,13 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300)
             # GLMakie cannot precompile without a display available.  AUTO=0 skips
             # startup auto-precompile so the subprocess loads OmniverseMakie cleanly.
             "JULIA_PKG_PRECOMPILE_AUTO" => "0",
+            # M6.A: when CUDA.jl is loaded (GPU-direct path), it otherwise dlopens the
+            # forward-compatible libcuda from CUDA_Driver_jll, which COLLIDES with the
+            # system driver that ovrtx's carb.cudainterop plugin uses → ovrtx
+            # createDevices fails with "driver API result: 3" (CUDA_ERROR_NOT_INITIALIZED).
+            # Forcing the LOCAL system driver makes both share one libcuda. No-op for
+            # the non-CUDA subprocess tests (CUDA.jl is never loaded there).
+            "JULIA_CUDA_USE_COMPAT"     => "false",
             # M6.A: stack the test project so GLMakie (a weakdep of OmniverseMakie)
             # is loadable by subprocess programs that do `using GLMakie`.
             "JULIA_LOAD_PATH"           => _load_path,

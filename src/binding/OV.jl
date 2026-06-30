@@ -241,6 +241,86 @@ function map_cpu_f32(sr::StepResult, name::AbstractString)
 end
 
 # ------------------------------------------------------------------
+# map_cuda / unmap_cuda — map a render var as LINEAR CUDA device memory (M6.A)
+#
+# Unlike map_cpu (which copies then unmaps inside the call), map_cuda MAPS and
+# RETURNS the live device pointer + handles WITHOUT copying or unmapping.  The
+# caller (the CUDA package extension, Task 4) wraps `data` as a CuArray{Float16},
+# tonemaps float16→RGBA8 on-device straight into the GLMakie texture, then calls
+# `unmap_cuda` (gated on a copy-done event so ovrtx does not reclaim the buffer
+# mid-copy).  NO `using CUDA` here — CUDA is a weakdep; these are pure LibOVRTX
+# ccalls returning RAW handles (Ptr / Csize_t).
+#
+# Map mode is OVRTX_MAP_DEVICE_TYPE_CUDA (=2, LINEAR device memory → a CUdeviceptr),
+# NOT CUDA_ARRAY (=3, an opaque CUarray).  HdrColor is kDLFloat/16, and the tonemap
+# step needs LINEAR memory that `unsafe_wrap` can wrap as a CuArray — an opaque
+# CUarray cannot be wrapped.  REPL-verified on an RTX A5000: mode 2 yields a
+# non-null kDLCUDA float16 [H,W,C=4] device pointer + a non-zero wait-event.
+# (Co-loading CUDA.jl + ovrtx requires JULIA_CUDA_USE_COMPAT=false so both share
+# the system libcuda — see test/helpers.jl.)
+# ------------------------------------------------------------------
+
+"""
+    map_cuda(sr::StepResult, name="HdrColor")
+        -> (data::Ptr{Cvoid}, W::Int, H::Int, C::Int, map_handle, wait_event::Csize_t)
+
+Fetch the step results from `sr`, find the render var `name`, and map it as
+**linear CUDA device memory** (mode `OVRTX_MAP_DEVICE_TYPE_CUDA`).  Returns RAW
+handles — does **not** copy and does **not** unmap:
+
+- `data`       — a live `CUdeviceptr` (cast to `Ptr{Cvoid}`); for `HdrColor` it
+                 points at `C*W*H` `Float16`s laid out `[C, W, H]` (channel-fastest).
+- `(W, H, C)`  — DLTensor dims (shape is `[H, W, C]`; `C == 4` for an RGBA frame).
+- `map_handle` — the ovrtx map handle; pass it to `unmap_cuda`.
+- `wait_event` — the `CUevent` (as `Csize_t`, may be 0) to `cuStreamWaitEvent` on
+                 BEFORE reading the buffer.
+
+The buffer stays mapped and live until the caller calls
+`unmap_cuda(sr, map_handle; ...)`.  No CUDA.jl dependency — the CUDA package
+extension (Task 4) wraps `data` as a `CuArray` and `wait_event` as a `CuEvent`.
+"""
+function map_cuda(sr::StepResult, name::AbstractString="HdrColor")
+    sr.r.alive || error("map_cuda on a closed Renderer")
+    # 1. fetch
+    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
+
+    # 2. walk the output tree
+    h = _find_var(outs[], name)
+
+    # 3. map as LINEAR CUDA device memory (mode 2) — no copy, no unmap
+    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CUDA, Csize_t(0)))
+    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output(cuda)")
+
+    # 4. decode the DLTensor (shape = [H, W, C], dtype = kDLFloat/16/1 for HdrColor)
+    t0  = unsafe_load(ro[].tensors, 1)          # ovrtx_render_var_tensor_t
+    dlt = unsafe_load(t0.dl)                     # DLTensor (CUdeviceptr in .data)
+    H   = Int(unsafe_load(dlt.shape, 1))
+    W   = Int(unsafe_load(dlt.shape, 2))
+    C   = Int(unsafe_load(dlt.shape, 3))
+
+    # 5. return RAW handles; caller reads on-device then calls unmap_cuda.
+    return (Ptr{Cvoid}(dlt.data), W, H, C, ro[].map_handle, ro[].cuda_sync.wait_event)
+end
+
+"""
+    unmap_cuda(sr::StepResult, map_handle; stream=Csize_t(0), done_event=Csize_t(0))
+
+Release a `map_cuda` mapping.  Constructs an `ovrtx_cuda_sync_t(stream, done_event)`
+(field order is **stream first, then the event**) so ovrtx waits for `done_event`
+— a `CUevent` the caller records after its on-device copy — on `stream` before
+reclaiming the buffer (spike §3: event-gated unmap, else ovrtx reclaims mid-copy).
+The default `(0, 0)` is `NOSYNC` (synchronous).  No-op if the Renderer is already
+closed.
+"""
+function unmap_cuda(sr::StepResult, map_handle; stream::Csize_t = Csize_t(0), done_event::Csize_t = Csize_t(0))
+    sync = LibOVRTX.ovrtx_cuda_sync_t(stream, done_event)
+    sr.r.alive && LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, map_handle, sync)
+    return nothing
+end
+
+# ------------------------------------------------------------------
 # render_hdr_to_array — convenience: warmup + map_cpu_f32 + return raw HDR
 # ------------------------------------------------------------------
 
