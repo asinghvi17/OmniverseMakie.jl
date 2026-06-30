@@ -624,6 +624,7 @@ function register_ovrtx_robj!(screen, scene, plot)
             robj.material_shader = material_prim_path(plot) * "/Shader"
         end
         screen.plot2robj[objectid(plot)] = robj
+        screen.path2plot[robj.prim_path] = objectid(plot)   # M6.B: keep the reverse map in lockstep
         return robj
     end
 
@@ -665,7 +666,10 @@ function register_ovrtx_robj!(screen, scene, plot)
     end
 
     built = attr[:ovrtx_renderobject][]                              # force resolve → (re)build on `screen`
-    built === nothing || (screen.plot2robj[objectid(plot)] = built)
+    if built !== nothing
+        screen.plot2robj[objectid(plot)] = built
+        screen.path2plot[built.prim_path] = objectid(plot)          # M6.B: reverse map in lockstep
+    end
     return built
 end
 

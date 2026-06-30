@@ -113,3 +113,7 @@ include("m6_bench_test.jl")
 # path_resolver/resolve_prim_path resolve the center-pixel hit to the mesh plot's
 # authored prim path (CPU-only map, no GLMakie/CUDA) (subprocess).
 include("m6b_pick_ffi_test.jl")
+
+# M6.B Task 2 — Screen.path2plot reverse map (prim_path => objectid(plot)) kept in
+# strict lockstep with plot2robj: populated at every insert, cleared at delete (subprocess).
+include("m6b_pick_test.jl")

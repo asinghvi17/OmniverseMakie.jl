@@ -62,6 +62,7 @@ function __init__()
     # hardcodes GL/WGL/RPR in theming.jl.  See context file "CRITICAL gotcha" section.
     Makie.CURRENT_DEFAULT_THEME[:OmniverseMakie] = Makie.Attributes(
         mode = :rt2, samples = 512, warmup = 64, max_bounces = 4,
+        selection_outline = false,   # M6.B: outline feature off by default at every level
     )
     # M3.5: make `material=` a backend-universal attribute so it is accepted on Lines /
     # Scatter / LineSegments too (Makie validates undocumented keywords; only mesh-like

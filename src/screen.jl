@@ -13,6 +13,7 @@ mutable struct Screen <: Makie.MakieScreen
     config::ScreenConfig
     scene::Union{Nothing,Makie.Scene}
     plot2robj::Dict{UInt64,OvrtxRObj}        # objectid(plot) => render object (path + handle)
+    path2plot::Dict{String,UInt64}           # M6.B: prim_path => objectid(plot); reverse of plot2robj (pick resolution)
     scene2scope::Dict{UInt64,String}         # objectid(scene) => USD scope path (idempotency)
     scene_listeners::Dict{UInt64,Vector}     # objectid(scene) => redraw listeners (M2.4 teardown)
     requires_update::Bool                    # M2.2 diff-node signal (unused in M2.1)
@@ -26,7 +27,10 @@ end
 # ------------------------------------------------------------------
 
 function Screen(scene::Makie.Scene, config::ScreenConfig)
-    renderer = OV.Renderer()
+    # M6.B: the selection-outline feature is a creation-time renderer config (it lives
+    # on `ScreenConfig` so `resize_viewport!` — which rebuilds the Screen — preserves
+    # it).  Default false ⇒ an empty config, identical to the pre-M6.B path.
+    renderer = OV.Renderer(; selection_outline = config.selection_outline)
     # Render at the ROOT scene size.  `Makie.colorbuffer(scene)` crops a NON-root
     # (e.g. LScene) scene out of the full figure via `get_sub_picture`, indexing
     # with the scene's viewport in ROOT pixel coordinates — so the rendered image
@@ -41,6 +45,7 @@ function Screen(scene::Makie.Scene, config::ScreenConfig)
         config,
         scene,
         Dict{UInt64,OvrtxRObj}(),
+        Dict{String,UInt64}(),   # path2plot (reverse of plot2robj)
         Dict{UInt64,String}(),
         Dict{UInt64,Vector}(),
         false,     # requires_update
@@ -201,6 +206,7 @@ function _delete_atomic_plot!(screen::Screen, plot::Makie.AbstractPlot)
         destroy_bindings!(robj)
         screen.renderer.alive && OV.remove_usd!(screen.renderer, robj.usd_handle)
         delete!(screen.plot2robj, id)
+        delete!(screen.path2plot, robj.prim_path)   # M6.B: drop the reverse entry in lockstep
     end
     attr = plot.attributes
     haskey(attr, :ovrtx_renderobject) && delete!(attr, :ovrtx_renderobject)
@@ -288,8 +294,10 @@ function Base.empty!(screen::Screen)
         destroy_bindings!(robj)
         screen.renderer.alive && OV.remove_usd!(screen.renderer, robj.usd_handle)
         delete!(screen.plot2robj, id)
+        delete!(screen.path2plot, robj.prim_path)   # M6.B: drop the reverse entry in lockstep
     end
     empty!(screen.plot2robj)
+    empty!(screen.path2plot)                         # M6.B: reverse map cleared alongside plot2robj
     empty!(screen.scene2scope)
     empty!(screen.scene_listeners)
     screen.requires_update = true

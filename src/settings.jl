@@ -11,6 +11,7 @@ struct ScreenConfig
     samples::Int        # offline SPP for :pathtracing (default 512)
     warmup::Int         # RT2 warmup frames (default 64)
     max_bounces::Int    # max ray bounces (default 4)
+    selection_outline::Bool  # M6.B: enable creation-time selection-outline feature (default false)
 end
 
 """

@@ -15,11 +15,39 @@ const _TIMEOUT_INFINITE_NS = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns
 mutable struct Renderer
     ptr::Ptr{LibOVRTX.ovrtx_renderer_t}
     alive::Bool
-    function Renderer()
-        cfg  = Ref(LibOVRTX.ovrtx_config_t(Ptr{LibOVRTX.ovrtx_config_entry_t}(C_NULL), Csize_t(0)))
+    # `selection_outline=true` builds a creation-time `ovrtx_config_t` enabling the
+    # M6.B selection-outline feature (see below); the default `false` passes an EMPTY
+    # config (entry_count 0), byte-identical to the pre-M6.B path.  `outline_width` is
+    # the global outline thickness in pixels (only meaningful when outline is enabled).
+    #
+    # Config-entry FFI (REPL-VERIFIED against references/ovrtx/include/ovrtx/ovrtx_config.h
+    # `ovrtx_config_entry_bool`/`_int` and a real renderer create+render): each
+    # `ovrtx_config_entry_t` is an opaque 24-byte struct — `key_type` @0 (enum UInt32),
+    # `key` union @4, `value` union @8.  Fields are written via `setproperty!` on a
+    # `Ptr` into a ZERO-INITIALIZED entries Vector (so union padding is deterministic),
+    # and `entries` is `GC.@preserve`d across `ovrtx_create_renderer` (which copies the
+    # config during the call).  Mirrors the C inlines: bool → key_type BOOL / key.bool_key
+    # / value.bool_value; int64 → key_type INT64 / key.int64_key / value.int_value.
+    function Renderer(; selection_outline::Bool=false, outline_width::Int=8)
         rref = Ref{Ptr{LibOVRTX.ovrtx_renderer_t}}(C_NULL)
-        with_restored_signals() do
+        _create(cfg) = with_restored_signals() do
             LibOVRTX.check(LibOVRTX.ovrtx_create_renderer(cfg, rref), "create_renderer")
+        end
+        if selection_outline
+            entries = fill(LibOVRTX.ovrtx_config_entry_t(ntuple(_ -> UInt8(0), 24)), 2)
+            GC.@preserve entries begin
+                p1 = pointer(entries, 1)
+                p1.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_BOOL
+                p1.key.bool_key     = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_ENABLED
+                p1.value.bool_value = true
+                p2 = pointer(entries, 2)
+                p2.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_INT64
+                p2.key.int64_key    = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_WIDTH
+                p2.value.int_value  = Int64(outline_width)
+                _create(Ref(LibOVRTX.ovrtx_config_t(pointer(entries), Csize_t(2))))
+            end
+        else
+            _create(Ref(LibOVRTX.ovrtx_config_t(Ptr{LibOVRTX.ovrtx_config_entry_t}(C_NULL), Csize_t(0))))
         end
         r = new(rref[], true)
         finalizer(close, r)
