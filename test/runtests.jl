@@ -152,3 +152,11 @@ include("volumes_writer_test.jl")
 # asserts non-black, low-octant orientation (centroid below centre), and temp-.nvdb cleanup on close
 # (subprocess, env-gated, skip-if-absent).
 include("volumes_plot_test.jl")
+
+# Volumes M2 Task 3 — composite colormap COLORS: the verify-or-degrade spike found the IndeX composite
+# path (which honors the transfer-function colors) is ABSENT from standalone ovrtx — the composite
+# flags/settings are consumed only by the Kit `omni.rtx.index_composite` ext (no .so), and IndeX
+# Direct (the sole bundled volume path) ignores the Colormap → GRAYSCALE.  This test is INVERTED:
+# it asserts the volume! path renders non-black grayscale (the degrade M2 ships) and documents
+# COLORED=false as a tripwire for a future composite-capable build (subprocess, env-gated).
+include("volumes_color_test.jl")

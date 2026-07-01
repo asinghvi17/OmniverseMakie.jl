@@ -19,10 +19,18 @@
 #     material added by reference is rendered by Direct with its DEFAULT (grayscale-density)
 #     transfer function — a deliberately colourful viridis colormap produced byte-identical gray
 #     output to the bare volume.  Applying the authored colours needs the IndeX COMPOSITE path
-#     (layer-level `customLayerData.renderSettings.rtx:index:compositeEnabled` + `omni:rtx:skip`),
-#     which cannot compose through add_usd_reference! → DEFERRED (M2).  We still AUTHOR the
-#     Colormap material here: it renders non-black today and is the exact structure M2's composite
-#     path activates — so `author_vdb_volume!` is M2's reusable authoring primitive unchanged.
+#     (Volume-prim `nvindex:composite`+`omni:rtx:skip` flags + a `rtx:index:compositeEnabled`
+#     render setting).  ── VOLUMES M2 TASK 3 SPIKE FINDING (.superpowers/sdd/task-3-report.md):
+#     that composite path is ARCHITECTURALLY ABSENT from this standalone ovrtx runtime.  Those
+#     flags/settings are interpreted ONLY by the Kit `omni.rtx.index_composite` extension (pure
+#     Python; ships NO `.so`) + `omni.hydra.rtx` — NO bundled ovrtx binary references any of the
+#     strings.  Enabling `compositeEnabled` via a carb setting (mechanism a) OR via the root
+#     layer's `customLayerData.renderSettings` (mechanism b) had ZERO colour effect, and turning
+#     on `omni:rtx:skip` merely removed the volume from the ONLY working path (Direct) → BLACK
+#     (0 lit px).  So the Colormap COLOURS DEFER to a composite-capable ovrtx build (a Kit runtime
+#     carrying omni.rtx.index_composite); M2 ships grayscale-Direct.  We still AUTHOR the Colormap
+#     material here: it renders non-black today and is the exact structure that composite build
+#     would activate — so `author_vdb_volume!` is the reusable authoring primitive, unchanged.
 
 # Build the parallel `rgbaPoints` (float4 RGBA) + `xPoints` (float positions in [0,1]) arrays for
 # an IndeX `Colormap` transfer function from a Makie colormap.  Opacity ramps with position so low
