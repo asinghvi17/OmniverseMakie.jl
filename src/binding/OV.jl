@@ -5,6 +5,10 @@ using .SignalGuard: with_restored_signals
 
 include("dlpack.jl")
 
+# Volumes M1 — NVIDIA IndeX enablement (`_ensure_index` OncePerProcess + carb-config injection).
+# Included before the Renderer struct so `_ensure_index` is defined when Renderer() calls it.
+include("index_config.jl")
+
 # Named constant so the three timeout kwarg defaults share a single source.
 const _TIMEOUT_INFINITE_NS = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns
 
@@ -29,6 +33,10 @@ mutable struct Renderer
     # config during the call).  Mirrors the C inlines: bool → key_type BOOL / key.bool_key
     # / value.bool_value; int64 → key_type INT64 / key.int64_key / value.int_value.
     function Renderer(; selection_outline::Bool=false, outline_width::Int=8)
+        # Volumes M1: enable NVIDIA IndeX (once/process) BEFORE ovrtx_create_renderer so carb
+        # consumes the IndeX-libs token at framework init.  No-op returning false unless a volume
+        # env var is set — zero overhead on the non-volume path (memoized after the first call).
+        _ensure_index()
         rref = Ref{Ptr{LibOVRTX.ovrtx_renderer_t}}(C_NULL)
         _create(cfg) = with_restored_signals() do
             LibOVRTX.check(LibOVRTX.ovrtx_create_renderer(cfg, rref), "create_renderer")

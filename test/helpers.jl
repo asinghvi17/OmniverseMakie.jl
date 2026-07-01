@@ -9,19 +9,25 @@ const _HELPER_USDA = get(ENV, "OM_USDA",
     "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda")
 
 """
-    run_ovrtx_subprocess(prog::String; timeout=300) -> (exitcode, output)
+    run_ovrtx_subprocess(prog::String; timeout=300, env=()) -> (exitcode, output)
 
 Write `prog` to a temp `.jl` file, run it as a child `julia --project=<repo>`
 process with the standard ovrtx environment, wait up to `timeout` seconds
 (watchdog kills on expiry), collect stdout, and return `(exitcode, stdout_text)`.
 The temp file is always removed in a `finally` block.
 
+`env` forwards extra `name => value` pairs (a single `Pair` or an iterable of Pairs)
+into the child process — used for opt-in vars such as `OMNIVERSEMAKIE_INDEX_LIBS`
+(Volumes M1).  `setenv` REPLACES the child environment, so vars neither listed below
+nor forwarded via `env` do NOT leak into the child (the disabled-path volume test
+relies on this to exercise the "no volume env" branch).
+
 M6.A: The subprocess LOAD_PATH stacks the test project (which has GLMakie in
 [deps]) after the main project (which has it only in [weakdeps]).  This lets
 subprocess programs do `using OmniverseMakie, GLMakie` — GLMakie is found via
 the test project — while `using OmniverseMakie` alone still doesn't load it.
 """
-function run_ovrtx_subprocess(prog::String; timeout::Int=300)
+function run_ovrtx_subprocess(prog::String; timeout::Int=300, env=())
     script = tempname() * ".jl"
     exitcode = -1
     output = ""
@@ -34,8 +40,7 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300)
         _test_dir = joinpath(_HELPER_REPO_ROOT, "test")
         # "@" = active project (from --project); _test_dir = test env (has GLMakie)
         _load_path = join(["@", _test_dir, "@v#.#", "@stdlib"], ":")
-        cmd = setenv(
-            `julia --project=$(_HELPER_REPO_ROOT) $script`,
+        env_pairs = Pair{String,String}[
             "OVRTX_LIBRARY_PATH"        => _HELPER_OVRTX_LIB,
             "OM_USDA"                   => _HELPER_USDA,
             "PATH"                      => get(ENV, "PATH", ""),
@@ -61,7 +66,14 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300)
             # M6.A: stack the test project so GLMakie (a weakdep of OmniverseMakie)
             # is loadable by subprocess programs that do `using GLMakie`.
             "JULIA_LOAD_PATH"           => _load_path,
-        )
+        ]
+        # Volumes M1: forward caller-supplied env pairs (e.g. OMNIVERSEMAKIE_INDEX_LIBS).
+        # `env` is a single `name=>value` Pair or an iterable of Pairs.  These append to (and
+        # can override) the base set above; anything not present is absent from the child.
+        for (k, v) in (env isa Pair ? (env,) : env)
+            push!(env_pairs, String(k) => String(v))
+        end
+        cmd = setenv(`julia --project=$(_HELPER_REPO_ROOT) $script`, env_pairs)
         out = IOBuffer()
         err = IOBuffer()
         p = run(pipeline(cmd; stdout=out, stderr=err); wait=false)

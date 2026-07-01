@@ -128,3 +128,8 @@ include("m6b_outline_test.jl")
 # _pick_at!); interactive_display(selection_outline=true) refuses (LdrColor live-present deferred);
 # attach_picking!(outline=true) degrades on the HdrColor viewport (subprocess, GLMakie).
 include("m6b_attach_test.jl")
+
+# Volumes M1 Task 1 — NVIDIA IndeX enablement (the cracked carb-token init): _ensure_index
+# OncePerProcess carb-config injection.  Enabled path (env-gated, skip-if-libs-absent) +
+# disabled path (always-run zero-overhead / no-regression guard) (subprocess).
+include("volumes_index_config_test.jl")
