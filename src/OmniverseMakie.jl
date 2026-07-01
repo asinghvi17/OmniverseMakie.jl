@@ -15,6 +15,7 @@ include("translation/lights.jl") # lights_usda, light_prim_path, sync_lights!, a
 include("translation/materials.jl") # displaycolor_for (plot.color → primvars:displayColor)
 include("translation/meshes.jl")    # to_ovrtx_object (Makie.Mesh → UsdGeomMesh reference)
 include("translation/primitives.jl") # to_ovrtx_object (scatter/meshscatter/lines/surface)
+include("translation/volume.jl")     # Volumes M1: _vdb_volume_usda / author_vdb_volume! (UsdVol)
 include("compute.jl")            # OvrtxRObj (Screen.plot2robj references it) — before screen.jl
 include("screen.jl")             # Screen, open-stage colorbuffer, insert!/insertplots!, activate!
 include("tonemap.jl")            # shared HDR tonemap math (Task 2)

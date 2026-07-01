@@ -133,3 +133,7 @@ include("m6b_attach_test.jl")
 # OncePerProcess carb-config injection.  Enabled path (env-gated, skip-if-libs-absent) +
 # disabled path (always-run zero-overhead / no-regression guard) (subprocess).
 include("volumes_index_config_test.jl")
+
+# Volumes M1 Task 2 — author_vdb_volume! (UsdVol + OpenVDBAsset + IndeX Colormap material):
+# _vdb_volume_usda snippet shape (pure) + clear-error when IndeX disabled (subprocess).
+include("volumes_usda_test.jl")
