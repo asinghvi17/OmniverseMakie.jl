@@ -1,31 +1,23 @@
 module SignalGuard
-# Julia installs SIGSEGV/SIGABRT/etc. with SA_SIGINFO | SA_ONSTACK and a complex recovery
-# path.  When ovrtx loads the carb breakpad crash reporter inside create_renderer, breakpad
-# installs its own handlers on top of Julia's.  Breakpad then chains back to whatever was
-# installed before it (Julia's handlers).  That chain causes the process to be killed by
-# SIGSEGV (termsignal=11) even when the crash was internal to ovrtx/breakpad's own
-# initialization.  Python avoids this because it has simpler (or no) signal handlers.
+# Julia installs SIG{ILL,ABRT,BUS,FPE,SEGV} handlers with SA_SIGINFO|SA_ONSTACK.
+# ovrtx_create_renderer loads carb's breakpad crash reporter, which installs its own
+# handlers then chains back to Julia's — killing the process (termsignal=11) even on
+# crashes internal to ovrtx/breakpad init (Python's simpler handlers avoid this).
+# Fix: ATOMICALLY save Julia's handlers and set SIG_DFL BEFORE create_renderer (breakpad
+# then inits cleanly over SIG_DFL); restore Julia's handlers after.
 #
-# The fix: ATOMICALLY save Julia's handlers and replace them with SIG_DFL *before*
-# calling create_renderer.  During renderer initialization, breakpad installs on top of
-# SIG_DFL and can do its own initialization cleanly.  After create_renderer, we restore
-# Julia's handlers via restore(saved).
-#
-# struct sigaction is platform-specific; on Linux/glibc x86-64 sizeof == 152.
-# We treat it as an opaque fixed-size blob; _SA_SIZE = 256 gives comfortable headroom.
+# struct sigaction is platform-specific (Linux/glibc x86-64 sizeof==152); treat it as an
+# opaque fixed-size blob — _SA_SIZE=256 gives headroom.
 const _SIGS    = (4, 6, 7, 8, 11)   # SIGILL, SIGABRT, SIGBUS, SIGFPE, SIGSEGV
 const _SA_SIZE = 256                 # >= sizeof(struct sigaction) on linux-x86_64 (152)
 
 """
     snapshot() -> Dict{Int,Vector{UInt8}}
 
-Atomically replace the POSIX handlers for SIGILL(4), SIGABRT(6), SIGBUS(7), SIGFPE(8),
-SIGSEGV(11) with SIG_DFL, and return the previous handler blobs.
-
-Calling snapshot() before ovrtx_create_renderer means that during renderer
-initialization, breakpad chains to SIG_DFL (harmless) rather than Julia's complex
-SA_ONSTACK handlers.  Call restore(saved) after create_renderer to put Julia's
-handlers back.
+Atomically set the handlers for SIGILL(4)/SIGABRT(6)/SIGBUS(7)/SIGFPE(8)/SIGSEGV(11)
+to SIG_DFL, returning the previous handler blobs.  Call before ovrtx_create_renderer
+(breakpad then chains to the harmless SIG_DFL, not Julia's SA_ONSTACK handlers); pass
+the result to `restore` afterward.
 """
 function snapshot()
     saved = Dict{Int,Vector{UInt8}}()
@@ -55,10 +47,9 @@ end
 """
     with_restored_signals(f)
 
-Run `f()` (which typically calls `ovrtx_create_renderer`) with all crash-reporter
-signals reset to SIG_DFL, then restore Julia's original signal handlers afterward.
-This neutralises the carb breakpad crash reporter that ovrtx installs at
-renderer-creation time.
+Run `f()` (typically `ovrtx_create_renderer`) with the crash-reporter signals reset to
+SIG_DFL, restoring Julia's handlers afterward.  Neutralises the carb breakpad crash
+reporter ovrtx installs at renderer-creation time.
 """
 function with_restored_signals(f)
     saved = snapshot()
@@ -71,12 +62,11 @@ end
 
 # -- internals ------------------------------------------------------------------
 
-# Atomically install SIG_DFL for `sig` and return the old handler blob.
-# SIG_DFL = Ptr 0; a zeroed-out struct sigaction has sa_handler=SIG_DFL,
-# sa_mask=0, sa_flags=0 — exactly what we want.
+# Atomically set SIG_DFL for `sig`, returning the old handler blob.  A zeroed struct
+# sigaction ≡ {sa_handler=SIG_DFL (=ptr 0), sa_mask=0, sa_flags=0}.
 function _swap_default(sig::Integer)
     old     = zeros(UInt8, _SA_SIZE)
-    new_dfl = zeros(UInt8, _SA_SIZE)   # all-zero ≡ { .sa_handler = SIG_DFL }
+    new_dfl = zeros(UInt8, _SA_SIZE)   # all-zero ≡ {.sa_handler = SIG_DFL}
     r = @ccall sigaction(sig::Cint, new_dfl::Ptr{UInt8}, old::Ptr{UInt8})::Cint
     r == 0 || error("sigaction(swap_default) failed for signal $sig")
     return old

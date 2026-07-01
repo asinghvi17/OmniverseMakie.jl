@@ -26,28 +26,26 @@ include("tonemap.jl")            # shared HDR tonemap math (Task 2)
 function interactive_display end
 function present! end
 function on_render_tick! end
-# Declared in the main module (the GLMakie ext adds the method) so `OmniverseMakie.cpu_blit!`
-# resolves for callers/tests; the M6.A Task-1 ext refactor moved its body to the GLMakie ext.
+# Declared here (GLMakie ext adds the method) so `OmniverseMakie.cpu_blit!` resolves for
+# callers/tests; the M6.A ext refactor moved its body to the GLMakie ext.
 function cpu_blit! end
-# M6.A: the CUDA extension defines `_cuda_functional() = CUDA.functional()`; the GLMakie
-# ext's `_pick_blitter` calls it (via invokelatest) to decide :gpu vs :cpu.  Declared here
-# so the GLMakie ext can reference `OmniverseMakie._cuda_functional` without a CUDA dep.
+# M6.A: the CUDA ext defines `_cuda_functional() = CUDA.functional()`; the GLMakie ext's
+# `_pick_blitter` calls it (invokelatest) to decide :gpu vs :cpu.  Declared here so the GLMakie
+# ext can reference it without a CUDA dep.
 function _cuda_functional end
-# M6.A: the CUDA ext defines `_gpu_teardown!(::GPUBlitState)` (unregister the GL texture
-# resource); the GLMakie ext's `Base.close(::ViewportSession)` calls it when `gpu_state`
-# was set, so the duck-typed GPU state is torn down without naming the CUDA-ext type.
+# M6.A: the CUDA ext defines `_gpu_teardown!(::GPUBlitState)` (unregister the GL texture resource);
+# `Base.close(::ViewportSession)` calls it when `gpu_state` was set, tearing down the duck-typed
+# GPU state without naming the CUDA-ext type.
 function _gpu_teardown! end
-# M6.A Task 5: the CUDA ext defines `gpu_unregister!(session)` — cuGraphicsUnregisterResource
-# the GL-texture resource and clear `registered` (keeping the GPUBlitState so the next GPU
-# present! re-registers).  Declared here so the GLMakie ext's `resize_viewport!` can drop the
-# OLD CUDA-GL registration through the generic BEFORE the image! plot's texture is recreated
-# (GL can recycle a freed texture id, so an explicit unregister makes resize id-recycle-proof).
+# M6.A Task 5: the CUDA ext defines `gpu_unregister!(session)` — cuGraphicsUnregisterResource the
+# GL-texture resource + clear `registered` (keeping the GPUBlitState so the next GPU present!
+# re-registers).  `resize_viewport!` drops the OLD CUDA-GL registration through this generic BEFORE
+# the image! texture is recreated (GL can recycle a freed texture id → resize id-recycle-proof).
 function gpu_unregister! end
 # M6.B Task 5: the GLMakie ext defines the attachable picking interaction on a live
-# `interactive_display` viewport — `attach_picking!`/`detach_picking!` plus the `_pick_at!`
-# helper the click listener (and the test) invoke.  Declared here so all three resolve as
-# `OmniverseMakie.*` without a GLMakie dep in the main module (the ext adds the methods).  NOT
-# exported — opt-in advanced API; callers/tests qualify `OmniverseMakie.attach_picking!`.
+# `interactive_display` viewport — `attach_picking!`/`detach_picking!` + the `_pick_at!` helper the
+# click listener (and test) invoke.  Declared here so all three resolve as `OmniverseMakie.*`
+# without a GLMakie dep.  NOT exported — opt-in advanced API; callers qualify the name.
 function attach_picking! end
 function detach_picking! end
 function _pick_at! end
@@ -66,20 +64,17 @@ for name in names(Makie, all = true)
 end
 
 function __init__()
-    # Seed the OmniverseMakie sub-theme in Makie's CURRENT_DEFAULT_THEME so that
-    # set_screen_config! / merge_screen_config can look up our ScreenConfig defaults.
-    # Without this, activate!() throws KeyError(:OmniverseMakie) because Makie only
-    # hardcodes GL/WGL/RPR in theming.jl.  See context file "CRITICAL gotcha" section.
+    # Seed the OmniverseMakie sub-theme in Makie's CURRENT_DEFAULT_THEME so set_screen_config! /
+    # merge_screen_config find our ScreenConfig defaults.  Without it activate!() throws
+    # KeyError(:OmniverseMakie) (Makie hardcodes only GL/WGL/RPR in theming.jl).
     Makie.CURRENT_DEFAULT_THEME[:OmniverseMakie] = Makie.Attributes(
         mode = :rt2, samples = 512, warmup = 64, max_bounces = 4,
         selection_outline = false,   # M6.B: outline feature off by default at every level
     )
-    # M3.5: make `material=` a backend-universal attribute so it is accepted on Lines /
-    # Scatter / LineSegments too (Makie validates undocumented keywords; only mesh-like
-    # recipes document `material` natively).
-    # Guard: _enable_material_attribute! uses `@eval Makie` which is forbidden when
-    # Julia is generating precompile output (Makie is already closed).  Skip it during
-    # extension precompilation — it will run at actual process load time.
+    # M3.5: make `material=` a backend-universal attribute so Lines/Scatter/LineSegments accept it
+    # too (Makie validates undocumented keywords; only mesh-like recipes document it natively).
+    # Guard: _enable_material_attribute! uses `@eval Makie`, forbidden while Julia is generating
+    # precompile output (Makie already closed) — skip during ext precompile; it runs at load time.
     ccall(:jl_generating_output, Cint, ()) == 0 && _enable_material_attribute!()
     activate!()
     return

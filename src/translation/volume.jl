@@ -1,41 +1,35 @@
-# UsdVol volume authoring for OmniverseMakie (Volumes M1).
+# UsdVol volume authoring (Volumes M1).  Authors UsdVolVolume (+ OpenVDBAsset +
+# an IndeX `nvindex:volume` Colormap material) from an on-disk .vdb/.nvdb into a
+# Screen's OPEN stage.  Renders via IndeX Direct, which OV._ensure_index()
+# must have enabled at Screen creation.  Included in the OmniverseMakie module
+# after OV.jl / usd.jl (calls OV.add_usd_reference! / OV._index_enabled; screen
+# is duck-typed).
 #
-# Authors a `UsdVolVolume` (+ `UsdVolOpenVDBAsset` + an IndeX `nvindex:volume` Colormap material)
-# from an on-disk `.vdb`/`.nvdb` file into a Screen's OPEN stage.  The render routes to NVIDIA
-# IndeX Direct, which OV._ensure_index() (Task 1) must have enabled at Screen-creation time.
-#
-# NOTE: this file is included inside the OmniverseMakie module (after OV.jl / usd.jl), so it can
-# call OV.add_usd_reference! / OV._index_enabled and use Makie (`screen` is duck-typed).
-#
-# ── VERIFIED ovrtx constraints (Volumes M1 plan Task 2 Step 1; ground truth in
-#    .superpowers/sdd/m6b/volume-spike-report.md) ────────────────────────────────────────────
-#  1. add_usd_reference! of a `Volume` into the open stage RENDERS (torus.vdb → ~9.5k px @ 256²).
-#  2. INTERNAL rel/connect targets MUST be LAYER-RELATIVE to the layer's defaultPrim
-#     (`</Volume/density>`).  USD remaps them under the reference target `prim_path` on
-#     composition.  An ABSOLUTE target (`</World/Volume/density>`) authored in the layer is
-#     dangling → the field never binds → the volume renders BLACK.  (Verified: absolute → 0 px,
-#     layer-relative → 9486 px.)
-#  3. The Colormap TRANSFER-FUNCTION COLOURS do NOT apply via IndeX Direct: a `nvindex:volume`
-#     material added by reference is rendered by Direct with its DEFAULT (grayscale-density)
-#     transfer function — a deliberately colourful viridis colormap produced byte-identical gray
-#     output to the bare volume.  Applying the authored colours needs the IndeX COMPOSITE path
-#     (Volume-prim `nvindex:composite`+`omni:rtx:skip` flags + a `rtx:index:compositeEnabled`
-#     render setting).  ── VOLUMES M2 TASK 3 SPIKE FINDING (.superpowers/sdd/task-3-report.md):
-#     that composite path is ARCHITECTURALLY ABSENT from this standalone ovrtx runtime.  Those
-#     flags/settings are interpreted ONLY by the Kit `omni.rtx.index_composite` extension (pure
-#     Python; ships NO `.so`) + `omni.hydra.rtx` — NO bundled ovrtx binary references any of the
-#     strings.  Enabling `compositeEnabled` via a carb setting (mechanism a) OR via the root
-#     layer's `customLayerData.renderSettings` (mechanism b) had ZERO colour effect, and turning
-#     on `omni:rtx:skip` merely removed the volume from the ONLY working path (Direct) → BLACK
-#     (0 lit px).  So the Colormap COLOURS DEFER to a composite-capable ovrtx build (a Kit runtime
-#     carrying omni.rtx.index_composite); M2 ships grayscale-Direct.  We still AUTHOR the Colormap
-#     material here: it renders non-black today and is the exact structure that composite build
-#     would activate — so `author_vdb_volume!` is the reusable authoring primitive, unchanged.
+# VERIFIED ovrtx constraints
+# (ground truth: .superpowers/sdd/m6b/volume-spike-report.md):
+#  1. add_usd_reference! of a Volume into the open stage RENDERS (torus.vdb ->
+#     ~9.5k px).
+#  2. Internal rel/connect targets MUST be LAYER-RELATIVE to the defaultPrim
+#     (</Volume/density>) — USD remaps them under the reference prim_path on
+#     composition.  An ABSOLUTE target (</World/Volume/density>) dangles ->
+#     field unbound -> BLACK (absolute: 0 px; layer-relative: 9486 px).
+#  3. Colormap transfer-function COLOURS ignored by IndeX Direct: it renders
+#     with its DEFAULT grayscale-density TF (viridis gave byte-identical
+#     gray).  Colours need the IndeX COMPOSITE path, ARCHITECTURALLY ABSENT from
+#     this standalone ovrtx: composite flags (nvindex:composite, omni:rtx:skip,
+#     rtx:index:compositeEnabled) are honored ONLY by Kit's
+#     omni.rtx.index_composite + omni.hydra.rtx (no ovrtx .so uses them).
+#     Enabling via a carb setting or customLayerData had ZERO colour effect;
+#     omni:rtx:skip removed the volume from the only working path (Direct)
+#     -> BLACK.  So COLOURS DEFER to a composite-capable Kit build; M2 ships
+#     grayscale-Direct.  We still AUTHOR the Colormap material: non-black today,
+#     and exactly what a composite build would activate, so author_vdb_volume!
+#     stays the reusable authoring primitive.
 
-# Build the parallel `rgbaPoints` (float4 RGBA) + `xPoints` (float positions in [0,1]) arrays for
-# an IndeX `Colormap` transfer function from a Makie colormap.  Opacity ramps with position so low
-# density is transparent (matching the reference torus-volume-with-geometry.usda form).  Samples
-# at most `npoints` colours evenly so the emitted USDA stays compact.
+# Parallel `rgbaPoints` (float4 RGBA) + `xPoints` (positions in [0,1]) for an
+# IndeX Colormap TF from a Makie colormap.  Opacity ramps with position (low
+# density -> more transparent).  Samples <= `npoints` colours evenly, keeping
+# the emitted USDA compact.
 function _colormap_points(colormap; npoints::Int = 16)
     cs = Makie.to_colormap(colormap)
     n  = length(cs)
@@ -56,19 +50,17 @@ end
     _vdb_volume_usda(vdb_path; prim_path="/World/Volume", field="density", field_dtype="float",
                      colormap=:viridis, colorrange=nothing) -> String
 
-Build a self-contained USDA layer (PURE — no renderer) for a `.vdb`/`.nvdb` volume: a
-`def Volume "Volume"` (the layer's `defaultPrim`) with a `field:<field>` rel to a child
-`OpenVDBAsset`, plus an IndeX `nvindex:volume` `Colormap` material built from `colormap`/`colorrange`.
+PURE (no renderer) self-contained USDA layer for a `.vdb`/`.nvdb` volume: a
+`def Volume "Volume"` (the `defaultPrim`) with a `field:<field>` rel to a child
+`OpenVDBAsset`, plus an IndeX `nvindex:volume` `Colormap` material from colormap/colorrange.
 
-`field` is the single knob for the grid: it names the `field:<field>` rel, the `OpenVDBAsset`
-prim, AND its `fieldName` (the grid name inside the VDB — e.g. `"torus_fog"` for `torus.vdb`).
+`field` names the rel, the `OpenVDBAsset` prim, AND its `fieldName` (the grid name inside
+the VDB, e.g. `"torus_fog"` for `torus.vdb`).
 
-Internal rel/connect targets are LAYER-RELATIVE (`</Volume/…>`); USD remaps them under the
-reference target when `author_vdb_volume!` adds the layer at `prim_path`.  `prim_path` is accepted
-for signature symmetry with `author_vdb_volume!` (which references the layer there); the layer
-itself is self-contained, so `prim_path` does not appear in the emitted string.
-
-Metadata is newline-separated / multi-line (the RenderProduct-prim gotcha — see usd.jl).
+Internal rel/connect targets are LAYER-RELATIVE (`</Volume/…>`) — USD remaps them under the
+reference `prim_path` on composition (absolute would dangle -> BLACK).  `prim_path` itself is
+accepted only for signature symmetry with `author_vdb_volume!`; it does NOT appear in the
+emitted string.  Metadata is multi-line (the RenderProduct-prim gotcha — see usd.jl).
 """
 function _vdb_volume_usda(vdb_path; prim_path = "/World/Volume", field = "density",
                           field_dtype = "float", colormap = :viridis, colorrange = nothing)
@@ -120,17 +112,15 @@ end
     author_vdb_volume!(screen, scene, vdb_path; prim_path="/World/Volume", field="density",
                        field_dtype="float", colormap=:viridis, colorrange=nothing) -> String
 
-Author a `UsdVolVolume` from the on-disk `vdb_path` into `screen`'s already-open stage (call after
-`author_root_from_scene!`/`_author_screen!` set up the camera/lights/render-product), returning
-`prim_path`.  The volume renders through NVIDIA IndeX Direct — which requires IndeX to have been
-enabled BEFORE `screen` was created (`OV._ensure_index`, driven by `OMNIVERSEMAKIE_INDEX_LIBS` /
-`OMNIVERSEMAKIE_OVRTX_CONFIG`); otherwise this errors clearly rather than authoring a prim that
-would silently render black.
+Reference a `UsdVolVolume` (from on-disk `vdb_path`) into `screen`'s already-open stage
+(call after the camera/lights/render-product are set up); returns `prim_path`.  Renders
+through NVIDIA IndeX Direct, which must have been enabled BEFORE `screen` was created
+(`OV._ensure_index`); otherwise this errors clearly instead of authoring a prim that would
+silently render black.
 
-`scene` is accepted for signature symmetry with M2's `volume!` (which will derive `colorrange`
-from scene data limits); M1 does not read it.  See `_vdb_volume_usda` for `field`/colormap notes,
-and for the verified M1 constraint that the colormap's transfer-function COLOURS require the
-deferred composite path (M1 renders the volume via IndeX Direct's default grayscale TF).
+`scene` is accepted only for signature symmetry with M2's `volume!`; M1 does not read it.
+See `_vdb_volume_usda` for field/colormap notes and the constraint that the colormap COLOURS
+need the deferred composite path (M1 renders via IndeX Direct's default grayscale TF).
 """
 function author_vdb_volume!(screen, scene, vdb_path; prim_path = "/World/Volume", field = "density",
                             field_dtype = "float", colormap = :viridis, colorrange = nothing)
@@ -147,20 +137,20 @@ end
 """
     reload_volume_data!(screen, robj, plot, scalars) -> Nothing
 
-Volumes M2 (Task 5) — LIVE volume DATA edit.  Re-write the plot's density field to a FRESH temp
-`.nvdb` and RELOAD it into the open stage so NVIDIA IndeX shows the new data.  Called by
-`push_to_ovrtx!`'s `:volume` branch when `plot[4][] = new_array` fires `changed[:volume]`.
+LIVE volume DATA edit: write the plot's density field to a FRESH temp `.nvdb` and RELOAD it
+into the open stage so NVIDIA IndeX shows the new data.  Called by `push_to_ovrtx!`'s
+`:volume` branch when `plot[4][] = new_array` fires `changed[:volume]`.
 
-The reload is a REMOVE + RE-REFERENCE, NOT a `filePath` write: the Task-5 verify-or-degrade spike
-proved that writing a new `filePath` on the `OpenVDBAsset` does NOT update the render — IndeX loads
-the grid into its own memory and evicts the source file ("orphaned"), so the on-disk change is never
-re-read (spike: filePath write → centroid MOVED ≈ 0.01 px; remove_usd! + add_usd_reference! of a fresh
-layer pointing at a FRESH temp path → MOVED ≈ 26 px).  A fresh temp path each edit also side-steps the
-carb asset-cache serving the stale file.  `robj.usd_handle` is updated to the new layer's handle.
+The reload is a REMOVE + RE-REFERENCE, NOT a `filePath` write: a `filePath` write does NOT
+update the render — IndeX loads the grid into its own memory and evicts ("orphans") the
+source file, so the on-disk change is never re-read (spike: filePath write -> moved ~0.01 px;
+remove_usd! + add_usd_reference! of a fresh layer at a FRESH temp path -> moved ~26 px).  A
+fresh temp path per edit also dodges the carb asset-cache serving the stale file;
+`robj.usd_handle` becomes the new layer's handle.
 
-Temp files stay BOUNDED: the PRIOR temp `.nvdb` is deleted here (one live grid on disk at a time), and
-`destroy_bindings!` removes the last one on close/delete.  Ranges/colormap/colorrange are re-read from
-the plot (identical to the build), so a data edit keeps the same placement + (grayscale-Direct) TF.
+Temps stay BOUNDED: the prior temp is deleted here (one live grid on disk), `destroy_bindings!`
+removes the last on close/delete.  colormap/colorrange are re-read from the plot, so a data
+edit keeps the same placement + (grayscale-Direct) TF.
 """
 function reload_volume_data!(screen, robj, plot, scalars)
     r     = screen.renderer
@@ -171,25 +161,22 @@ function reload_volume_data!(screen, robj, plot, scalars)
     extent = GeometryBasics.Vec3f(last(xr) - first(xr), last(yr) - first(yr), last(zr) - first(zr))
     newtmp   = tempname() * ".nvdb"
     reloaded = false
-    # Recoverable, leak-free, teardown-safe remove-then-add (Task-5 reviewer finding: the
-    # remove/add is non-atomic — a `LibOVRTX.check` throw between them left an orphaned temp AND
-    # a stale `usd_handle`).  The order stays remove-THEN-add (NOT an add-before-remove reorder):
-    #   • LAST-GOOD-FRAME on failure is already preserved by this order — a bare `remove_usd!` does
-    #     NOT clear the volume from the render (IndeX keeps the grid it loaded into its own memory —
-    #     the same "orphaned"/self-managed behavior that makes a `filePath` write a no-op), so on an
-    #     `add_usd_reference!` failure the last successfully-loaded grid keeps rendering (verified:
-    #     failed reload → still lit, non-black).  A reorder would instead keep the prim CONTINUOUSLY
-    #     referenced, which would DEFEAT the reload (the prim must transiently disappear+reappear for
-    #     IndeX to re-read) — so remove-then-add is required for the happy path AND happens to give
-    #     last-good-frame for free.
-    #   • RECOVERY + NO-WEDGE: if the add fails, `robj.meta[:usd_handle_valid]` is set false so the
-    #     stale handle is NOT re-removed on the next edit (on some ovrtx builds `remove_usd!` of an
-    #     already-removed handle throws — which would permanently wedge the plot BEFORE reaching the
-    #     add); the next edit skips straight to a fresh add, which replaces the retained grid and
-    #     RECOVERS the plot.  Teardown reads the same flag (screen.jl) so a stale handle can't abort
-    #     delete!/empty!/close.
-    #   • BOUNDED TEMPS: `newtmp` is written first (cheap, local); the try/finally rm's it on ANY
-    #     failure (save/remove/add), so repeated failed edits do NOT leak (one grid on disk at a time).
+    # Teardown-safe remove-THEN-add (order matters — do NOT reorder to
+    # add-before-remove):
+    #  • LAST-GOOD-FRAME: remove_usd! does NOT clear the volume (IndeX keeps the
+    #    grid in its own memory — the same self-managed behavior that makes a
+    #    filePath write a no-op), so if the add throws the last grid keeps
+    #    rendering.  A reorder would keep the prim CONTINUOUSLY referenced and
+    #    DEFEAT the reload: the prim must disappear+reappear for IndeX
+    #    to re-read; remove-then-add is required, giving last-good-frame free.
+    #  • RECOVERY/NO-WEDGE: add fails -> set robj.meta[:usd_handle_valid]=false
+    #    so the stale handle is NOT re-removed next edit (remove_usd! of an
+    #    already-removed handle throws on some ovrtx builds -> would wedge the
+    #    plot); the next edit does a fresh add, replacing the retained grid and
+    #    RECOVERING.  Teardown reads the same flag (screen.jl) so a stale handle
+    #    can't abort delete!/empty!/close.
+    #  • BOUNDED TEMPS: newtmp is written first; try/finally rm's it on ANY
+    #    failure, so repeated fails do NOT leak (one grid on disk at a time).
     try
         NanoVDBWriter.save_nanovdb(newtmp, data, origin, extent)
         usda = _vdb_volume_usda(newtmp; prim_path = vprim, field = "density",
@@ -211,9 +198,8 @@ function reload_volume_data!(screen, robj, plot, scalars)
             rm(newtmp; force = true)                         # threw before the reload completed → GC the orphan
         end
     end
-    # No explicit `OV.reset!` here: the diff-node callback sets `scr.requires_update = true`
-    # (compute.jl) after this push, and `colorbuffer`'s `_sync_and_needs_reset!` (screen.jl) issues
-    # the per-frame reset — identical to every other push route (verified: the live-data edit still
-    # re-renders the new grid without an inline reset).
+    # No inline OV.reset!: the diff-node callback sets scr.requires_update=true;
+    # colorbuffer's _sync_and_needs_reset! (screen.jl) then issues the per-frame
+    # reset — same as every push route (verified: the edit re-renders the grid).
     return nothing
 end

@@ -19,45 +19,43 @@ const _TIMEOUT_INFINITE_NS = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns
 mutable struct Renderer
     ptr::Ptr{LibOVRTX.ovrtx_renderer_t}
     alive::Bool
-    # `selection_outline=true` builds a creation-time `ovrtx_config_t` enabling the
-    # M6.B selection-outline feature (see below); the default `false` passes an EMPTY
-    # config (entry_count 0), byte-identical to the pre-M6.B path.  `outline_width` is
-    # the global outline thickness in pixels (only meaningful when outline is enabled).
+    # selection_outline=true builds a creation-time `ovrtx_config_t` enabling the M6.B
+    # outline; default false passes an EMPTY config (entry_count 0), byte-identical to the
+    # pre-M6.B path.  outline_width = global thickness in px (only meaningful when on).
     #
-    # Config-entry FFI (REPL-VERIFIED against references/ovrtx/include/ovrtx/ovrtx_config.h
-    # `ovrtx_config_entry_bool`/`_int` and a real renderer create+render): each
-    # `ovrtx_config_entry_t` is an opaque 24-byte struct — `key_type` @0 (enum UInt32),
-    # `key` union @4, `value` union @8.  Fields are written via `setproperty!` on a
-    # `Ptr` into a ZERO-INITIALIZED entries Vector (so union padding is deterministic),
-    # and `entries` is `GC.@preserve`d across `ovrtx_create_renderer` (which copies the
-    # config during the call).  Mirrors the C inlines: bool → key_type BOOL / key.bool_key
-    # / value.bool_value; int64 → key_type INT64 / key.int64_key / value.int_value.
+    # Config-entry FFI (REPL-VERIFIED vs ovrtx_config.h ovrtx_config_entry_bool/_int +
+    # a real create+render): each `ovrtx_config_entry_t` is an opaque 24-byte struct —
+    # key_type @0 (enum UInt32), key union @4, value union @8.  Written via setproperty!
+    # on a Ptr into a ZERO-INITIALIZED entries Vector (deterministic union padding), and
+    # `entries` is GC.@preserve'd across ovrtx_create_renderer (which copies the config).
+    # Mirrors the C inlines: bool → BOOL/key.bool_key/value.bool_value; int64 → INT64/
+    # key.int64_key/value.int_value.
     function Renderer(; selection_outline::Bool=false, outline_width::Int=8)
-        # Volumes M1: enable NVIDIA IndeX (once/process) BEFORE ovrtx_create_renderer so carb
-        # consumes the IndeX-libs token at framework init.  No-op returning false unless a volume
-        # env var is set — zero overhead on the non-volume path (memoized after the first call).
+        # Volumes M1: enable NVIDIA IndeX (once/process) BEFORE ovrtx_create_renderer so
+        # carb consumes the IndeX-libs token at framework init.  No-op false unless a volume
+        # env var is set — zero overhead on the non-volume path (memoized after 1st call).
         _ensure_index()
-        rref = Ref{Ptr{LibOVRTX.ovrtx_renderer_t}}(C_NULL)
+        renderer_ref = Ref{Ptr{LibOVRTX.ovrtx_renderer_t}}(C_NULL)
         _create(cfg) = with_restored_signals() do
-            LibOVRTX.check(LibOVRTX.ovrtx_create_renderer(cfg, rref), "create_renderer")
+            LibOVRTX.check(LibOVRTX.ovrtx_create_renderer(cfg, renderer_ref), "create_renderer")
         end
         if selection_outline
             entries = fill(LibOVRTX.ovrtx_config_entry_t(ntuple(_ -> UInt8(0), 24)), 2)
             GC.@preserve entries begin
-                p1 = pointer(entries, 1)
-                p1.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_BOOL
-                p1.key.bool_key     = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_ENABLED
-                p1.value.bool_value = true
-                p2 = pointer(entries, 2)
-                p2.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_INT64
-                p2.key.int64_key    = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_WIDTH
-                p2.value.int_value  = Int64(outline_width)
+                entry1 = pointer(entries, 1)
+                entry1.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_BOOL
+                entry1.key.bool_key     = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_ENABLED
+                entry1.value.bool_value = true
+                entry2 = pointer(entries, 2)
+                entry2.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_INT64
+                entry2.key.int64_key    = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_WIDTH
+                entry2.value.int_value  = Int64(outline_width)
                 _create(Ref(LibOVRTX.ovrtx_config_t(pointer(entries), Csize_t(2))))
             end
         else
             _create(Ref(LibOVRTX.ovrtx_config_t(Ptr{LibOVRTX.ovrtx_config_entry_t}(C_NULL), Csize_t(0))))
         end
-        r = new(rref[], true)
+        r = new(renderer_ref[], true)
         finalizer(close, r)
         return r
     end
@@ -81,9 +79,9 @@ function enqueue_wait(r::Renderer, enq, op::AbstractString;
                      timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
     r.alive || error("enqueue_wait called on a closed Renderer")
     LibOVRTX.check(enq, op)
-    wr = Ref{LibOVRTX.ovrtx_op_wait_result_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_wait_op(r.ptr, enq.op_index, LibOVRTX.ovrtx_timeout_t(timeout_ns), wr), op * ":wait")
-    return wr[]
+    wait_ref = Ref{LibOVRTX.ovrtx_op_wait_result_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_wait_op(r.ptr, enq.op_index, LibOVRTX.ovrtx_timeout_t(timeout_ns), wait_ref), op * ":wait")
+    return wait_ref[]
 end
 
 # ------------------------------------------------------------------
@@ -93,8 +91,8 @@ end
 """
     open_usd!(r::Renderer, path::AbstractString)
 
-Open a USD stage from the file at `path`.  Synchronous: enqueues then waits.
-The `path` string is preserved across the ccall and the wait via `GC.@preserve`.
+Open a USD stage from the file at `path`.  Synchronous (enqueue + wait);
+`path` is GC.@preserve'd across the ccall + wait.
 """
 function open_usd!(r::Renderer, path::AbstractString)
     GC.@preserve path begin
@@ -139,15 +137,11 @@ end
 """
     step!(r::Renderer, product::AbstractString; dt=1/60, timeout_ns) -> StepResult
 
-Enqueue and wait for one RT2 render step for the given render product path.
-Both the backing `ovx_string_t` array and the product `String` are preserved
-across the ccall and the wait.  `timeout_ns` sets the maximum wait for the
-async step to complete; it defaults to the infinite-wait constant (preserving
-back-compat) and is set to a bounded value by the M5 interactive camera loop
-to prevent hanging on a slow or stalled render step.
-
-Returns a `StepResult`; the caller is responsible for closing it (or letting
-the finalizer run).
+Enqueue + wait one RT2 render step for `product`.  `timeout_ns` bounds the wait
+(defaults to infinite; the M5 camera loop sets a finite value to avoid hanging on
+a stalled step).  The backing `ovx_string_t` array and `product` are GC.@preserve'd
+across the ccall + wait.  Caller must `close` the returned `StepResult` (or let the
+finalizer run).
 """
 function step!(r::Renderer, product::AbstractString;
               dt::Float64=1/60, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
@@ -169,19 +163,18 @@ end
 """
     _find_var_opt(outs::ovrtx_render_product_set_outputs_t, name) -> handle | nothing
 
-Walk outputs → output_frames → output_render_vars and return the output handle
-whose render_var_name matches `name` (e.g. "LdrColor"), or `nothing` if absent.
-Used by `read_pick_hit`, where a missing `ovrtx_pick_hit` var (no pick enqueued)
-is an expected, non-error case.
+Walk outputs → frames → render_vars; return the handle whose render_var_name ==
+`name` (e.g. "LdrColor"), or `nothing`.  A missing `ovrtx_pick_hit` var (no pick
+enqueued) is an expected, non-error case for `read_pick_hit`.
 """
 function _find_var_opt(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::AbstractString)
     for i in 1:outs.output_count
-        po = unsafe_load(outs.outputs, i)            # ovrtx_render_product_output_t
-        for f in 1:po.output_frame_count
-            fr = unsafe_load(po.output_frames, f)    # ovrtx_render_product_frame_output_t
-            for v in 1:fr.render_var_count
-                rv = unsafe_load(fr.output_render_vars, v)  # ovrtx_render_product_render_var_output_t
-                String(rv.render_var_name) == name && return rv.output_handle
+        product_out = unsafe_load(outs.outputs, i)             # ovrtx_render_product_output_t
+        for f in 1:product_out.output_frame_count
+            frame_out = unsafe_load(product_out.output_frames, f)  # ..._frame_output_t
+            for v in 1:frame_out.render_var_count
+                var_out = unsafe_load(frame_out.output_render_vars, v)  # ..._render_var_output_t
+                String(var_out.render_var_name) == name && return var_out.output_handle
             end
         end
     end
@@ -189,10 +182,10 @@ function _find_var_opt(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::
 end
 
 """
-    _find_var(outs::ovrtx_render_product_set_outputs_t, name) -> ovrtx_render_var_output_handle_t
+    _find_var(outs::ovrtx_render_product_set_outputs_t, name) -> handle
 
-Like `_find_var_opt` but throws if `name` is not found (the contract `map_cpu`,
-`map_cpu_f32`, and `map_cuda` rely on — LdrColor/HdrColor are always present).
+Like `_find_var_opt` but throws if `name` is absent (the contract map_cpu /
+map_cpu_f32 / map_cuda rely on — LdrColor/HdrColor are always present).
 """
 function _find_var(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::AbstractString)
     h = _find_var_opt(outs, name)
@@ -205,41 +198,35 @@ end
 # ------------------------------------------------------------------
 
 """
-    map_cpu(sr::StepResult, name="LdrColor") -> (pixels::Array{UInt8,3}, W::Int, H::Int)
+    map_cpu(sr::StepResult, name="LdrColor") -> (pixels::Array{UInt8,3}, W, H)
 
-Fetch the step results from `sr`, find the render var `name`, map it to CPU
-memory, **copy** the pixels (mandatory — mapped memory is invalid after unmap),
-unmap, and return `(pixels, W, H)`.
-
-`pixels` is a 3-D `Array{UInt8}` with layout `[C=4, W, H]` (channel-fastest).
+Fetch results, find render var `name`, map to CPU, COPY (mandatory — mapped mem is
+invalid after unmap), unmap, return `(pixels, W, H)`.  `pixels` is `[C=4, W, H]`
+(channel-fastest).
 """
 function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
     sr.r.alive || error("map_cpu: the StepResult's Renderer is already closed")
-    # 1. fetch
     outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
 
-    # 2. walk the output tree
     h = _find_var(outs[], name)
 
-    # 3. map to CPU
     mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
     ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
 
-    # 4. decode the DLTensor (shape = [H, W, C], dtype = kDLUInt/8/1)
+    # DLTensor: shape [H,W,C], dtype kDLUInt/8/1 (LdrColor)
     t0  = unsafe_load(ro[].tensors, 1)          # ovrtx_render_var_tensor_t
     dlt = unsafe_load(t0.dl)                    # DLTensor (Ptr{DLTensor} → value)
     H   = Int(unsafe_load(dlt.shape, 1))
     W   = Int(unsafe_load(dlt.shape, 2))
     C   = Int(unsafe_load(dlt.shape, 3))
 
-    # 5. wrap as non-owning view [C, W, H], then COPY before unmap
+    # non-owning [C,W,H] view; COPY before unmap (mapped mem dies on unmap)
     raw    = unsafe_wrap(Array, Ptr{UInt8}(dlt.data), (C, W, H); own=false)
-    pixels = copy(raw)   # own the data BEFORE we unmap
+    pixels = copy(raw)
 
-    # 6. unmap (NOSYNC — CPU, no CUDA stream needed)
-    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)
+    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)  # NOSYNC: CPU map
 
     return (pixels, W, H)
 end
@@ -251,41 +238,35 @@ end
 # ------------------------------------------------------------------
 
 """
-    map_cpu_f32(sr::StepResult, name) -> (pixels::Array{Float32,3}, W::Int, H::Int)
+    map_cpu_f32(sr::StepResult, name) -> (pixels::Array{Float32,3}, W, H)
 
-Like `map_cpu` but returns a `Float32` array suitable for the HDR tonemap path.
-`HdrColor` is kDLFloat/16 on the wire; we read via `Ptr{Float16}` and
-convert to Float32 before returning (copy happens before unmap).
-
-`pixels` is a 3-D `Array{Float32}` with layout `[C=4, W, H]` (channel-fastest).
+Like `map_cpu` but for the HDR path: `HdrColor` is kDLFloat/16 on the wire; read
+via `Ptr{Float16}` and convert to Float32 (copy before unmap).  `pixels` is
+`[C=4, W, H]` (channel-fastest).
 """
 function map_cpu_f32(sr::StepResult, name::AbstractString)
     sr.r.alive || error("map_cpu_f32 on a closed Renderer")
-    # 1. fetch
     outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
 
-    # 2. walk the output tree
     h = _find_var(outs[], name)
 
-    # 3. map to CPU
     mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
     ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
 
-    # 4. decode the DLTensor (shape = [H, W, C], dtype = kDLFloat/16/1 for HdrColor)
+    # DLTensor: shape [H,W,C], dtype kDLFloat/16/1 (HdrColor)
     t0  = unsafe_load(ro[].tensors, 1)
     dlt = unsafe_load(t0.dl)
     H   = Int(unsafe_load(dlt.shape, 1))
     W   = Int(unsafe_load(dlt.shape, 2))
     C   = Int(unsafe_load(dlt.shape, 3))
 
-    # 5. wrap as non-owning Float16 view [C, W, H]; convert to Float32 and copy before unmap.
+    # non-owning Float16 [C,W,H] view; Float16→Float32 + copy before unmap
     raw16  = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
-    pixels = Float32.(raw16)   # own the data BEFORE we unmap; Float16 → Float32
+    pixels = Float32.(raw16)
 
-    # 6. unmap (NOSYNC — CPU, no CUDA stream needed)
-    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)
+    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)  # NOSYNC: CPU map
 
     return (pixels, W, H)
 end
@@ -293,76 +274,66 @@ end
 # ------------------------------------------------------------------
 # map_cuda / unmap_cuda — map a render var as LINEAR CUDA device memory (M6.A)
 #
-# Unlike map_cpu (which copies then unmaps inside the call), map_cuda MAPS and
-# RETURNS the live device pointer + handles WITHOUT copying or unmapping.  The
-# caller (the CUDA package extension, Task 4) wraps `data` as a CuArray{Float16},
-# tonemaps float16→RGBA8 on-device straight into the GLMakie texture, then calls
-# `unmap_cuda` (gated on a copy-done event so ovrtx does not reclaim the buffer
-# mid-copy).  NO `using CUDA` here — CUDA is a weakdep; these are pure LibOVRTX
-# ccalls returning RAW handles (Ptr / Csize_t).
+# Unlike map_cpu (copy+unmap inside the call), map_cuda MAPS and RETURNS the live
+# device ptr + handles WITHOUT copy/unmap.  The caller (CUDA pkg ext) wraps `data`
+# as CuArray{Float16}, tonemaps on-device into the GLMakie texture, then calls
+# unmap_cuda gated on a copy-done event (else ovrtx reclaims the buffer mid-copy).
+# No `using CUDA` (weakdep) — pure LibOVRTX ccalls returning RAW handles.
 #
-# Map mode is OVRTX_MAP_DEVICE_TYPE_CUDA (=2, LINEAR device memory → a CUdeviceptr),
-# NOT CUDA_ARRAY (=3, an opaque CUarray).  HdrColor is kDLFloat/16, and the tonemap
-# step needs LINEAR memory that `unsafe_wrap` can wrap as a CuArray — an opaque
-# CUarray cannot be wrapped.  REPL-verified on an RTX A5000: mode 2 yields a
-# non-null kDLCUDA float16 [H,W,C=4] device pointer + a non-zero wait-event.
-# (Co-loading CUDA.jl + ovrtx requires JULIA_CUDA_USE_COMPAT=false so both share
-# the system libcuda — see test/helpers.jl.)
+# Map mode OVRTX_MAP_DEVICE_TYPE_CUDA (=2, LINEAR → CUdeviceptr), NOT CUDA_ARRAY
+# (=3, opaque CUarray): the tonemap needs LINEAR mem `unsafe_wrap` can wrap as a
+# CuArray (an opaque CUarray cannot).  HdrColor is kDLFloat/16.  Verified RTX
+# A5000: mode 2 → non-null kDLCUDA float16 [H,W,C=4] ptr + non-zero wait-event.
+# (Co-loading CUDA.jl + ovrtx needs JULIA_CUDA_USE_COMPAT=false to share the
+# system libcuda — see test/helpers.jl.)
 # ------------------------------------------------------------------
 
 """
     map_cuda(sr::StepResult, name="HdrColor")
-        -> (data::Ptr{Cvoid}, W::Int, H::Int, C::Int, map_handle, wait_event::Csize_t)
+        -> (data::Ptr{Cvoid}, W, H, C, map_handle, wait_event::Csize_t)
 
-Fetch the step results from `sr`, find the render var `name`, and map it as
-**linear CUDA device memory** (mode `OVRTX_MAP_DEVICE_TYPE_CUDA`).  Returns RAW
-handles — does **not** copy and does **not** unmap:
+Fetch results, find `name`, map as LINEAR CUDA device memory
+(OVRTX_MAP_DEVICE_TYPE_CUDA).  Returns RAW handles — does NOT copy or unmap:
 
-- `data`       — a live `CUdeviceptr` (cast to `Ptr{Cvoid}`); for `HdrColor` it
-                 points at `C*W*H` `Float16`s laid out `[C, W, H]` (channel-fastest).
-- `(W, H, C)`  — DLTensor dims (shape is `[H, W, C]`; `C == 4` for an RGBA frame).
-- `map_handle` — the ovrtx map handle; pass it to `unmap_cuda`.
-- `wait_event` — the `CUevent` (as `Csize_t`, may be 0) to `cuStreamWaitEvent` on
-                 BEFORE reading the buffer.
+- `data`       — live `CUdeviceptr` (as `Ptr{Cvoid}`); for `HdrColor`, `C*W*H`
+                 `Float16`s laid out `[C, W, H]` (channel-fastest).
+- `(W, H, C)`  — DLTensor dims (shape `[H, W, C]`; `C == 4` for RGBA).
+- `map_handle` — pass to `unmap_cuda`.
+- `wait_event` — `CUevent` (as `Csize_t`, may be 0) to wait on BEFORE reading.
 
-The buffer stays mapped and live until the caller calls
-`unmap_cuda(sr, map_handle; ...)`.  No CUDA.jl dependency — the CUDA package
-extension (Task 4) wraps `data` as a `CuArray` and `wait_event` as a `CuEvent`.
+Buffer stays mapped until `unmap_cuda`.  No CUDA.jl dep — the CUDA pkg ext wraps
+`data` as a `CuArray` and `wait_event` as a `CuEvent`.
 """
 function map_cuda(sr::StepResult, name::AbstractString="HdrColor")
     sr.r.alive || error("map_cuda on a closed Renderer")
-    # 1. fetch
     outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
 
-    # 2. walk the output tree
     h = _find_var(outs[], name)
 
-    # 3. map as LINEAR CUDA device memory (mode 2) — no copy, no unmap
+    # map as LINEAR CUDA device memory (mode 2) — no copy, no unmap
     mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CUDA, Csize_t(0)))
     ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output(cuda)")
 
-    # 4. decode the DLTensor (shape = [H, W, C], dtype = kDLFloat/16/1 for HdrColor)
+    # DLTensor: shape [H,W,C], dtype kDLFloat/16/1 (HdrColor); CUdeviceptr in .data
     t0  = unsafe_load(ro[].tensors, 1)          # ovrtx_render_var_tensor_t
     dlt = unsafe_load(t0.dl)                     # DLTensor (CUdeviceptr in .data)
     H   = Int(unsafe_load(dlt.shape, 1))
     W   = Int(unsafe_load(dlt.shape, 2))
     C   = Int(unsafe_load(dlt.shape, 3))
 
-    # 5. return RAW handles; caller reads on-device then calls unmap_cuda.
+    # RAW handles; caller reads on-device then calls unmap_cuda
     return (Ptr{Cvoid}(dlt.data), W, H, C, ro[].map_handle, ro[].cuda_sync.wait_event)
 end
 
 """
     unmap_cuda(sr::StepResult, map_handle; stream=Csize_t(0), done_event=Csize_t(0))
 
-Release a `map_cuda` mapping.  Constructs an `ovrtx_cuda_sync_t(stream, done_event)`
-(field order is **stream first, then the event**) so ovrtx waits for `done_event`
-— a `CUevent` the caller records after its on-device copy — on `stream` before
-reclaiming the buffer (spike §3: event-gated unmap, else ovrtx reclaims mid-copy).
-The default `(0, 0)` is `NOSYNC` (synchronous).  No-op if the Renderer is already
-closed.
+Release a `map_cuda` mapping.  Builds `ovrtx_cuda_sync_t(stream, done_event)` (field
+order stream, THEN event) so ovrtx waits for `done_event` (recorded after the
+caller's on-device copy) on `stream` before reclaiming the buffer — else it reclaims
+mid-copy.  Default `(0,0)` = NOSYNC (synchronous).  No-op if the Renderer is closed.
 """
 function unmap_cuda(sr::StepResult, map_handle; stream::Csize_t = Csize_t(0), done_event::Csize_t = Csize_t(0))
     sync = LibOVRTX.ovrtx_cuda_sync_t(stream, done_event)
@@ -373,41 +344,34 @@ end
 # ==================================================================
 # Picking — M6.B native ray-query pick (CPU-only)
 #
-# `enqueue_pick_query` registers a pixel-rect pick for the NEXT `step!` on a
-# product; that step yields a synthetic `ovrtx_pick_hit` render var (CPU-mapped
-# ONLY — an ovrtx restriction; the payload is tiny so there is no device path).
-# `read_pick_hit` decodes its uint32 params (magic/version/hitCount) and named
-# tensors into `PickHit`s; `path_resolver`/`resolve_prim_path` turn a hit's
-# `primpath_id` into the authored prim-path string via the path-dictionary vtable.
+# `enqueue_pick_query` registers a pixel-rect pick for the NEXT `step!` on a product;
+# that step yields a synthetic `ovrtx_pick_hit` render var (CPU-mapped ONLY — ovrtx
+# restriction; payload is tiny, no device path).  `read_pick_hit` decodes its uint32
+# params (magic/version/hitCount) + named tensors into `PickHit`s; `resolve_prim_path`
+# turns a hit's `primpath_id` into a prim-path string via the path-dictionary vtable.
 #
-# ABI VERIFIED in a REPL against references/ovrtx/tests/docs/c/
-# test_picking_selection.cpp + helpers.h (docs_resolve_primpath):
-#   - params: `ovrtx_render_var_param_t` carries a VALUE `name::ovx_string_t` and
-#     a VALUE `dl::DLTensor`; each pick param is a scalar kDLUInt/32 (read at
-#     p.dl.data).  (C `find_param` uses `param.name` / `&param.dl`.)
-#   - tensors: `ovrtx_render_var_tensor_t` carries a POINTER `name::Ptr{ovx_string_t}`
-#     and a POINTER `dl::Ptr{DLTensor}` — deref both.  (C `find_tensor` uses
-#     `*tensor.name` / `tensor.dl`.)  Verified dtypes/shapes (n = hitCount):
+# ABI VERIFIED (REPL vs references/.../test_picking_selection.cpp + helpers.h):
+#   - params:  `ovrtx_render_var_param_t` carries VALUE name::ovx_string_t + VALUE
+#              dl::DLTensor; each pick param is a scalar kDLUInt/32 (read at p.dl.data).
+#   - tensors: `ovrtx_render_var_tensor_t` carries POINTER name::Ptr{ovx_string_t} +
+#              POINTER dl::Ptr{DLTensor} — deref BOTH.  dtypes/shapes (n = hitCount):
 #       primPath           kDLUInt/64  ndim=1 [n]
 #       objectType         kDLUInt/32  ndim=1 [n]
 #       geometryInstanceId kDLUInt/64  ndim=1 [n]   ← 64-bit on the wire, NOT 32
 #       worldPositionM     kDLFloat/64 ndim=2 [n,3] row-major
 #       worldNormal        kDLFloat/32 ndim=2 [n,3] row-major
-#   - resolution: `path_dictionary_vtable_t.get_tokens_from_paths` /
-#     `.get_strings_from_tokens` are `Ptr{Cvoid}` fn-pointers called through
-#     `@ccall $fp(...)`.  `out_tokens_per_path` points INTO the caller's token
-#     buffer, so the buffer is `GC.@preserve`d across BOTH calls.
+#   - resolution: vtable get_tokens_from_paths / get_strings_from_tokens are
+#     `Ptr{Cvoid}` fn-ptrs called via `@ccall $fp(...)`; out_tokens points INTO the
+#     caller's token buffer → that buffer is GC.@preserve'd across BOTH calls.
 # ==================================================================
 
 """
-    enqueue_pick_query(r::Renderer, product, (left,top,right,bottom); flags=UInt32(0)) -> Nothing
+    enqueue_pick_query(r, product, (left,top,right,bottom); flags=UInt32(0)) -> Nothing
 
-Register a pick query over the pixel rect (left/top inclusive, right/bottom
-exclusive, in RenderProduct pixel coords) for the NEXT `step!` that renders
-`product`.  Synchronous (enqueue + wait, mirroring the C picking reference which
-waits on the enqueue op before stepping), so the `product` bytes only need to
-outlive this call.  Read the result after the next `step!` with `read_pick_hit`.
-If several queries are enqueued for one product before a step, the last wins.
+Register a pick over the pixel rect (left/top inclusive, right/bottom exclusive, in
+RenderProduct pixel coords) for the NEXT `step!` on `product`.  Synchronous (enqueue
++ wait), so `product`'s bytes need only outlive this call.  Read via `read_pick_hit`
+after the next `step!`.  Last query before a step wins.
 """
 function enqueue_pick_query(r::Renderer, product::AbstractString, rect::NTuple{4,Int};
                             flags::UInt32 = UInt32(0))
@@ -424,17 +388,16 @@ end
 """
     PickHit
 
-One viewport pick hit.  `primpath_id` is an `ovx_primpath_t` id — resolve it to a
-prim-path string with `resolve_prim_path`.  `instance_id` is the wire
-`geometryInstanceId` (a 64-bit id; `0` for a single non-instanced geometry).
-`world_position`/`normal` are in world space (the C reference asserts only that
-they are finite — for a prim at the world origin they read `(0,0,0)`).
+One viewport pick hit.  `primpath_id` (an `ovx_primpath_t` id) → resolve with
+`resolve_prim_path`.  `instance_id` is the wire `geometryInstanceId` (64-bit; 0 for a
+single non-instanced geometry).  `world_position`/`normal` are world-space (finite;
+`(0,0,0)` for a prim at the origin).
 """
 const PickHit = NamedTuple{(:primpath_id, :object_type, :instance_id, :world_position, :normal),
                            Tuple{UInt64, UInt32, UInt64, NTuple{3,Float64}, NTuple{3,Float32}}}
 
-# Find a pick-hit PARAM by name and read its scalar uint32 value.  Params carry a
-# VALUE name + VALUE dl (verified), distinct from tensors.
+# Find a pick-hit PARAM by name, read its scalar uint32.  Params carry VALUE name +
+# VALUE dl (distinct from tensors' POINTER name/dl).
 function _pick_param_u32(out::LibOVRTX.ovrtx_render_var_output_t, name::AbstractString)
     for i in 1:out.num_params
         p = unsafe_load(out.params, i)               # ovrtx_render_var_param_t (by value)
@@ -443,8 +406,8 @@ function _pick_param_u32(out::LibOVRTX.ovrtx_render_var_output_t, name::Abstract
     error("pick-hit param '$name' not found")
 end
 
-# Find a pick-hit TENSOR by name and return its DLTensor (deref'd).  Tensors carry
-# a POINTER name + POINTER dl (verified), distinct from params.
+# Find a pick-hit TENSOR by name, return its deref'd DLTensor.  Tensors carry POINTER
+# name + POINTER dl (distinct from params' VALUE name/dl).
 function _pick_tensor(out::LibOVRTX.ovrtx_render_var_output_t, name::AbstractString)
     for i in 1:out.num_tensors
         t = unsafe_load(out.tensors, i)              # ovrtx_render_var_tensor_t (by value)
@@ -457,11 +420,10 @@ end
 """
     read_pick_hit(sr::StepResult) -> Vector{PickHit}
 
-Decode the `ovrtx_pick_hit` render var produced by the `step!` that consumed a
-prior `enqueue_pick_query`.  Returns one `PickHit` per hit; an EMPTY vector when
-no pick was enqueued for this step (the var is absent) or the magic/version
-header does not match.  CPU-only map (an ovrtx restriction); the map is always
-released (try/finally), never `map_cuda`.
+Decode the `ovrtx_pick_hit` var produced by the `step!` that consumed a prior
+`enqueue_pick_query`.  One `PickHit` per hit; EMPTY when no pick was enqueued (var
+absent) or the magic/version header mismatches.  CPU-only map (ovrtx restriction);
+always released (try/finally).
 """
 function read_pick_hit(sr::StepResult)::Vector{PickHit}
     sr.r.alive || error("read_pick_hit on a closed Renderer")
@@ -505,10 +467,9 @@ end
 """
     PathResolver
 
-Wraps the renderer's `path_dictionary_instance_t` (from `ovrtx_get_path_dictionary`)
-plus its loaded vtable, so `resolve_prim_path` can dispatch the two `static inline`
-path-dictionary functions through their raw function pointers.  Build one with
-`path_resolver(r)`; valid while the renderer's stage composition is unchanged.
+Wraps the renderer's `path_dictionary_instance_t` + loaded vtable so
+`resolve_prim_path` can call the two path-dictionary fns via raw fn-pointers.  Build
+with `path_resolver(r)`; valid while the stage composition is unchanged.
 """
 struct PathResolver
     pd::Base.RefValue{LibOVRTX.path_dictionary_instance_t}
@@ -518,8 +479,8 @@ end
 """
     path_resolver(r::Renderer) -> PathResolver
 
-Fetch the renderer's path dictionary and load its vtable (one fetch, reused for
-many `resolve_prim_path` calls).
+Fetch the renderer's path dictionary + load its vtable (one fetch, reused across many
+`resolve_prim_path` calls).
 """
 function path_resolver(r::Renderer)
     r.alive || error("path_resolver on a closed Renderer")
@@ -531,10 +492,10 @@ end
 """
     resolve_prim_path(pr::PathResolver, id::UInt64) -> String
 
-Resolve one `ovx_primpath_t` id (a `PickHit.primpath_id`) to its `/A/B/C` prim
-path via the path-dictionary vtable: `get_tokens_from_paths`, then per token
-`get_strings_from_tokens`, joining the pieces with `/`.  Returns `""` if the
-dictionary cannot resolve `id`.  Reimplements helpers.h `docs_resolve_primpath`.
+Resolve one `ovx_primpath_t` id (a `PickHit.primpath_id`) to its `/A/B/C` path via the
+vtable: `get_tokens_from_paths`, then per-token `get_strings_from_tokens`, joined by
+`/`.  Returns `""` if `id` is unresolvable.  Reimplements helpers.h
+`docs_resolve_primpath`.
 """
 function resolve_prim_path(pr::PathResolver, id::UInt64)::String
     ctx        = Ptr{Cvoid}(pr.pd[].context)
@@ -574,14 +535,12 @@ end
 # ------------------------------------------------------------------
 
 """
-    set_selection_outline_group!(r, prim_paths::Vector{String}, group_ids::Vector{UInt8}) -> Nothing
+    set_selection_outline_group!(r, prim_paths, group_ids::Vector{UInt8}) -> Nothing
 
-Write the per-prim `omni:selectionOutlineGroup` (uint8) attribute on each prim in
-`prim_paths` (parallel `group_ids`): group `0` clears, `1..255` assign a selection
-group.  One multi-prim `ovrtx_write_attribute` (kDLUInt/8, shape `[N]`, semantic
-NONE), mirroring the C `ovrtx_set_selection_outline_group` inline helper.  Group
-tracking works regardless of the renderer's selection-outline config; an outline
-is only DRAWN when that config was enabled at renderer creation.
+Write per-prim `omni:selectionOutlineGroup` (uint8) on each of `prim_paths` (parallel
+`group_ids`): 0 clears, 1..255 assign a group.  One multi-prim write (kDLUInt/8,
+shape [N], semantic NONE).  Group tracking is independent of the renderer's
+selection-outline config, but an outline is only DRAWN when that config is enabled.
 """
 function set_selection_outline_group!(r::Renderer, prim_paths::Vector{String}, group_ids::Vector{UInt8})
     r.alive || error("set_selection_outline_group! on a closed Renderer")
@@ -615,11 +574,11 @@ function set_selection_outline_group!(r::Renderer, prim_paths::Vector{String}, g
 end
 
 """
-    set_selection_group_styles!(r, group_ids::Vector{UInt8}, styles::Vector{ovrtx_selection_group_style_t}) -> Nothing
+    set_selection_group_styles!(r, group_ids::Vector{UInt8}, styles) -> Nothing
 
-Set the visual style (outline + fill RGBA, each in `[0,1]`) for each selection
-group id (parallel arrays).  Per-group colors are runtime state; global outline
-width and fill mode are renderer-creation config.  Synchronous (enqueue + wait).
+Set the visual style (outline + fill RGBA in [0,1]) per selection group id (parallel
+arrays).  Per-group colors are runtime state; global width + fill mode are
+renderer-creation config.  Synchronous.
 """
 function set_selection_group_styles!(r::Renderer, group_ids::Vector{UInt8},
                                      styles::Vector{LibOVRTX.ovrtx_selection_group_style_t})
@@ -638,14 +597,11 @@ end
 # ------------------------------------------------------------------
 
 """
-    render_hdr_to_array(r::Renderer, product::AbstractString; warmup=64, timeout_ns) -> Array{Float32,3}
+    render_hdr_to_array(r, product; warmup=64, timeout_ns) -> Array{Float32,3}
 
-Run `warmup` RT2 steps on `product`, then map the final frame's `HdrColor` output
-and return a `Float32` array of size `(C=4, W, H)` (channel-fastest).
-The caller is responsible for tonemapping (see `tonemap_frame`).
-
-`HdrColor` is a linear-space kDLFloat/16 output (verified via the C API tests);
-the data is converted to Float32 before return.
+Run `warmup` RT2 steps on `product`, then map the final `HdrColor` and return a
+Float32 `(C=4, W, H)` array (channel-fastest).  HdrColor is linear kDLFloat/16,
+converted to Float32.  Caller tonemaps (see `tonemap_frame`).
 """
 function render_hdr_to_array(r::Renderer, product::AbstractString;
                              warmup::Int=64, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
@@ -666,21 +622,11 @@ end
 # ------------------------------------------------------------------
 
 """
-    render_to_matrix(r::Renderer, product::AbstractString; warmup=64, timeout_ns) -> Matrix{RGBA{N0f8}}
+    render_to_matrix(r, product; warmup=64, timeout_ns) -> Matrix{RGBA{N0f8}}
 
-Run `warmup` RT2 steps on `product` (RT2 needs many samples to converge),
-then map the final frame's `LdrColor` output to a `Matrix{RGBA{N0f8}}` of
-size `(H, W)`.  `timeout_ns` is passed to each `step!` call; it defaults to
-the infinite-wait constant (preserving back-compat) and is set to a bounded
-value by the M5 interactive camera loop.
-
-Warmup frames are destroyed immediately.  The final `StepResult` is closed
-after the pixel copy.
-
-Orientation: the returned matrix is top-left-origin (row 1 = top of the image,
-right-side-up).  No vertical flip is applied.  Verified empirically by
-`test/m1_orientation_test.jl` (red_row ≈ 103 < blue_row ≈ 306 for boxes at
-world +Z vs −Z).
+Run `warmup` RT2 steps (RT2 needs many samples to converge), then map the final
+`LdrColor` to a `Matrix{RGBA{N0f8}}` (H, W).  Warmup frames are freed immediately.
+Top-left origin (row 1 = top), NO y-flip — verified by test/m1_orientation_test.jl.
 """
 function render_to_matrix(r::Renderer, product::AbstractString;
                          warmup::Int=64, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
@@ -703,8 +649,8 @@ end
 """
     reset!(r::Renderer; time=0.0)
 
-Enqueue and wait for an RT2 accumulation reset.  Must be called after any
-geometry or camera change so the path-tracer starts fresh.
+Enqueue + wait an RT2 accumulation reset.  Call after any geometry/camera change so
+the path-tracer restarts fresh.
 """
 function reset!(r::Renderer; time::Float64=0.0)
     enqueue_wait(r, LibOVRTX.ovrtx_reset(r.ptr, time), "reset")
@@ -716,8 +662,8 @@ end
 # ------------------------------------------------------------------
 
 # Write one attribute (fixed-size or array) to `prim` via a DLTensor over `data`.
-# `data` must be a contiguous, OWNED Vector whose bytes back the DLTensor; the
-# caller preprocesses (transpose/flatten for xform, dtype inference for arrays).
+# `data` must be a contiguous OWNED Vector backing the DLTensor; the caller
+# preprocesses (transpose/flatten for xform, dtype inference for arrays).
 function _write_attribute!(r::Renderer, prim::AbstractString, attr_name::AbstractString,
                            dtype::LibOVRTX.DLDataType, is_array::Bool, semantic,
                            data::AbstractVector, shape::Vector{Int64})
@@ -771,26 +717,22 @@ end
 # ------------------------------------------------------------------
 
 """
-    write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Float64})
+    write_xform!(r::Renderer, prim, mat::AbstractMatrix{Float64})
 
-Write a 4×4 row-major transform matrix to the `omni:xform` attribute of `prim`.
-Translation lives in the last row (row 4, columns 1–3).
-
-Reimplements the static-inline `ovrtx_set_xform_mat` in pure Julia.
-The matrix data AND the prim string are preserved across the write + wait via
-`GC.@preserve`.
+Write a 4×4 row-major transform to `prim`'s `omni:xform` (translation in the last
+row).  Reimplements the `ovrtx_set_xform_mat` inline; `mat` + `prim` GC.@preserve'd
+across the write + wait.
 """
 function write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Float64})
     @assert size(mat) == (4, 4) "write_xform! requires a 4×4 matrix, got $(size(mat))"
 
-    # Row-major 4×4 flat array (16 elements).  Julia matrices are column-major,
-    # so we transpose to get row-major order as expected by ovrtx.
-    M = vec(collect(mat'))  # length-16 Vector{Float64}, row-major
+    # Julia is column-major; transpose to row-major (16 flat Float64) for ovrtx.
+    mat_rowmajor = vec(collect(mat'))
 
-    # dtype: kDLFloat / 64 bits / lanes=16 → encodes the 4×4 as a single element
+    # dtype kDLFloat/64/lanes=16 → the 4×4 as a single element
     dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(64), UInt16(16))
 
-    _write_attribute!(r, prim, "omni:xform", dtype, false, LibOVRTX.OVRTX_SEMANTIC_XFORM_MAT4x4, M, Int64[1])
+    _write_attribute!(r, prim, "omni:xform", dtype, false, LibOVRTX.OVRTX_SEMANTIC_XFORM_MAT4x4, mat_rowmajor, Int64[1])
     return nothing
 end
 
@@ -799,22 +741,13 @@ end
 # ------------------------------------------------------------------
 
 """
-    bind_material!(r::Renderer, geom_prim::AbstractString, material_prim::AbstractString)
+    bind_material!(r::Renderer, geom_prim, material_prim)
 
-Write the USD `material:binding` relationship on the GEOMETRY prim `geom_prim`,
-pointing it at the material prim `material_prim` (an absolute prim path, e.g.
-`/World/Looks/Mat_42`).  The material prim MUST already exist on the open stage.
-
-`material:binding` is a USD relationship — a single-element array of PATHS per prim —
-so this mirrors the C `ovrtx_set_path_attributes` helper: one `ovx_string_t` element
-(the material path, 128 bits = ptr+len) with dtype `{kDLUInt,128,1}`, `is_array=true`,
-`shape=[1]`, and the `OVRTX_SEMANTIC_PATH_STRING` semantic.  Mechanically the same
-shape as the `visibility` TOKEN_STRING write, but `is_array=true` (a relationship array)
-and the PATH semantic.
-
-The material-path `String` is preserved across the FFI call + wait (the `ovx_string_t`
-references its bytes), exactly like the token-string write.  As with every open-stage
-edit, call `OV.reset!` after binding to restart RT2 accumulation before stepping.
+Write the USD `material:binding` relationship on `geom_prim` → `material_prim` (an
+absolute path, e.g. `/World/Looks/Mat_42`, which MUST already exist on the stage).
+Mirrors `ovrtx_set_path_attributes`: one `ovx_string_t` path element (128-bit
+ptr+len), dtype {kDLUInt,128,1}, is_array=true, shape [1], OVRTX_SEMANTIC_PATH_STRING.
+`material_prim` is GC.@preserve'd across the call.  Call `OV.reset!` after.
 """
 function bind_material!(r::Renderer, geom_prim::AbstractString, material_prim::AbstractString)
     r.alive || error("bind_material! on a closed Renderer")
@@ -836,22 +769,12 @@ end
     write_shader_input!(r::Renderer, shader_prim::AbstractString, name::AbstractString,
                         value::Union{Float32,NTuple{3,Float32}})
 
-Live re-write of an OmniPBR shader input `inputs:<name>` on the OPEN stage `shader_prim`
-(e.g. `/World/Looks/Mat_<id>/Shader`) — the M3.4 material-edit diff path.  Mirrors the
-M0 `_write_attribute!`/`write_xform!` fixed-size pattern:
-
-- a `Float32` scalar (`metallic_constant`, `reflection_roughness_constant`,
-  `opacity_constant`, …) → `dtype = {kDLFloat,32,1}`, `is_array=false`, `data=[v]`,
-  `shape=[1]`.
-- a `color3f` `NTuple{3,Float32}` (`diffuse_color_constant`, `emissive_color`) →
-  `dtype = {kDLFloat,32,3}` (3 lanes, like the xform's 16), `is_array=false`,
-  `data=[r,g,b]`, `shape=[1]`.
-
-The backing `Float32` vector is `GC.@preserve`d across the write + wait.  The
-material-editor render-test proves `inputs:diffuse_color_constant` (and shader inputs
-generally) are live-writable on an OPEN stage.  As with every open-stage edit, the
-caller restarts RT2 accumulation (one `OV.reset!` per changed frame — the M2 contract);
-this function does NOT reset.
+Live re-write of OmniPBR `inputs:<name>` on the OPEN stage `shader_prim` (e.g.
+`/World/Looks/Mat_<id>/Shader`) — the M3.4 material-edit path.
+- `Float32` scalar → dtype {kDLFloat,32,1}, data=[v].
+- `color3f` `NTuple{3,Float32}` → dtype {kDLFloat,32,3} (3 lanes), data=[r,g,b].
+Both is_array=false, shape=[1]; the backing Float32 vector is GC.@preserve'd.  Does
+NOT reset — caller restarts RT2 accumulation (one `OV.reset!` per changed frame).
 """
 function write_shader_input!(r::Renderer, shader_prim::AbstractString, name::AbstractString,
                              value::Union{Float32,NTuple{3,Float32}})
@@ -875,10 +798,9 @@ end
 # write_array_attribute! — write an array attribute (e.g. points)
 # ------------------------------------------------------------------
 
-# Float32-aggregate lane count: `Point3f`/`Vec3f` → 3, `Point2f` → 2, etc.
-# 0 for anything that is NOT a fixed-size Float32 aggregate (so the scalar paths or
-# the error branch handle it).  Detected structurally (`eltype(ET) === Float32`) so
-# OV.jl needs no GeometryBasics/StaticArrays import.
+# Float32-aggregate lane count: Point3f/Vec3f → 3, Point2f → 2, etc.; 0 if ET is not
+# a fixed-size Float32 aggregate.  Structural (`eltype(ET) === Float32`) → no
+# GeometryBasics/StaticArrays import needed.
 function _f32_lanes(::Type{ET}) where {ET}
     (isconcretetype(ET) && isbitstype(ET) && eltype(ET) === Float32) || return 0
     n, r = divrem(sizeof(ET), sizeof(Float32))
@@ -886,28 +808,21 @@ function _f32_lanes(::Type{ET}) where {ET}
 end
 
 """
-    write_array_attribute!(r::Renderer, prim::AbstractString,
-                           name::AbstractString, arr::AbstractArray)
+    write_array_attribute!(r::Renderer, prim, name, arr::AbstractArray)
 
-Write an array attribute (e.g. `points`) to `prim`.
-The element DLDataType is inferred from the Julia element type of `arr`.
-
-`Vector{Point3f}` / `Vector{Vec3f}` (and other fixed-size `Float32` aggregates) are
-written zero-copy as a multi-lane `kDLFloat/32` tensor: `reinterpret(Float32, …)`
-flattens the components and the DLTensor carries `lanes = sizeof(eltype)/4` with
-`shape = [length(arr)]` (one element per point), so `point3f[]` round-trips
-correctly (M2 hot-path needs point arrays).
-
-The array data, prim string, and attribute name are preserved across the
-write + wait via `GC.@preserve`.
+Write an array attribute (e.g. `points`) to `prim`; element DLDataType inferred from
+`eltype(arr)`.  Fixed-size Float32 aggregates (`Point3f`/`Vec3f`/…) go zero-copy as a
+multi-lane kDLFloat/32 tensor: `reinterpret(Float32,·)` flattens components, lanes =
+sizeof(eltype)/4, shape = [length(arr)] (one element per point).  Array + prim + name
+GC.@preserve'd across the write + wait.
 """
 function write_array_attribute!(r::Renderer, prim::AbstractString,
                                 name::AbstractString, arr::AbstractArray)
     ET    = eltype(arr)
     lanes = _f32_lanes(ET)
     if lanes >= 2
-        # Float32 aggregate (Point3f/Vec3f/…): reinterpret components to a flat,
-        # owned Float32 vector; one tensor element per aggregate (multi-lane).
+        # Float32 aggregate: reinterpret components to a flat owned Float32 vector;
+        # one tensor element per aggregate (multi-lane).
         src   = arr isa Vector ? arr : collect(arr)
         data  = collect(reinterpret(Float32, src))   # length = lanes * length(arr)
         dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(lanes))
@@ -944,14 +859,12 @@ end
 # ------------------------------------------------------------------
 
 """
-    add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::AbstractString)
-        -> ovrtx_usd_handle_t
+    add_usd_reference!(r::Renderer, usda, prim_path) -> ovrtx_usd_handle_t
 
-Add a USD layer (given as an in-memory USDA string) to the running stage under the
-prefix `prim_path`.  Returns an opaque handle for later `remove_usd!` calls.
-
-Both strings are converted to owned `String`s and preserved across the FFI call and
-the wait (the `ovx_string_t` structs reference Julia heap memory).
+Add a USD layer (in-memory USDA string) to the running stage under `prim_path`;
+return an opaque handle for `remove_usd!`.  Both strings are converted to owned
+`String`s and GC.@preserve'd across the call + wait (the `ovx_string_t`s reference
+Julia heap memory).
 """
 function add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::AbstractString)
     r.alive || error("add_usd_reference! on a closed Renderer")
@@ -980,25 +893,21 @@ end
 # ==================================================================
 # Binding — persistent attribute bindings (M2.4 hot path)
 #
-# `ovrtx_create_attribute_binding` locks a prim + attribute name + element type so
-# repeated per-frame writes skip rebuilding the binding descriptor.  Two hot-path
-# tiers (ARCHITECTURE §6), both VALIDATED on a referenced plot prim by the M2.4
-# binding spike (omni:xform map round-trip byte-exact; points write-through-handle
-# scaled + reverted exactly):
-#   - fixed-size (`omni:xform`): `map_binding`/`unmap!` → ZERO-COPY write straight
-#     into ovrtx's internal buffer (created with OVRTX_BINDING_FLAG_OPTIMIZE).
-#   - array (`points`): `write_binding!` copies a fresh tensor through the handle.
+# `ovrtx_create_attribute_binding` locks prim + attr name + element type so per-frame
+# writes skip rebuilding the descriptor.  Two tiers (both validated by the M2.4 spike):
+#   - fixed-size (`omni:xform`): map_binding/unmap! → ZERO-COPY write into ovrtx's
+#     internal buffer (created with OVRTX_BINDING_FLAG_OPTIMIZE).
+#   - array (`points`): write_binding! copies a fresh tensor through the handle.
 #
-# GC discipline mirrors `_write_attribute!`: the prim path + attribute name `String`s
-# are retained on the struct so they stay rooted for the binding's lifetime, and
-# every FFI buffer/desc is `GC.@preserve`d across the ccall + wait.
+# GC: the prim path + attr name `String`s are retained on the struct (rooted for the
+# binding's lifetime); every FFI buffer/desc is GC.@preserve'd across the ccall + wait.
 # ==================================================================
 
 """
     Binding
 
-A persistent ovrtx attribute binding (handle from `ovrtx_create_attribute_binding`).
-Reused across frames; released by `destroy!` (finalizer is a backstop).  `map_handle`
+A persistent ovrtx attribute binding (handle from `ovrtx_create_attribute_binding`),
+reused across frames; release with `destroy!` (finalizer is a backstop).  `map_handle`
 is non-zero only while a `map_binding`/`unmap!` pair is outstanding.
 """
 mutable struct Binding
@@ -1013,9 +922,9 @@ mutable struct Binding
     alive::Bool
 end
 
-# A zeroed `ovrtx_binding_desc_t`; it is IGNORED whenever `binding_handle != 0`
-# (the header: "If binding_handle is non-zero then it will be used, otherwise
-# binding_desc will be used"), so every map/write through a handle passes this.
+# A zeroed `ovrtx_binding_desc_t`, IGNORED whenever binding_handle != 0 (header: "If
+# binding_handle is non-zero it will be used, otherwise binding_desc") — so every
+# map/write through a handle passes this.
 _empty_binding_desc() = LibOVRTX.ovrtx_binding_desc_t(
     LibOVRTX.ovrtx_prim_list_t(Ptr{LibOVRTX.ovx_string_t}(C_NULL), Csize_t(0)),
     LibOVRTX.ovx_primpath_list_t(0),
@@ -1032,10 +941,9 @@ _desc_or_handle(b::Binding) = LibOVRTX.ovrtx_binding_desc_or_handle_t(_empty_bin
                    optimize=false) -> Binding
 
 Create a persistent binding locking `prim`'s `name` attribute to `dtype` (lane-based:
-`{kDLFloat,64,16}` for a 4×4 double, `{kDLFloat,32,3}` for `point3f[]`).  `array=true`
-binds a variable-length array attribute; `optimize=true` sets
-`OVRTX_BINDING_FLAG_OPTIMIZE` for the primary high-volume hot binding.  Synchronous
-(enqueue + wait); the prim list strings are preserved across the call.
+{kDLFloat,64,16} for a 4×4 double, {kDLFloat,32,3} for point3f[]).  `array=true` binds
+a variable-length array; `optimize=true` sets OVRTX_BINDING_FLAG_OPTIMIZE for the main
+hot binding.  Synchronous; prim strings GC.@preserve'd.
 """
 function create_binding(r::Renderer, prim::AbstractString, name::AbstractString,
                         dtype::LibOVRTX.DLDataType; array::Bool=false,
@@ -1067,9 +975,8 @@ end
 """
     map_binding(b::Binding; device=kDLCPU, device_id=0) -> Ptr{Cvoid}
 
-Map the binding's internal buffer for a ZERO-COPY write; returns the data pointer
-(valid ONLY until `unmap!`).  Stashes the map handle on `b`.  `ovrtx_map_attribute`
-is synchronous (no enqueue/wait).
+Map the binding's internal buffer for a ZERO-COPY write; return the data pointer
+(valid ONLY until `unmap!`).  Stashes the map handle on `b`.  Synchronous.
 """
 function map_binding(b::Binding; device=LibOVRTX.kDLCPU, device_id::Integer=0)
     b.alive || error("map_binding on a destroyed Binding")
@@ -1088,8 +995,8 @@ end
 """
     unmap!(b::Binding)
 
-Commit + release a mapping from `map_binding` (async unmap + wait).  No-op when not
-mapped or when the Renderer is already closed.
+Commit + release a `map_binding` mapping (async unmap + wait).  No-op when not mapped
+or the Renderer is closed.
 """
 function unmap!(b::Binding)
     b.map_handle == 0 && return nothing
@@ -1102,19 +1009,18 @@ end
 """
     write_mapped_xform!(b::Binding, mat::AbstractMatrix{Float64})
 
-ZERO-COPY write of a 4×4 transform through the MAPPED fixed-size binding `b`:
-map → store the 16 row-major doubles into the internal buffer → unmap.  `mat` is in
-USD row-vector form (translation in the last row), identical to `write_xform!`; the
-16 doubles written are `vec(collect(mat'))`, so it round-trips byte-for-byte.
+ZERO-COPY 4×4 transform write through the MAPPED fixed-size binding `b`: map → store
+16 row-major doubles → unmap.  `mat` is USD row-vector form (translation last row),
+identical to `write_xform!`; round-trips byte-for-byte.
 """
 function write_mapped_xform!(b::Binding, mat::AbstractMatrix{Float64})
     @assert size(mat) == (4, 4) "write_mapped_xform! requires a 4×4 matrix, got $(size(mat))"
-    M   = vec(collect(mat'))                      # 16 row-major Float64
+    mat_rowmajor = vec(collect(mat'))             # 16 row-major Float64
     ptr = Ptr{Cdouble}(map_binding(b))
     try
-        GC.@preserve M begin
+        GC.@preserve mat_rowmajor begin
             @inbounds for i in 1:16
-                unsafe_store!(ptr, M[i], i)
+                unsafe_store!(ptr, mat_rowmajor[i], i)
             end
         end
     finally
@@ -1127,9 +1033,9 @@ end
     write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
 
 Write `data` through the persistent binding handle (array tier).  `data` is a
-contiguous, owned vector whose bytes match `b.dtype` (e.g. a flattened `Float32`
-buffer for a `point3f[]` binding); `shape` is the per-prim element count
-(`[npoints]`).  Mirrors `_write_attribute!`'s `GC.@preserve` discipline.
+contiguous, owned vector matching `b.dtype` (e.g. flattened Float32 for point3f[]);
+`shape` is the per-prim element count ([npoints]).  GC.@preserve discipline mirrors
+`_write_attribute!`.
 """
 function write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
     b.alive || error("write_binding! on a destroyed Binding")
@@ -1153,8 +1059,7 @@ end
     destroy!(b::Binding)
 
 Release the persistent binding (`ovrtx_destroy_attribute_binding`).  Idempotent;
-unmaps first if still mapped; a no-op once the Renderer is closed (the GPU pool is
-already freed).
+unmaps first if mapped; no-op once the Renderer is closed (GPU pool already freed).
 """
 function destroy!(b::Binding)
     b.alive || return nothing

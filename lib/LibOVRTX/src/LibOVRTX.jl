@@ -3,16 +3,16 @@ using CEnum
 import Libdl
 import Libglvnd_jll
 
-# Resolved at RUNTIME in __init__ so OVRTX_LIBRARY_PATH is honored, not baked at precompile.
-# The generated `@ccall libovrtx.sym(...)` lines reference this binding unchanged.
+# Resolved at RUNTIME in __init__ so OVRTX_LIBRARY_PATH is honored (not baked at
+# precompile); generated `@ccall libovrtx.sym(...)` lines use this binding as-is.
 global libovrtx::String = "libovrtx-dynamic.so"
 const _OVRTX_HANDLE  = Ref{Ptr{Cvoid}}(C_NULL)
 const _OPENGL_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
 function __init__()
-    # libOpenGL FIRST + GLOBAL so ovrtx's usd_resolver plugin resolves GL symbols by soname.
-    # Libglvnd_jll.libOpenGL_path has SONAME libOpenGL.so.0, so ovrtx's later by-soname dlopen
-    # finds this already-loaded image. Env override allows a system/driver libOpenGL if desired.
+    # Load libOpenGL FIRST + GLOBAL (soname libOpenGL.so.0) so ovrtx's usd_resolver plugin
+    # resolves GL symbols against this image via its later by-soname dlopen.  Env override
+    # permits a system/driver libOpenGL.
     libgl = get(ENV, "OVRTX_LIBOPENGL_PATH", Libglvnd_jll.libOpenGL_path)
     _OPENGL_HANDLE[] = Libdl.dlopen(libgl, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
     global libovrtx = get(ENV, "OVRTX_LIBRARY_PATH", "libovrtx-dynamic.so")
@@ -25,9 +25,9 @@ include("libovrtx_api.jl")  # generated 1:1 ccalls + structs + @cenum + const ma
 const OVRTX_TIMEOUT_INFINITE = ovrtx_timeout_t(typemax(UInt64))
 const NOSYNC = ovrtx_cuda_sync_t(0, 0)
 
-# --- ovx_string_t surfacing (caller GC.@preserve the backing String) --------------
-# Accepts String / SubString{String} only — Base.unsafe_convert(Cstring, ⋅) requires
-# contiguous, NUL-terminated bytes. Convert other AbstractString subtypes to String first.
+# --- ovx_string_t surfacing (caller must GC.@preserve the backing String) ---------
+# String / SubString only: Base.unsafe_convert(Cstring, ⋅) needs contiguous,
+# NUL-terminated bytes — convert other AbstractString subtypes to String first.
 ovx_string(s::Union{String,SubString{String}}) =
     ovx_string_t(Base.unsafe_convert(Cstring, s), ncodeunits(s))
 function Base.String(s::ovx_string_t)
@@ -48,9 +48,9 @@ end
 
 # --- version helper (ovrtx_get_version returns Cvoid via 3 out-params) -------------
 function version()
-    maj, mn, pt = Ref{UInt32}(0), Ref{UInt32}(0), Ref{UInt32}(0)
-    ovrtx_get_version(maj, mn, pt)
-    return (maj[], mn[], pt[])
+    major, minor, patch = Ref{UInt32}(0), Ref{UInt32}(0), Ref{UInt32}(0)
+    ovrtx_get_version(major, minor, patch)
+    return (major[], minor[], patch[])
 end
 
 end # module

@@ -1,43 +1,32 @@
-# Primitive translations for OmniverseMakie (M1.7): scatter / meshscatter / lines / surface.
+# Primitive translations: scatter / meshscatter / lines / surface.  Each emits a
+# self-contained USDA reference layer (defaultPrim, no upAxis), added under the
+# plot's scope path (/World/Scene_<id>/plot_<id>) via OV.add_usd_reference!.
 #
-# These emit self-contained USDA reference layers (defaultPrim, NO `upAxis` — M1.2),
-# added under the plot's nested scope path (`/World/Scene_<id>/plot_<id>`, M2.3) via
-# `OV.add_usd_reference!`.
+# The USDA emitters are LIVE: author_usd_prim! (compute.jl) drives them from
+# resolved compute outputs.  Surface (empty consumed_inputs) is the ONE type
+# still built via to_ovrtx_object here; old build wrappers were dead + removed.
 #
-# M2.3 dead-path consolidation: the scatter/meshscatter/lines/linesegments USDA EMITTERS
-# below (`_usda_pointinstancer`, `_sphere_proto_body`, `_mesh_proto_body`,
-# `_usda_basiscurves`, `_curve_width`, …) are LIVE — `author_usd_prim!` (compute.jl)
-# calls them fed from resolved compute outputs.  Only their old `to_ovrtx_object(::T)`
-# build wrappers were dead (non-empty `consumed_inputs`) and were removed.  `Surface`
-# (empty `consumed_inputs`) is the ONE plot still built via `to_ovrtx_object` here.
+# Schemas (all non-black through ovrtx RT2; guarded by m1_primitives_test.jl):
+#   Scatter/MeshScatter → PointInstancer + Sphere/Mesh prototype
+#   Lines/LineSegments  → BasisCurves (uniform token type = "linear")
+#   Surface             → Mesh (grid re-meshed; reuses usda_mesh)
+# ovrtx honors both PointInstancer and BasisCurves, so the merged-mesh fallbacks
+# (marker copies / tube mesh, both on the usda_mesh path) are NOT implemented.
+# They are the documented switch if a build regresses a schema (test -> RED).
 #
-# USD schemas — all VALIDATED at render time by test/m1_primitives_test.jl (M1.7),
-# each producing a non-black render through ovrtx RT2:
-#   Scatter            → UsdGeomPointInstancer + UsdGeomSphere prototype  (assumption 4 ✓)
-#   MeshScatter        → UsdGeomPointInstancer + UsdGeomMesh prototype    (assumption 4 ✓)
-#   Lines/LineSegments → UsdGeomBasisCurves (uniform token type = "linear")  (BasisCurves ✓)
-#   Surface            → UsdGeomMesh (grid re-meshed; reuses `usda_mesh`)
-#
-# ovrtx HONORS PointInstancer and BasisCurves, so the documented fallbacks in
-# m1.7-context.md (a merged UsdGeomMesh of marker copies for PointInstancer; a merged
-# tube mesh for BasisCurves) were NOT needed and are intentionally not implemented.
-# If a future ovrtx build regresses one of these schemas, m1_primitives_test.jl turns
-# RED and those merged-mesh fallbacks (both riding the proven `usda_mesh` path) are
-# the documented switch.
-#
-# NOTE: included inside the OmniverseMakie module, AFTER meshes.jl.  In scope:
-#   Makie, GeometryBasics, OV, LinearAlgebra (cross/norm/normalize),
-#   usda_mesh, usda_matrix4d, displaycolor_for, _rgb, _colorrange, _displaycolor_str.
+# Included in the OmniverseMakie module AFTER meshes.jl.  In scope: Makie,
+# GeometryBasics, OV, LinearAlgebra (cross/norm/normalize), usda_mesh,
+# usda_matrix4d, displaycolor_for, _rgb, _colorrange, _displaycolor_str.
 
 # ------------------------------------------------------------------
 # small formatting / data helpers
 # ------------------------------------------------------------------
 
 # (x, y, z) Float32 tuple from any 2- or 3-element point (Point2 → z = 0).
-_p3(p) = (Float32(p[1]), Float32(p[2]), Float32(length(p) >= 3 ? p[3] : 0.0f0))
+_point3f(p) = (Float32(p[1]), Float32(p[2]), Float32(length(p) >= 3 ? p[3] : 0.0f0))
 
 # Join a sequence of points as USD `point3f[]` body text: "(x, y, z), (x, y, z), ...".
-_pt3f_list(pts) = join(["($(c[1]), $(c[2]), $(c[3]))" for c in (_p3(p) for p in pts)], ", ")
+_point3f_list(pts) = join(["($(c[1]), $(c[2]), $(c[3]))" for c in (_point3f(p) for p in pts)], ", ")
 
 # Per-instance (sx, sy, sz) scale from one markersize element (a scalar or a Vec).
 _scale_tuple(s::Real) = (Float32(s), Float32(s), Float32(s))
@@ -83,10 +72,10 @@ end
 # Axis-aligned bounding-box diagonal length of a point cloud (Float64).
 function _bbox_diag(pts)
     isempty(pts) && return 1.0
-    lo = [Float64(_p3(first(pts))[i]) for i in 1:3]
+    lo = [Float64(_point3f(first(pts))[i]) for i in 1:3]
     hi = copy(lo)
     for p in pts
-        c = _p3(p)
+        c = _point3f(p)
         for i in 1:3
             lo[i] = min(lo[i], Float64(c[i])); hi[i] = max(hi[i], Float64(c[i]))
         end
@@ -117,9 +106,9 @@ end
 # `def Mesh "proto" { ... }` body from an explicit mesh (4-space indented).
 # `color_const === nothing` (a materialized instancer) OMITS displayColor.
 function _mesh_proto_body(points, faces0, normals, color_const)
-    fvc = join(string.([length(f) for f in faces0]), ", ")
-    fvi = join(string.([i for f in faces0 for i in f]), ", ")
-    nrm = join(["($(Float32(n[1])), $(Float32(n[2])), $(Float32(n[3])))" for n in normals], ", ")
+    counts_str  = join(string.([length(f) for f in faces0]), ", ")
+    indices_str = join(string.([i for f in faces0 for i in f]), ", ")
+    normals_str = join(["($(Float32(n[1])), $(Float32(n[2])), $(Float32(n[3])))" for n in normals], ", ")
     col = color_const === nothing ? "" : """
         color3f[] primvars:displayColor = [($(Float32(color_const[1])), $(Float32(color_const[2])), $(Float32(color_const[3])))] (
             interpolation = "constant"
@@ -127,25 +116,22 @@ function _mesh_proto_body(points, faces0, normals, color_const)
 """
     return """    def Mesh "proto"
     {
-        int[] faceVertexCounts = [$(fvc)]
-        int[] faceVertexIndices = [$(fvi)]
-        normal3f[] normals = [$(nrm)] (
+        int[] faceVertexCounts = [$(counts_str)]
+        int[] faceVertexIndices = [$(indices_str)]
+        normal3f[] normals = [$(normals_str)] (
             interpolation = "vertex"
         )
-        point3f[] points = [$(_pt3f_list(points))]
+        point3f[] points = [$(_point3f_list(points))]
 $(col)        uniform token subdivisionScheme = "none"
     }"""
 end
 
 # ------------------------------------------------------------------
-# Merged-instances mesh — materialized Scatter / MeshScatter (M3.5)
-#
-# ovrtx does NOT honor an OmniPBR `material:binding` on a UsdGeomPointInstancer (its
-# instances render the MDL default regardless of binding to the instancer, the
-# prototype, or an inline binding — empirically verified).  So a MATERIALIZED
-# Scatter/MeshScatter is rendered as ONE merged `UsdGeomMesh` of the marker copies (the
-# fallback documented at the top of this file), which DOES bind a material like any Mesh.
-# Non-materialized scatter/meshscatter stay on the proven PointInstancer path (unchanged).
+# Merged-instances mesh — materialized Scatter / MeshScatter (M3.5).
+# ovrtx does NOT honor a PointInstancer material:binding (instances render the
+# MDL default wherever bound — verified).  So a materialized scatter/meshscatter
+# becomes ONE merged UsdGeomMesh of marker copies (binds a material like Mesh).
+# Non-materialized scatter stays on the PointInstancer path.
 # ------------------------------------------------------------------
 
 # Rotate a 3-vector by a quaternion (w, x, y, z) — `v + 2w(q×v) + 2(q×(q×v))`.
@@ -169,13 +155,13 @@ function _merged_instances_mesh(mpts, mfaces, mnrm, positions, scales, orientati
         q = orientations === nothing ? nothing : orientations[i]
         off = length(P)
         for k in 1:nmark
-            p  = mpts[k]
-            sp = (Float32(p[1]) * s[1], Float32(p[2]) * s[2], Float32(p[3]) * s[3])
-            rp = q === nothing ? sp : _quat_rotate(q, sp)
-            push!(P, Point3f(rp[1] + Float32(pos[1]), rp[2] + Float32(pos[2]), rp[3] + Float32(pos[3])))
-            nn = mnrm[k]
-            rn = q === nothing ? (Float32(nn[1]), Float32(nn[2]), Float32(nn[3])) : _quat_rotate(q, nn)
-            push!(N, Vec3f(rn[1], rn[2], rn[3]))
+            marker_pt   = mpts[k]
+            scaled_pt   = (Float32(marker_pt[1]) * s[1], Float32(marker_pt[2]) * s[2], Float32(marker_pt[3]) * s[3])
+            rotated_pt  = q === nothing ? scaled_pt : _quat_rotate(q, scaled_pt)
+            push!(P, Point3f(rotated_pt[1] + Float32(pos[1]), rotated_pt[2] + Float32(pos[2]), rotated_pt[3] + Float32(pos[3])))
+            marker_nrm  = mnrm[k]
+            rotated_nrm = q === nothing ? (Float32(marker_nrm[1]), Float32(marker_nrm[2]), Float32(marker_nrm[3])) : _quat_rotate(q, marker_nrm)
+            push!(N, Vec3f(rotated_nrm[1], rotated_nrm[2], rotated_nrm[3]))
         end
         for f in mfaces
             push!(F, Int[off + idx for idx in f])
@@ -185,12 +171,11 @@ function _merged_instances_mesh(mpts, mfaces, mnrm, positions, scales, orientati
 end
 
 # Author a complete PointInstancer reference layer around `proto_body`.
-# `instancer_color`: per-instance (r,g,b) Vector → emitted with interpolation
-# "vertex" on the instancer; `nothing` → no instancer-level color (the prototype
-# carries a constant colour instead).
+# instancer_color: per-instance (r,g,b) -> displayColor interp "vertex" on the
+# instancer; nothing -> prototype carries a constant colour instead.
 function _usda_pointinstancer(positions, scales, orientations, instancer_color, proto_body; model)
     n        = length(positions)
-    pos_str  = _pt3f_list(positions)
+    pos_str  = _point3f_list(positions)
     idx_str  = join(fill("0", n), ", ")
     scl_str  = join(["($(s[1]), $(s[2]), $(s[3]))" for s in scales], ", ")
     ori_block = orientations === nothing ? "" :
@@ -216,19 +201,16 @@ $(proto_body)
 """
 end
 
-# NOTE (M2.3 dead-path consolidation): the live Scatter/MeshScatter BUILD is
-# `author_usd_prim!(::Makie.Scatter/::Makie.MeshScatter)` in compute.jl (fed from
-# resolved compute outputs), which reuses `_usda_pointinstancer` / `_sphere_proto_body`
-# / `_mesh_proto_body` above.  The old `to_ovrtx_object(::Scatter/::MeshScatter)` build
-# methods were UNREACHABLE (both types have non-empty `consumed_inputs`) and were removed.
+# Live Scatter/MeshScatter build = author_usd_prim!(::Scatter/::MeshScatter) in
+# compute.jl (reuses the emitters above); old to_ovrtx_object methods removed.
 
 # ------------------------------------------------------------------
 # UsdGeomBasisCurves authoring (Lines / LineSegments primary)
 # ------------------------------------------------------------------
 
-# A visible data-unit curve width from a (pixel-space) linewidth.  Pixel-accurate
-# sizing is a later refinement (M1 gate only needs a visible, non-black curve), so
-# we scale a small fraction of the data extent by the linewidth.
+# Visible data-unit curve width from a pixel-space linewidth.  Pixel-accurate
+# sizing is a later refinement (M1 only needs a visible curve): scale a small
+# fraction of the data extent by the linewidth.
 function _curve_width(pts, linewidth)
     lw = linewidth isa AbstractVector ?
         (isempty(linewidth) ? 1.0 : Float64(sum(linewidth) / length(linewidth))) :
@@ -238,9 +220,9 @@ end
 
 function _usda_basiscurves(points, counts, width, color_values, color_interp; model)
     counts_str = join(string.(counts), ", ")
-    # `color_values === nothing` (a MATERIALIZED curve — M3.5) OMITS `primvars:displayColor`
-    # so the bound OmniPBR material fully governs shading; the non-`nothing` branch is the
-    # byte-for-byte M1 emit (regression guard).  Mirrors `usda_mesh`'s `col_block`.
+    # color_values === nothing (MATERIALIZED) OMITS primvars:displayColor, so
+    # the bound OmniPBR material governs shading; the non-nothing branch is the
+    # byte-for-byte M1 emit (regression guard).  Mirrors usda_mesh's col_block.
     col_block = color_values === nothing ? "" :
         """    color3f[] primvars:displayColor = [$(_displaycolor_str(color_values))] (
         interpolation = "$(color_interp)"
@@ -252,7 +234,7 @@ def BasisCurves "curve"
 {
     uniform token type = "linear"
     int[] curveVertexCounts = [$(counts_str)]
-    point3f[] points = [$(_pt3f_list(points))]
+    point3f[] points = [$(_point3f_list(points))]
     float[] widths = [$(width)] (
         interpolation = "constant"
     )
@@ -262,19 +244,14 @@ $(col_block)    matrix4d xformOp:transform = $(usda_matrix4d(model))
 """
 end
 
-# NOTE (M2.3 dead-path consolidation): the live Lines/LineSegments BUILD is
-# `author_usd_prim!(::Makie.Lines/::Makie.LineSegments)` in compute.jl, reusing
-# `_usda_basiscurves` / `_curve_width` above.  The old `to_ovrtx_object(::Lines/
-# ::LineSegments)` build methods were UNREACHABLE (non-empty `consumed_inputs`) and
-# were removed.
+# Live Lines/LineSegments build = author_usd_prim!(::Lines/::LineSegments) in
+# compute.jl (reuses the emitters above); old to_ovrtx_object methods removed.
 
 # ------------------------------------------------------------------
-# Surface → UsdGeomMesh (grid re-meshed; reuses usda_mesh)
-#
-# Surface has NO `*_f32c`/`faces` compute outputs ⇒ empty `consumed_inputs` ⇒ it is
-# the ONE live plot type still built here, via the `register_ovrtx_robj!`
-# empty-inputs branch.  `scene` is threaded so its reference nests under the scene's
-# `def Scope` like every other plot (M2.3).
+# Surface -> UsdGeomMesh (grid re-meshed; reuses usda_mesh).  Surface has NO
+# compute outputs => empty consumed_inputs => the ONE plot type still built here
+# (via register_ovrtx_robj!'s empty-inputs branch).  `scene` is threaded so its
+# reference nests under the scene's def Scope like every other plot.
 # ------------------------------------------------------------------
 
 # Build (points, 0-based quad faces, per-vertex normals) for a grid surface.
@@ -335,23 +312,19 @@ function _surface_colors(plot, zs)
     return displaycolor_for(plot, nx * ny)
 end
 
-# Per-vertex parametric `st` UVs for a TEXTURED materialized surface, in the SAME i-major
-# order as `_surface_mesh` points.  Matches GLMakie's surface-texture convention (VERIFIED by
-# comparing a GLMakie render of an equirectangular earth against ours): the texture's
-# HORIZONTAL axis (u, image columns) tracks the SECOND grid axis (j); the VERTICAL axis
-# (v, image rows) tracks the FIRST grid axis (i) and is FLIPPED (i=1 → v=1, the image's top
-# row) to match the texture's bottom-left `st` origin.
-# This was previously `u←i, v←j` (no flip), which ROTATED every textured surface 90° — e.g. a
-# `lat=i / lon=j` earth sphere sampled longitude along the image's HEIGHT, laying the continents
-# on their side (reported on submarineCables).  The earlier sphere/mesh-earth orientation fix
-# never touched this path — mesh spheres get Makie's own `:texturecoordinates`, surfaces get
-# these.  (M4 follow-up — lets `surface!(…; color=image)` sample a `diffuse_texture` like a
-# textured `mesh!`; without `st` the bound texture sampled nothing and the surface rendered white.)
+# Per-vertex `st` UVs for a TEXTURED surface, i-major like _surface_mesh points.
+# ORIENTATION gotcha (u/v wrong -> texture 90-rotates):
+#   u (image cols) <- 2nd grid axis (j)
+#   v (image rows) <- 1st grid axis (i), FLIPPED so i=1 -> st bottom-left origin
+# VERIFIED vs GLMakie equirectangular-earth render; earlier u<-i,v<-j (no flip)
+# rotated textured surfaces 90 (continents on their side).  Mesh spheres get
+# Makie's own :texturecoordinates instead.  Without st the bound diffuse_texture
+# samples nothing -> surface renders white.
 function _surface_texcoords(nx, ny)
     st = Vector{Vec2f}(undef, nx * ny)
     for i in 1:nx, j in 1:ny
-        u = ny == 1 ? 0.0f0 : Float32((j - 1) / (ny - 1))   # texture horizontal (image cols) ← 2nd grid axis (j)
-        v = nx == 1 ? 0.0f0 : Float32((nx - i) / (nx - 1))  # texture vertical   (image rows) ← 1st grid axis (i), flipped
+        u = ny == 1 ? 0.0f0 : Float32((j - 1) / (ny - 1))   # image cols <- j
+        v = nx == 1 ? 0.0f0 : Float32((nx - i) / (nx - 1))  # image rows <- i (flipped)
         st[(i - 1) * ny + j] = Vec2f(u, v)
     end
     return st
@@ -360,9 +333,10 @@ end
 """
     to_ovrtx_object(screen, scene, plot::Makie.Surface) -> Union{UInt64,Nothing}
 
-Re-mesh the grid surface (`plot[1..3][]` = xs, ys, zs) into a `UsdGeomMesh` of
-quad cells with per-vertex normals (finite-difference grid normals) and per-vertex
-colours (z-driven colormap by default), authored through the proven `usda_mesh`.
+Re-mesh the grid surface (`plot[1..3][]` = xs, ys, zs) into a `UsdGeomMesh` of quad
+cells with per-vertex finite-difference normals and per-vertex colours (z-driven
+colormap by default), authored via `usda_mesh`.  Returns `nothing` for a degenerate
+grid (<2x2 or no finite cells).
 """
 function to_ovrtx_object(screen, scene, plot::Makie.Surface)
     xs = plot[1][]; ys = plot[2][]; zs = plot[3][]
@@ -373,13 +347,10 @@ function to_ovrtx_object(screen, scene, plot::Makie.Surface)
     path = plot_prim_path(screen.scene2scope, scene, plot)
 
     if is_materialized(plot)
-        # M3.5: a materialized Surface is a `UsdGeomMesh` like `Mesh` — emit it WITHOUT
-        # `displayColor` (the `nothing` sentinel) so the OmniPBR material (PRE-AUTHORED in
-        # /World/Looks, BOUND by `register_ovrtx_robj!`'s empty-inputs branch) governs
-        # shading.  Surface has NO diff node ⇒ a STATIC material (no live edit) — fine.
-        # M4 follow-up: a TEXTURED surface (image `color` / `*_texture`) samples the grid's
-        # parametric `st` UVs — without them the bound `diffuse_texture` sampled nothing and
-        # the surface rendered white.
+        # Materialized Surface = UsdGeomMesh: emit WITHOUT displayColor (the
+        # `nothing` sentinel) so the pre-authored OmniPBR material (bound by
+        # register_ovrtx_robj!) governs shading.  A TEXTURED surface needs the
+        # grid's st UVs, else the diffuse_texture samples nothing -> white.
         texcoords = _needs_texcoords(plot) ? _surface_texcoords(size(zs)...) : nothing
         usda = usda_mesh(points, faces0, normals, nothing;
                          model                = plot.model[],
