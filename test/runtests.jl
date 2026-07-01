@@ -141,3 +141,8 @@ include("volumes_usda_test.jl")
 # Volumes M1 Task 3 — end-to-end VDB render: author torus.vdb into a Screen, render via RT2 →
 # IndeX Direct, assert a non-black volume + IndeX enabled (subprocess, env-gated, skip-if-absent).
 include("volumes_render_test.jl")
+
+# Volumes M2 Task 1 — a WRITTEN .nvdb renders: build a dense ball → .nvdb via
+# NanoVDBWriter.save_nanovdb (Codec::NONE, major-32), author it with author_vdb_volume! and
+# render via RT2 → IndeX Direct; assert non-black (the writer go/no-go) (subprocess, env-gated).
+include("volumes_writer_test.jl")

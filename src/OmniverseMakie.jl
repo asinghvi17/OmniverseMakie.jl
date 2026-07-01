@@ -2,6 +2,7 @@ module OmniverseMakie
 
 using Makie, GeometryBasics, Colors, ColorTypes, FixedPointNumbers, LinearAlgebra
 import LibOVRTX
+import NanoVDBWriter     # Volumes M2: dense Array{Float32,3} → .nvdb writer (save_nanovdb)
 import ComputePipeline   # :ovrtx_renderobject diff node (register_computation!/mark_resolved!)
 import PNGFiles          # M3.3: write an image `color` to a temp PNG for an OmniPBR texture
 
