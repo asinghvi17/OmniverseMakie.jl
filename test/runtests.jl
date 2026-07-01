@@ -160,3 +160,11 @@ include("volumes_plot_test.jl")
 # it asserts the volume! path renders non-black grayscale (the degrade M2 ships) and documents
 # COLORED=false as a tripwire for a future composite-capable build (subprocess, env-gated).
 include("volumes_color_test.jl")
+
+# Volumes M2 Task 5 — LIVE volume DATA edits: `plot[4][] = new_array` tracks the `:volume` compute
+# output (spike-verified to resolve + fire) and re-renders the new density via a fresh-.nvdb re-write
+# + reload (remove_usd! + add_usd_reference! — a filePath write does NOT update; IndeX evicts the
+# file).  Asserts the lit-pixel centroid MOVES between two graded diagonally-opposite octants, temp
+# files stay bounded (prior deleted each edit, last cleaned on close), and an all-zero volume! no-ops
+# cleanly (subprocess, env-gated, skip-if-absent).
+include("volumes_live_test.jl")

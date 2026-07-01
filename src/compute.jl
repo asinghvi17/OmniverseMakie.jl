@@ -114,11 +114,16 @@ consumed_inputs(::Makie.MeshScatter)  = [:positions_transformed_f32c, :model_f32
 consumed_inputs(::Makie.Lines)        = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
 consumed_inputs(::Makie.LineSegments) = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
 # Volumes M2: a `volume!` renders through the M1 UsdVol→IndeX-Direct path (author_usd_prim!(::Volume)
-# writes a temp .nvdb + authors it).  Only `:visible` is tracked — it resolves for every plot and has a
-# `push_to_ovrtx!` route (a hide/reshow) — which routes the Volume through the diff-node machinery so
-# Tasks 4/5 grow live volume edits.  The scalars/ranges/colormap are read directly off the plot at
-# BUILD time (like `marker`/`markersize` for MeshScatter), so they are not tracked here.
-consumed_inputs(::Makie.Volume)       = [:visible]
+# writes a temp .nvdb + authors it).  Two outputs are tracked:
+#   - `:visible` — resolves for every plot, `push_to_ovrtx!` route is a hide/reshow.
+#   - `:volume`  — the CONVERTED scalar-data output (`plot[4]` reads it; `plot[4][] = arr` sets the raw
+#     arg → this output re-resolves).  Task-5 SPIKE-VERIFIED to resolve as `Array{Float32,3}` AND fire
+#     `changed[:volume]=true` on `plot[4][] =`; its `push_to_ovrtx!` branch re-writes a fresh temp
+#     `.nvdb` and RELOADS it (`reload_volume_data!`).  This is the M2 LIVE-DATA path.
+# Colors are OFF for M2 (IndeX Direct = grayscale — Task 3), so `colormap`/`colorrange` are NOT tracked
+# (a live colormap edit is a moot no-op under Direct); the ranges/colormap are read directly off the
+# plot at BUILD + reload time (like `marker`/`markersize` for MeshScatter).
+consumed_inputs(::Makie.Volume)       = [:visible, :volume]
 consumed_inputs(::Any)                = Symbol[]
 
 # ------------------------------------------------------------------
@@ -526,6 +531,8 @@ prim `robj.prim_path` (no re-author):
                                   the OmniPBR `inputs:diffuse_color_constant` shader input
 - `:material` (M3.4)            → each changed OmniPBR scalar/color3f shader input on a
                                   MATERIALIZED plot's `Mat_<id>/Shader` (no-op otherwise)
+- `:volume` (Volumes M2, T5)    → live density edit: re-write a fresh temp `.nvdb` + RELOAD it
+                                  (`reload_volume_data!`: remove_usd! + add_usd_reference!)
 - `:visible`                    → `visibility` token
 
 Returns `true` if a write was issued (an unrouted `name` is a no-op → `false`).
@@ -574,6 +581,16 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, plot, name::Symbol, value)
             routed = false
         else
             _push_material!(r, robj.material_shader, _material_kind(plot), value)
+        end
+    elseif name === :volume
+        # Volumes M2 (Task 5): live density edit.  Re-write a FRESH temp `.nvdb` + RELOAD it
+        # (remove_usd! + add_usd_reference! — the spike-verified mechanism; a filePath write does
+        # NOT update).  On a reload failure keep the last good frame (warn once, don't thrash).
+        try
+            reload_volume_data!(screen, robj, plot, value)
+        catch e
+            @warn "OmniverseMakie: live volume data reload failed — keeping the last frame." exception=e maxlog=1
+            routed = false
         end
     elseif name === :visible
         _push_visibility!(r, prim, value)

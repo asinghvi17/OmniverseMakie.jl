@@ -143,3 +143,42 @@ function author_vdb_volume!(screen, scene, vdb_path; prim_path = "/World/Volume"
     OV.add_usd_reference!(screen.renderer, usda, prim_path)
     return prim_path
 end
+
+"""
+    reload_volume_data!(screen, robj, plot, scalars) -> Nothing
+
+Volumes M2 (Task 5) — LIVE volume DATA edit.  Re-write the plot's density field to a FRESH temp
+`.nvdb` and RELOAD it into the open stage so NVIDIA IndeX shows the new data.  Called by
+`push_to_ovrtx!`'s `:volume` branch when `plot[4][] = new_array` fires `changed[:volume]`.
+
+The reload is a REMOVE + RE-REFERENCE, NOT a `filePath` write: the Task-5 verify-or-degrade spike
+proved that writing a new `filePath` on the `OpenVDBAsset` does NOT update the render — IndeX loads
+the grid into its own memory and evicts the source file ("orphaned"), so the on-disk change is never
+re-read (spike: filePath write → centroid MOVED ≈ 0.01 px; remove_usd! + add_usd_reference! of a fresh
+layer pointing at a FRESH temp path → MOVED ≈ 26 px).  A fresh temp path each edit also side-steps the
+carb asset-cache serving the stale file.  `robj.usd_handle` is updated to the new layer's handle.
+
+Temp files stay BOUNDED: the PRIOR temp `.nvdb` is deleted here (one live grid on disk at a time), and
+`destroy_bindings!` removes the last one on close/delete.  Ranges/colormap/colorrange are re-read from
+the plot (identical to the build), so a data edit keeps the same placement + (grayscale-Direct) TF.
+"""
+function reload_volume_data!(screen, robj, plot, scalars)
+    r     = screen.renderer
+    vprim = get(robj.meta, :volume_prim, robj.prim_path)
+    data  = scalars isa Array{Float32,3} ? scalars : Float32.(scalars)
+    xr = Makie.to_value(plot[1]); yr = Makie.to_value(plot[2]); zr = Makie.to_value(plot[3])
+    origin = GeometryBasics.Point3f(first(xr), first(yr), first(zr))
+    extent = GeometryBasics.Vec3f(last(xr) - first(xr), last(yr) - first(yr), last(zr) - first(zr))
+    newtmp = tempname() * ".nvdb"
+    NanoVDBWriter.save_nanovdb(newtmp, data, origin, extent)
+    usda = _vdb_volume_usda(newtmp; prim_path = vprim, field = "density",
+                            colormap = Makie.to_value(plot.colormap),
+                            colorrange = _volume_colorrange(plot, data))
+    OV.remove_usd!(r, robj.usd_handle)                        # drop the stale layer
+    robj.usd_handle = OV.add_usd_reference!(r, usda, vprim)   # fresh layer → fresh temp; update handle
+    old = get(robj.meta, :vdb_tmp, nothing)                  # GC the prior temp (keep the count bounded)
+    old isa AbstractString && old != newtmp && rm(old; force = true)
+    robj.meta[:vdb_tmp] = newtmp
+    OV.reset!(r)                                              # restart RT2 accumulation for the new grid
+    return nothing
+end
