@@ -374,21 +374,34 @@ function author_usd_prim!(screen, scene, plot::Makie.Volume, args)
         "Set OMNIVERSEMAKIE_INDEX_LIBS (or OMNIVERSEMAKIE_OVRTX_CONFIG) BEFORE creating the Screen, " *
         "then re-create it.")
     scalars = Float32.(Makie.to_value(plot[4]))
-    all(iszero, scalars) && return nothing            # empty field → nothing renders; author nothing
+    # KNOWN LIMITATION (Volumes M2, grayscale): an all-zero field authors NOTHING and registers no
+    # render object, so a later live FILL (`plot[4][] = nonzero`) fires `:volume` but the push path
+    # finds no robj to update — an empty→filled transition on the SAME live screen silently renders
+    # nothing.  It self-heals on a NEW screen (re-authored from the now-non-empty data), and the
+    # normal path (build with real data, then edit) works.  Rebuild-on-fill is deferred.
+    all(iszero, scalars) && return nothing
     xr = Makie.to_value(plot[1]); yr = Makie.to_value(plot[2]); zr = Makie.to_value(plot[3])
     origin = GeometryBasics.Point3f(first(xr), first(yr), first(zr))
     extent = GeometryBasics.Vec3f(last(xr) - first(xr), last(yr) - first(yr), last(zr) - first(zr))
-    tmp = tempname() * ".nvdb"
-    NanoVDBWriter.save_nanovdb(tmp, scalars, origin, extent)
-    path = plot_prim_path(screen.scene2scope, scene, plot)
-    usda = _vdb_volume_usda(tmp; prim_path = path, field = "density",
-                            colormap = Makie.to_value(plot.colormap),
-                            colorrange = _volume_colorrange(plot, scalars))
-    h = OV.add_usd_reference!(screen.renderer, usda, path)
-    robj = OvrtxRObj(path, h)
-    robj.meta[:vdb_tmp]     = tmp                      # cleaned by destroy_bindings! on close/delete
-    robj.meta[:volume_prim] = path                     # Tasks 4/5: the authored UsdVol prim
-    return robj
+    tmp   = tempname() * ".nvdb"
+    built = false
+    # Symmetric with reload_volume_data!'s hardening: if save/add throws before the robj takes
+    # ownership of `tmp`, GC the orphan here (nothing else ever records or removes it).
+    try
+        NanoVDBWriter.save_nanovdb(tmp, scalars, origin, extent)
+        path = plot_prim_path(screen.scene2scope, scene, plot)
+        usda = _vdb_volume_usda(tmp; prim_path = path, field = "density",
+                                colormap = Makie.to_value(plot.colormap),
+                                colorrange = _volume_colorrange(plot, scalars))
+        h = OV.add_usd_reference!(screen.renderer, usda, path)
+        robj = OvrtxRObj(path, h)
+        robj.meta[:vdb_tmp]     = tmp                  # cleaned by destroy_bindings! on close/delete
+        robj.meta[:volume_prim] = path                 # Tasks 4/5: the authored UsdVol prim
+        built = true
+        return robj
+    finally
+        built || rm(tmp; force = true)
+    end
 end
 
 # ------------------------------------------------------------------
