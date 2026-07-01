@@ -146,3 +146,9 @@ include("volumes_render_test.jl")
 # NanoVDBWriter.save_nanovdb (Codec::NONE, major-32), author it with author_vdb_volume! and
 # render via RT2 → IndeX Direct; assert non-black (the writer go/no-go) (subprocess, env-gated).
 include("volumes_writer_test.jl")
+
+# Volumes M2 Task 2 — Makie volume!(x,y,z,array) recipe: a graded-blob Volume plot renders through
+# the diff-node path (author_usd_prim!(::Volume) → save_nanovdb + _vdb_volume_usda → IndeX Direct);
+# asserts non-black, low-octant orientation (centroid below centre), and temp-.nvdb cleanup on close
+# (subprocess, env-gated, skip-if-absent).
+include("volumes_plot_test.jl")

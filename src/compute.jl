@@ -31,6 +31,11 @@ open stage.  Records:
                  so it rides that map's lifecycle — no extra lockstep.  `pick_hit` uses it to
                  turn `path2plot`'s `objectid(plot)` back into the `Plot` object
                  (`_plot_for_objectid`) without a third parallel registry.
+- `meta`       — Volumes M2: general per-plot state that is NOT a destroyable GPU binding
+                 (distinct from `bindings`, which `destroy_bindings!` empties every teardown).
+                 A `Volume` build records `:vdb_tmp` (the screen-owned temp `.nvdb` path,
+                 removed by `destroy_bindings!` on close/delete) and `:volume_prim` here; Tasks
+                 4/5 read it for live volume edits.  Empty for every non-volume plot.
 """
 mutable struct OvrtxRObj
     prim_path::String
@@ -38,10 +43,12 @@ mutable struct OvrtxRObj
     bindings::Dict{Symbol,Any}
     material_shader::Union{String,Nothing}
     plot::Union{Nothing,Makie.AbstractPlot}
+    meta::Dict{Symbol,Any}
 end
 
 OvrtxRObj(prim_path::AbstractString, usd_handle::Integer) =
-    OvrtxRObj(String(prim_path), UInt64(usd_handle), Dict{Symbol,Any}(), nothing, nothing)
+    OvrtxRObj(String(prim_path), UInt64(usd_handle), Dict{Symbol,Any}(), nothing, nothing,
+              Dict{Symbol,Any}())
 
 # ==================================================================
 # M2.2 — the :ovrtx_renderobject diff node + push_to_ovrtx! (diff driver)
@@ -106,6 +113,12 @@ consumed_inputs(::Makie.Scatter)      = [:positions_transformed_f32c, :model_f32
 consumed_inputs(::Makie.MeshScatter)  = [:positions_transformed_f32c, :model_f32c, :scaled_color, :material, :visible]
 consumed_inputs(::Makie.Lines)        = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
 consumed_inputs(::Makie.LineSegments) = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
+# Volumes M2: a `volume!` renders through the M1 UsdVol→IndeX-Direct path (author_usd_prim!(::Volume)
+# writes a temp .nvdb + authors it).  Only `:visible` is tracked — it resolves for every plot and has a
+# `push_to_ovrtx!` route (a hide/reshow) — which routes the Volume through the diff-node machinery so
+# Tasks 4/5 grow live volume edits.  The scalars/ranges/colormap are read directly off the plot at
+# BUILD time (like `marker`/`markersize` for MeshScatter), so they are not tracked here.
+consumed_inputs(::Makie.Volume)       = [:visible]
 consumed_inputs(::Any)                = Symbol[]
 
 # ------------------------------------------------------------------
@@ -322,6 +335,55 @@ function author_usd_prim!(screen, scene, plot::Makie.LineSegments, args)
     usda  = _usda_basiscurves(pts2, fill(2, nseg), width, values, interp; model = args[:model_f32c])
     h = OV.add_usd_reference!(screen.renderer, usda, path)
     return OvrtxRObj(path, h)
+end
+
+# Volumes M2: resolve a `Volume` plot's transfer-function domain.  `colorrange` defaults to
+# `Makie.Automatic()`, so derive it from the scalar-field extrema; an explicit `(lo,hi)` passes
+# through.  Only cosmetic under IndeX Direct today (it renders the default grayscale TF — M1
+# constraint #3), but authored correctly for M2's composite-colour path (Task 3).
+function _volume_colorrange(plot, scalars)
+    cr = Makie.to_value(plot.colorrange)
+    cr isa Makie.Automatic && return (Float64(minimum(scalars)), Float64(maximum(scalars)))
+    return (Float64(first(cr)), Float64(last(cr)))
+end
+
+# Volumes M2 — `volume!(x, y, z, ::Array{Float32,3})` build.  Reads the scalar field + axis ranges
+# + colormap DIRECTLY off the plot (Step-1 verified accessors: scalars `plot[4]`, ranges
+# `plot[1..3]` as `EndPoints`, `plot.colormap`/`plot.colorrange`), writes the dense array to a
+# SCREEN-OWNED temp `.nvdb` (Task 1's `NanoVDBWriter.save_nanovdb`), and authors it via M1's
+# `_vdb_volume_usda` + `add_usd_reference!` on the OPEN stage (returning the `usd_handle` Task 5's
+# `remove_usd!` needs — hence not `author_vdb_volume!`, which returns the String prim path).
+#
+# The writer maps `data[i,j,k]` → NanoVDB `Coord(i-1,j-1,k-1)` → world center `origin + (i-½)·dx`
+# (voxel size `extent ./ size(data)`), i.e. array axis i→x, j→y, k→z — matching Makie's
+# `volume!(x,y,z,vol)` convention, so no i/j/k→Coord remap is needed (VERIFIED by the asymmetric-
+# octant orientation test in test/volumes_plot_test.jl: mass in the low octant renders below-centre,
+# exactly where the axes + camera place it).
+#
+# Grayscale only (Task 2): IndeX Direct renders the default density TF; the authored colormap is
+# M1's reusable primitive that Task 3's composite path activates.  The temp `.nvdb` is recorded on
+# `robj.meta[:vdb_tmp]` and removed by `destroy_bindings!` on close/delete (no leak).
+function author_usd_prim!(screen, scene, plot::Makie.Volume, args)
+    OV._index_enabled() || error(
+        "author_usd_prim!(::Volume): volume rendering requires NVIDIA IndeX, which is not enabled.  " *
+        "Set OMNIVERSEMAKIE_INDEX_LIBS (or OMNIVERSEMAKIE_OVRTX_CONFIG) BEFORE creating the Screen, " *
+        "then re-create it.")
+    scalars = Float32.(Makie.to_value(plot[4]))
+    all(iszero, scalars) && return nothing            # empty field → nothing renders; author nothing
+    xr = Makie.to_value(plot[1]); yr = Makie.to_value(plot[2]); zr = Makie.to_value(plot[3])
+    origin = GeometryBasics.Point3f(first(xr), first(yr), first(zr))
+    extent = GeometryBasics.Vec3f(last(xr) - first(xr), last(yr) - first(yr), last(zr) - first(zr))
+    tmp = tempname() * ".nvdb"
+    NanoVDBWriter.save_nanovdb(tmp, scalars, origin, extent)
+    path = plot_prim_path(screen.scene2scope, scene, plot)
+    usda = _vdb_volume_usda(tmp; prim_path = path, field = "density",
+                            colormap = Makie.to_value(plot.colormap),
+                            colorrange = _volume_colorrange(plot, scalars))
+    h = OV.add_usd_reference!(screen.renderer, usda, path)
+    robj = OvrtxRObj(path, h)
+    robj.meta[:vdb_tmp]     = tmp                      # cleaned by destroy_bindings! on close/delete
+    robj.meta[:volume_prim] = path                     # Tasks 4/5: the authored UsdVol prim
+    return robj
 end
 
 # ------------------------------------------------------------------
@@ -577,18 +639,35 @@ function bind_hot_attributes!(screen, robj::OvrtxRObj, plot, args)
     return robj
 end
 
+# Volumes M2: a `Volume`'s UsdVol prim carries NO `xformOp:transform`/`omni:xform` (placement lives
+# in the `.nvdb`'s baked voxel→world Map, NOT a USD xform — and the M1 constraints warn that extra
+# metadata on a volume layer can render it black), and `consumed_inputs(::Volume)` tracks only
+# `:visible` (a one-shot `write_attribute`, not a binding), so there is NO hot-path attribute to
+# bind — skip the universal xform binding create entirely.  Tasks 4/5 can grow this if a live volume
+# xform is added.
+bind_hot_attributes!(screen, robj::OvrtxRObj, ::Makie.Volume, args) = robj
+
 """
     destroy_bindings!(robj::OvrtxRObj) -> OvrtxRObj
 
 Destroy + clear every persistent attribute binding on `robj` (M2.4 lifetime).  Called
 by `close(Screen)` and (M2.5) per-plot `delete!`.  Safe to call after the Renderer is
 closed (`OV.destroy!` is a no-op then).
+
+Volumes M2: also removes the screen-owned temp `.nvdb` recorded on `robj.meta[:vdb_tmp]`
+(a `Volume` build's on-disk grid) so it does not leak; `force=true` makes this idempotent
+across the close/delete/empty! teardown sites (all of which call `destroy_bindings!`).
 """
 function destroy_bindings!(robj::OvrtxRObj)
     for b in values(robj.bindings)
         b isa OV.Binding && OV.destroy!(b)
     end
     empty!(robj.bindings)
+    tmp = get(robj.meta, :vdb_tmp, nothing)
+    if tmp isa AbstractString
+        rm(tmp; force = true)
+        delete!(robj.meta, :vdb_tmp)
+    end
     return robj
 end
 
