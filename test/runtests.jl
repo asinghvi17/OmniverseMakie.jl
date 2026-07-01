@@ -137,3 +137,7 @@ include("volumes_index_config_test.jl")
 # Volumes M1 Task 2 — author_vdb_volume! (UsdVol + OpenVDBAsset + IndeX Colormap material):
 # _vdb_volume_usda snippet shape (pure) + clear-error when IndeX disabled (subprocess).
 include("volumes_usda_test.jl")
+
+# Volumes M1 Task 3 — end-to-end VDB render: author torus.vdb into a Screen, render via RT2 →
+# IndeX Direct, assert a non-black volume + IndeX enabled (subprocess, env-gated, skip-if-absent).
+include("volumes_render_test.jl")

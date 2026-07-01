@@ -1,0 +1,50 @@
+# Volumes M1 Task 3 — end-to-end VDB render (subprocess, env-gated, skip-if-absent).
+#
+# With IndeX enabled (OMNIVERSEMAKIE_INDEX_LIBS), author the on-disk torus.vdb into a Screen's
+# stage via author_vdb_volume! and render it through the existing RT2 → IndeX Direct path; assert
+# a non-black volume appeared and IndeX was enabled.  Skips cleanly when the Kit IndeX libs dir or
+# the sample VDB is absent (so CI without them stays green); on THIS box they are present, so it
+# actually renders (the spike/Task-2 verification saw ~9.5k non-black px @ 256²).
+
+using Test
+
+const _VDB  = "/home/juliahub/.local/share/ov/data/exts/v2/omni.rtx.index_composite-718bb6a388c21baf/data/tests/volumes/torus.vdb"
+const _LIBS = get(ENV, "OMNIVERSEMAKIE_INDEX_LIBS",
+                  "/home/juliahub/.local/share/ov/data/exts/v2/omni.index.libs-1287db94366cf6fe")
+
+const _VOL_RENDER_PROG = """
+using OmniverseMakie
+import OmniverseMakie as OM
+using OmniverseMakie: OV
+OM.activate!(warmup = 48)
+scene = Scene(size=(256,256)); cam3d!(scene)
+# Frame the torus_fog grid (near origin) from the spike-verified viewpoint.
+update_cam!(scene, Vec3f(38,38,22), Vec3f(0,0,0), Vec3f(0,0,1))
+screen = OM.Screen(scene)                        # creating the Screen enables IndeX (env is set)
+OM.author_root_from_scene!(screen, scene; resolution = screen.fb_size)
+OM.author_vdb_volume!(screen, scene, "$(_VDB)"; field="torus_fog", colormap=:viridis)
+img = OV.render_to_matrix(screen.renderer, screen.product; warmup = 48)
+nonblack = count(c -> (Float32(c.r)+Float32(c.g)+Float32(c.b)) > 0.04, img)
+println("INDEX_ENABLED=", OV._index_enabled())
+println("VOL_NONBLACK=", nonblack)
+close(screen)
+println("OK_VOL_RENDER")
+"""
+
+include("helpers.jl")
+
+@testset "Volumes: end-to-end render (subprocess)" begin
+    if !isdir(_LIBS) || !isfile(_VDB)
+        @test_skip "IndeX libs ($_LIBS) or sample VDB ($_VDB) absent — volume render test skipped"
+    else
+        ec, out = run_ovrtx_subprocess(_VOL_RENDER_PROG; timeout = 600,
+            env = ("OMNIVERSEMAKIE_INDEX_LIBS" => _LIBS))
+        # Dump the full subprocess log only on failure (it is thousands of ovrtx lines).
+        contains(out, "OK_VOL_RENDER") || @info "Volume render output (failure)" out
+        @test ec == 0
+        @test contains(out, "INDEX_ENABLED=true")
+        @test contains(out, "OK_VOL_RENDER")
+        m = match(r"VOL_NONBLACK=(\d+)", out)
+        @test m !== nothing && parse(Int, m.captures[1]) > 500   # a volume appeared (spike ~9179 @ 512²)
+    end
+end
