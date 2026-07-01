@@ -81,6 +81,7 @@ include("helpers.jl")
             contains(out, "VOLPLOT_NONBLACK=") && break
         end
         contains(out, "OK_VOLPLOT") || @info "volume! output" out
+        @test contains(out, "OK_VOLPLOT")                                  # subprocess completed all work (no mid-run death)
         @test contains(out, "INDEX_ENABLED=true")
 
         m_nb = match(r"VOLPLOT_NONBLACK=(\d+)", out)
