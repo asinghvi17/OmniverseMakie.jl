@@ -93,6 +93,111 @@ println("EMPTY_HAS_ROBJ=", has_robj)                # false: author returned not
 println("OK_EMPTY_VOL")
 """
 
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Task-5 reviewer finding — reload FAILURE path (the catch branch had zero coverage).
+#
+# Forces `add_usd_reference!` to throw on a reload (after `remove_usd!` already dropped the old
+# layer — the exact "remove succeeds, add throws" split the finding describes) via a Ref-gated
+# re-definition (body mirrors OV.add_usd_reference!) installed AFTER the real build, so the build
+# uses the real add and every subsequent reload throws while the flag is set.  Asserts:
+#   (a) the failed edit does NOT escape (push_to_ovrtx! swallows) — colorbuffer keeps rendering;
+#   (b) the last good frame is kept (a bare remove doesn't clear IndeX's loaded grid → still lit);
+#   (c) the temp `.nvdb` count stays BOUNDED across several repeated failed edits (orphan rm'd);
+#   (d) a later SUCCESSFUL edit RECOVERS the plot (renders the new grid — not wedged);
+#   (e) delete!/close after a failed reload does NOT throw (guarded stale handle) and leaves 0 temps.
+# TMPDIR is redirected to a fresh dir so the `.nvdb` count is this process's only (tempname honors it).
+const _FAILPATH_PROG = """
+using OmniverseMakie
+import OmniverseMakie as OM
+using OmniverseMakie: OV
+import OmniverseMakie.LibOVRTX
+const TDIR = mktempdir(); ENV["TMPDIR"] = TDIR          # isolate temps → count this process's .nvdb only
+nvdb_count() = count(f -> endswith(f, ".nvdb"), readdir(TDIR))
+function blob(n, cx, cy, cz; R = 0.25)
+    v = zeros(Float32, n, n, n); CX = cx*n; CY = cy*n; CZ = cz*n; RR = R*n
+    for k in 1:n, j in 1:n, i in 1:n
+        d = sqrt((i-CX)^2 + (j-CY)^2 + (k-CZ)^2); v[i,j,k] = d < RR ? Float32(3*(1 - d/RR)) : 0.0f0
+    end
+    return v
+end
+function centroid(img)
+    H, W = size(img); sr = 0.0; sc = 0.0; nb = 0
+    for h in 1:H, w in 1:W
+        cc = img[h, w]
+        (Float32(cc.r)+Float32(cc.g)+Float32(cc.b)) > 0.04 && (sr += h; sc += w; nb += 1)
+    end
+    return (nb = nb, row = nb > 0 ? sr/nb : -1.0, col = nb > 0 ? sc/nb : -1.0)
+end
+# Edit + re-render inside a function so the centroid isn't lost to top-level soft-scope; returns
+# whether an exception ESCAPED push_to_ovrtx!'s catch (it must not) plus the resulting centroid.
+function edit_render(screen, p, data)
+    esc = false; c = (nb = -1, row = -1.0, col = -1.0)
+    try; p[4][] = data; c = centroid(Makie.colorbuffer(screen)); catch; esc = true; end
+    return (esc, c)
+end
+threw(f) = try; f(); false; catch; true; end            # did calling f() throw? (function → no soft-scope)
+n = 40
+A = blob(n, 0.75, 0.75, 0.25)                            # renders lower-half
+B = blob(n, 0.25, 0.25, 0.75)                            # renders upper-area (diagonally opposite)
+scene = Scene(size=(256,256)); cam3d!(scene)
+update_cam!(scene, Vec3f(38,38,22), Vec3f(0,0,0), Vec3f(0,0,1))
+p = volume!(scene, -10..10, -10..10, -10..10, A; colormap=:viridis)
+screen = OM.Screen(scene)
+c0 = centroid(Makie.colorbuffer(screen))                 # BUILD (real add_usd_reference!)
+robj = screen.plot2robj[objectid(p)]
+println("BUILD_C=", c0)
+
+# ── Fault injection: Ref-gated re-definition of add_usd_reference! (mirrors the OV body). ──
+# flag=false → the real add; flag=true → throw an OVRTXError WITHOUT touching the renderer, i.e.
+# remove_usd! already ran but the add throws.  Installed here (after BUILD) at top level, so the
+# later top-level colorbuffer sees it (world age) and the build above used the real add.
+const INJECT = Ref(false)
+@eval OV function add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::AbstractString)
+    r.alive || error("add_usd_reference! on a closed Renderer")
+    \$(INJECT)[] && throw(LibOVRTX.OVRTXError("add_usd_reference", "injected reload failure (Task-5 test)"))
+    layer_s = String(usda); path_s = String(prim_path)
+    h = Ref{LibOVRTX.ovrtx_usd_handle_t}(0)
+    GC.@preserve layer_s path_s begin
+        enqueue_wait(r, LibOVRTX.ovrtx_add_usd_reference_from_string(
+            r.ptr, LibOVRTX.ovx_string(layer_s), LibOVRTX.ovx_string(path_s), h), "add_usd_reference")
+    end
+    return h[]
+end
+
+INJECT[] = true
+esc1, c1 = edit_render(screen, p, B)                     # failed reload (remove ok, add throws)
+for _ in 1:4; edit_render(screen, p, B); end            # repeat → temps must stay bounded
+tmps_failed = nvdb_count()
+INJECT[] = false
+escR, cR = edit_render(screen, p, B)                     # RECOVERY to octant B (!= build A)
+moved = cR.nb > 0 ? abs(c0.row - cR.row) + abs(c0.col - cR.col) : -1.0
+
+# ── Teardown SITE 1 — _delete_atomic_plot! (screen.jl:211) with a stale handle. ──
+INJECT[] = true
+edit_render(screen, p, A)                                # fail again → p's handle is invalid
+td_delete = threw(() -> delete!(screen, scene, p))       # guarded remove_usd! must NOT throw out
+
+# ── Teardown SITE 2 — the empty! loop (screen.jl:~299) with a stale handle. ──
+INJECT[] = false
+p2 = volume!(scene, -10..10, -10..10, -10..10, B; colormap=:viridis)
+centroid(Makie.colorbuffer(screen))                      # BUILD p2 on the still-open stage (real add)
+INJECT[] = true
+edit_render(screen, p2, A)                               # fail → p2's handle is invalid
+td_empty = threw(() -> empty!(screen))                   # guarded remove_usd! must NOT throw out
+
+close(screen)
+final_tmps = nvdb_count()
+println("FAIL_NO_ESCAPE=", !esc1)                        # (a) failed edit did not escape push_to_ovrtx!
+println("LAST_GOOD=", c1.nb > 100)                       # (b) last good frame kept (still lit)
+println("TMPS_BOUNDED=", tmps_failed <= 2)               # (c) no unbounded leak over 5 failed edits
+println("RECOVERED=", !escR && cR.nb > 100 && moved > 5.0)  # (d) later success re-renders the new grid
+println("TEARDOWN_DELETE_OK=", !td_delete)               # (e1) delete! (site 211) stale handle → no throw
+println("TEARDOWN_EMPTY_OK=", !td_empty)                 # (e2) empty! (site 299) stale handle → no throw
+println("FINAL_TMPS_ZERO=", final_tmps == 0)             #      no orphan temp survives teardown
+println("FAILEDTMPS=", tmps_failed)
+println("OK_FAIL_PATH")
+"""
+
 include("helpers.jl")
 
 @testset "Volumes: live data edit (subprocess)" begin
@@ -130,5 +235,26 @@ end
         @test contains(out, "EMPTY_HAS_ROBJ=false")        # author returned nothing → no render object
         m = match(r"EMPTY_LIT=(\d+)", out)
         @test m !== nothing && parse(Int, m.captures[1]) < 300   # renders (near-)black (nothing authored)
+    end
+end
+
+@testset "Volumes: reload FAILURE path is bounded + recoverable + teardown-safe (subprocess)" begin
+    if !isdir(_LIBS)
+        @test_skip "IndeX libs absent — reload-failure test skipped"
+    else
+        ec = -1; out = ""
+        for _ in 1:4
+            ec, out = run_ovrtx_subprocess(_FAILPATH_PROG; timeout=700, env=("OMNIVERSEMAKIE_INDEX_LIBS"=>_LIBS))
+            contains(out, "BUILD_C=") && break        # rendered → not the intermittent startup crash
+        end
+        contains(out, "OK_FAIL_PATH") || @info "reload-failure output" out
+        @test ec == 0 && contains(out, "OK_FAIL_PATH")   # subprocess completed (no mid-run death)
+        @test contains(out, "FAIL_NO_ESCAPE=true")       # (a) the injected add-failure did not escape the edit
+        @test contains(out, "LAST_GOOD=true")            # (b) the last good frame is kept on failure
+        @test contains(out, "TMPS_BOUNDED=true")           # (c) temp .nvdb count bounded across 5 failed edits
+        @test contains(out, "RECOVERED=true")              # (d) a later successful edit recovers the plot
+        @test contains(out, "TEARDOWN_DELETE_OK=true")     # (e1) delete! (site 211) with a stale handle: no throw
+        @test contains(out, "TEARDOWN_EMPTY_OK=true")      # (e2) empty! (site 299) with a stale handle: no throw
+        @test contains(out, "FINAL_TMPS_ZERO=true")        #      no orphan temp survives teardown
     end
 end

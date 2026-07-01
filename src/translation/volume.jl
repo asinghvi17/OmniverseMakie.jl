@@ -169,16 +169,51 @@ function reload_volume_data!(screen, robj, plot, scalars)
     xr = Makie.to_value(plot[1]); yr = Makie.to_value(plot[2]); zr = Makie.to_value(plot[3])
     origin = GeometryBasics.Point3f(first(xr), first(yr), first(zr))
     extent = GeometryBasics.Vec3f(last(xr) - first(xr), last(yr) - first(yr), last(zr) - first(zr))
-    newtmp = tempname() * ".nvdb"
-    NanoVDBWriter.save_nanovdb(newtmp, data, origin, extent)
-    usda = _vdb_volume_usda(newtmp; prim_path = vprim, field = "density",
-                            colormap = Makie.to_value(plot.colormap),
-                            colorrange = _volume_colorrange(plot, data))
-    OV.remove_usd!(r, robj.usd_handle)                        # drop the stale layer
-    robj.usd_handle = OV.add_usd_reference!(r, usda, vprim)   # fresh layer → fresh temp; update handle
-    old = get(robj.meta, :vdb_tmp, nothing)                  # GC the prior temp (keep the count bounded)
-    old isa AbstractString && old != newtmp && rm(old; force = true)
-    robj.meta[:vdb_tmp] = newtmp
-    OV.reset!(r)                                              # restart RT2 accumulation for the new grid
+    newtmp   = tempname() * ".nvdb"
+    reloaded = false
+    # Recoverable, leak-free, teardown-safe remove-then-add (Task-5 reviewer finding: the
+    # remove/add is non-atomic — a `LibOVRTX.check` throw between them left an orphaned temp AND
+    # a stale `usd_handle`).  The order stays remove-THEN-add (NOT an add-before-remove reorder):
+    #   • LAST-GOOD-FRAME on failure is already preserved by this order — a bare `remove_usd!` does
+    #     NOT clear the volume from the render (IndeX keeps the grid it loaded into its own memory —
+    #     the same "orphaned"/self-managed behavior that makes a `filePath` write a no-op), so on an
+    #     `add_usd_reference!` failure the last successfully-loaded grid keeps rendering (verified:
+    #     failed reload → still lit, non-black).  A reorder would instead keep the prim CONTINUOUSLY
+    #     referenced, which would DEFEAT the reload (the prim must transiently disappear+reappear for
+    #     IndeX to re-read) — so remove-then-add is required for the happy path AND happens to give
+    #     last-good-frame for free.
+    #   • RECOVERY + NO-WEDGE: if the add fails, `robj.meta[:usd_handle_valid]` is set false so the
+    #     stale handle is NOT re-removed on the next edit (on some ovrtx builds `remove_usd!` of an
+    #     already-removed handle throws — which would permanently wedge the plot BEFORE reaching the
+    #     add); the next edit skips straight to a fresh add, which replaces the retained grid and
+    #     RECOVERS the plot.  Teardown reads the same flag (screen.jl) so a stale handle can't abort
+    #     delete!/empty!/close.
+    #   • BOUNDED TEMPS: `newtmp` is written first (cheap, local); the try/finally rm's it on ANY
+    #     failure (save/remove/add), so repeated failed edits do NOT leak (one grid on disk at a time).
+    try
+        NanoVDBWriter.save_nanovdb(newtmp, data, origin, extent)
+        usda = _vdb_volume_usda(newtmp; prim_path = vprim, field = "density",
+                                colormap = Makie.to_value(plot.colormap),
+                                colorrange = _volume_colorrange(plot, data))
+        if get(robj.meta, :usd_handle_valid, true)
+            OV.remove_usd!(r, robj.usd_handle)               # drop the current layer (prim disappears)
+            robj.meta[:usd_handle_valid] = false             # handle now dangling until the add succeeds
+        end
+        robj.usd_handle = OV.add_usd_reference!(r, usda, vprim)  # fresh layer → fresh temp; new handle
+        robj.meta[:usd_handle_valid] = true
+        reloaded = true
+    finally
+        if reloaded
+            old = get(robj.meta, :vdb_tmp, nothing)          # GC the prior temp (keep the count bounded)
+            old isa AbstractString && old != newtmp && rm(old; force = true)
+            robj.meta[:vdb_tmp] = newtmp
+        else
+            rm(newtmp; force = true)                         # threw before the reload completed → GC the orphan
+        end
+    end
+    # No explicit `OV.reset!` here: the diff-node callback sets `scr.requires_update = true`
+    # (compute.jl) after this push, and `colorbuffer`'s `_sync_and_needs_reset!` (screen.jl) issues
+    # the per-frame reset — identical to every other push route (verified: the live-data edit still
+    # re-renders the new grid without an inline reset).
     return nothing
 end

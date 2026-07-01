@@ -195,6 +195,20 @@ end
 # delete! / delete!(scene) / empty! — leak-free imperative teardown (M2.5)
 # ------------------------------------------------------------------
 
+# Remove `robj`'s USD reference IFF the renderer is live AND the handle is still valid.  A volume
+# whose live-data reload FAILED at `add_usd_reference!` (after its old layer was already removed)
+# marks `robj.meta[:usd_handle_valid] = false` (see `reload_volume_data!`); on some ovrtx builds a
+# `remove_usd!` of that already-removed handle throws an `OVRTXError`, which would escape delete!/
+# empty!/close and abort teardown mid-way (skipping the plot2robj/path2plot cleanup).  Guarding on
+# the flag makes teardown safe.  Non-volume plots (and cleanly-built/reloaded volumes) never set the
+# flag → default valid → behaviour unchanged.
+function _teardown_usd_reference!(screen::Screen, robj::OvrtxRObj)
+    if screen.renderer.alive && get(robj.meta, :usd_handle_valid, true)
+        OV.remove_usd!(screen.renderer, robj.usd_handle)
+    end
+    return nothing
+end
+
 # Tear down ONE atomic plot's render object, leaving zero GPU/USD/graph residue.
 # Order mirrors `close(Screen)` (screen.jl): destroy the persistent hot-path
 # bindings FIRST (they are GPU resources owned by the live Renderer — M2.4), THEN
@@ -208,7 +222,7 @@ function _delete_atomic_plot!(screen::Screen, plot::Makie.AbstractPlot)
     robj = get(screen.plot2robj, id, nothing)
     if robj !== nothing
         destroy_bindings!(robj)
-        screen.renderer.alive && OV.remove_usd!(screen.renderer, robj.usd_handle)
+        _teardown_usd_reference!(screen, robj)      # guarded: a stale volume handle can't abort teardown
         delete!(screen.plot2robj, id)
         delete!(screen.path2plot, robj.prim_path)   # M6.B: drop the reverse entry in lockstep
     end
@@ -296,7 +310,7 @@ function Base.empty!(screen::Screen)
     # from screen.scene) so no GPU binding or USD handle leaks, then guarantee empty.
     for (id, robj) in collect(screen.plot2robj)
         destroy_bindings!(robj)
-        screen.renderer.alive && OV.remove_usd!(screen.renderer, robj.usd_handle)
+        _teardown_usd_reference!(screen, robj)      # guarded: a stale volume handle can't abort teardown
         delete!(screen.plot2robj, id)
         delete!(screen.path2plot, robj.prim_path)   # M6.B: drop the reverse entry in lockstep
     end
