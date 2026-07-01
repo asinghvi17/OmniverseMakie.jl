@@ -363,8 +363,13 @@ function build_nanovdb_from_dense(
         for li in lower_to_leaves[lb]
             coord = leaf_coords[li]
             n = lower_coord_to_offset(coord)
+            # A tile is EITHER a child OR an active constant value: mChildMask and mValueMask
+            # are DISJOINT (NanoVDB invariant).  For a child tile set ONLY mChildMask — the
+            # real NanoVDB library leaves mValueMask=0 for children (verified vs bunny/Warp
+            # grids), and traversal checks mChildMask first so a child's mValueMask is never
+            # consulted.  (Setting both made IndeX read the tile as an active constant tile
+            # whose "value" is the child-offset bytes reinterpreted as a tiny float.)
             bitmask_set!(buffer, off + LOWER_CHILDMASK_OFFSET, n)
-            bitmask_set!(buffer, off + LOWER_VALUEMASK_OFFSET, n)
             child_off = Int64(leaf_buf_pos[li] - off)
             write_buf!(buffer, off + LOWER_TABLE_OFFSET + n * 8, child_off)
         end
@@ -383,8 +388,8 @@ function build_nanovdb_from_dense(
         for low_i in upper_to_lowers[ub]
             lb = lower_bases[low_i]
             n = upper_coord_to_offset(lb)
+            # child tile → set ONLY mChildMask (disjoint from mValueMask); see Phase 6 note.
             bitmask_set!(buffer, off + UPPER_CHILDMASK_OFFSET, n)
-            bitmask_set!(buffer, off + UPPER_VALUEMASK_OFFSET, n)
             child_off = Int64(lower_pos(low_i) - off)
             write_buf!(buffer, off + UPPER_TABLE_OFFSET + n * 8, child_off)
         end
