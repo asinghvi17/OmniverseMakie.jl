@@ -237,3 +237,108 @@ println("OK_NAN_LINES")
     @test contains(out, "GAP=true")                  # two clusters, dark centre band → multi-curve split
     @test contains(out, "LIVE_OK=true")              # the live NaN move re-rendered (centroid moved)
 end
+
+# ---------------------------------------------------------------------------
+# Regression: `robj.meta[:curve_npoints]` must be FROZEN at author time — the live-push gate
+# (`_push_curve_positions!`) writes through the persistent `points` binding ONLY when the new
+# split count equals the AUTHOR-time bound size, else one-shot.  The pre-fix code re-assigned
+# the meta on EVERY push, so it tracked the LAST edit, not the bound size.  That made this
+# sequence corrupt-through-binding:
+#   author N=4 (binding buffer = 4)
+#   → edit M=6  (6≠4 → one-shot; pre-fix meta becomes 6)
+#   → edit M=6  (6==meta(6) pre-fix → BINDING write of shape [6] on the 4-sized buffer)
+# The last write is a resize-through-binding on the author-sized buffer — the unverified path
+# ovrtx silently ignores (invisible corruption).  Frozen meta stays 4, so BOTH edits take the
+# proven one-shot path and render correctly, and the 2nd (same-count) edit visibly MOVES.
+#
+# Finite-only polylines (no NaN) keep the split counts exactly equal to the input counts, so the
+# gate math is unambiguous: author 4 pts, both edits 6 pts (different locations).
+# ---------------------------------------------------------------------------
+
+const _B2_FREEZE_PROG = raw"""
+using OmniverseMakie, ColorTypes
+import OmniverseMakie as OM
+
+OM.activate!(warmup = 40)
+
+# author N=4 → points binding sized 4, meta[:curve_npoints] frozen at 4 (centred zigzag).
+p0 = [Point3f(-6, -4, 0), Point3f(-2, 4, 0), Point3f(2, -4, 0), Point3f(6, 4, 0)]                 # 4 pts
+# edit1: M=6 (≠4 → one-shot resize), zigzag on the LEFT.
+p1 = [Point3f(-11, -4, 0), Point3f(-9, 4, 0), Point3f(-7, -4, 0), Point3f(-5, 4, 0), Point3f(-3, -4, 0), Point3f(-1, 4, 0)]  # 6 pts
+# edit2: SAME count M=6, zigzag moved to the RIGHT.  Pre-fix: 6==meta(6) → resize-through-binding
+# on the 4-sized buffer (silently ignored/corrupt).  Fixed: 6≠4 (frozen) → one-shot (correct move).
+p2 = [Point3f(1, -4, 0), Point3f(3, 4, 0), Point3f(5, -4, 0), Point3f(7, 4, 0), Point3f(9, -4, 0), Point3f(11, 4, 0)]        # 6 pts
+
+scene = Scene(size = (320, 320)); cam3d!(scene)
+update_cam!(scene, Vec3f(0, 0, 40), Vec3f(0, 0, 0), Vec3f(0, 1, 0))
+l = lines!(scene, p0; color = :red, linewidth = 8)
+screen = OM.Screen(scene)
+
+function stats(img)
+    H, W = size(img); lit = 0; sr = 0.0; sc = 0.0
+    for h in 1:H, w in 1:W
+        c = img[h, w]
+        if Float32(red(c)) + Float32(green(c)) + Float32(blue(c)) > 0.05
+            lit += 1; sr += h; sc += w
+        end
+    end
+    return (lit = lit, row = lit > 0 ? sr / lit : -1.0, col = lit > 0 ? sc / lit : -1.0)
+end
+
+s0 = stats(Makie.colorbuffer(screen))
+println("S0=", s0)
+robj = screen.plot2robj[objectid(l)]
+author_np = robj.meta[:curve_npoints]
+println("AUTHOR_NP=", author_np)
+
+l[1][] = p1                                    # edit1: M=6, LEFT
+s1 = stats(Makie.colorbuffer(screen))
+np1 = robj.meta[:curve_npoints]
+println("S1=", s1); println("NP_AFTER_EDIT1=", np1)
+
+l[1][] = p2                                    # edit2: SAME M=6, RIGHT
+s2 = stats(Makie.colorbuffer(screen))
+np2 = robj.meta[:curve_npoints]
+println("S2=", s2); println("NP_AFTER_EDIT2=", np2)
+close(screen)
+
+W = 320
+println("AUTHOR_RENDERS=", s0.lit > 200)
+println("EDIT1_RENDERS=", s1.lit > 200)
+println("EDIT2_RENDERS=", s2.lit > 200)
+println("EDIT1_LEFT=", s1.col < W / 2)              # edit1 sits left of centre
+println("EDIT2_RIGHT=", s2.col > W / 2)             # edit2 sits right of centre → not a stale frame
+println("MOVED=", (s2.col - s1.col) > 20.0)         # the 2nd same-count edit visibly moved right
+# THE regression guard: curve_npoints is the FROZEN author-time size after BOTH edits.
+println("FROZEN=", np1 == author_np && np2 == author_np)
+println("OK_FREEZE")
+"""
+
+@testset "B2 curve_npoints FROZEN at author time — same-count re-edit stays one-shot (subprocess)" begin
+    # Retry past the known intermittent GeometryGroup::attachToContext startup crash (house pattern).
+    ec = -1; out = ""
+    for _ in 1:4
+        ec, out = run_ovrtx_subprocess(_B2_FREEZE_PROG; timeout = 900)
+        contains(out, "S0=") && break
+    end
+    contains(out, "OK_FREEZE") || @info "B2 freeze render output" out
+    @test ec == 0 && contains(out, "OK_FREEZE")   # subprocess completed (no crash/corruption)
+    @test contains(out, "AUTHOR_RENDERS=true")    # author frame non-black
+    @test contains(out, "EDIT1_RENDERS=true")     # 1st edit (one-shot resize 4→6) rendered
+    @test contains(out, "EDIT2_RENDERS=true")     # 2nd edit (same count 6) rendered
+    @test contains(out, "EDIT1_LEFT=true")        # 1st edit landed on the left
+    @test contains(out, "EDIT2_RIGHT=true")       # 2nd edit landed on the right (not stale)
+    @test contains(out, "MOVED=true")             # 2nd same-count edit MOVED → not a silently-dropped
+                                                  #   resize-through-binding (proven one-shot path)
+    @test contains(out, "FROZEN=true")            # meta == author count after BOTH edits
+
+    # Belt-and-suspenders: the printed metas — author is 4, and it stays 4 after EACH edit.
+    # Pre-fix (per-push update) NP_AFTER_EDIT1 would be 6 (RED); frozen it is 4 (GREEN).
+    ma = match(r"AUTHOR_NP=(\d+)", out)
+    m1 = match(r"NP_AFTER_EDIT1=(\d+)", out)
+    m2 = match(r"NP_AFTER_EDIT2=(\d+)", out)
+    @test ma !== nothing && m1 !== nothing && m2 !== nothing
+    @test parse(Int, ma.captures[1]) == 4
+    @test parse(Int, m1.captures[1]) == 4         # would be 6 under the pre-fix per-push meta update
+    @test parse(Int, m2.captures[1]) == 4
+end

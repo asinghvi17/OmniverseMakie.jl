@@ -268,7 +268,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Lines, args)
         OV.bind_material!(screen.renderer, path, material_prim_path(plot))
         robj = OvrtxRObj(path, h)
         robj.material_shader = material_prim_path(plot) * "/Shader"
-        robj.meta[:curve_npoints] = length(fpts)          # live-push binding-vs-oneshot gate
+        robj.meta[:curve_npoints] = length(fpts)          # FROZEN bound size for the live-push gate
         return robj
     end
     values, interp = _scaled_to_display(plot, args[:scaled_color], length(fpts))
@@ -439,10 +439,13 @@ _curve_split(::Makie.LineSegments, pts) = _finite_segments(pts)
 # keeps the topology correct across BOTH a finite→NaN split AND the reverse NaN→finite merge (the
 # `:scaled_color` route can't be relied on to fire).
 #
-# The persistent `points` binding is sized at author time (`robj.meta[:curve_npoints]`).  A split
-# that CHANGES the point count takes the one-shot `write_array_attribute!` path — the zero-copy
-# binding is used ONLY at the bound length.  (SPIKE 2: a one-shot resize is reliably honored;
-# resize-UP through a binding sized at author time is NOT relied on.)
+# The persistent `points` binding is sized ONCE at author time; `robj.meta[:curve_npoints]` records
+# that FIXED bound length — FROZEN in `author_usd_prim!` and NEVER reassigned on a push, so the gate
+# below always tests a new split against the TRUE bound size (not the last edit's count).  A split
+# that CHANGES the point count takes the one-shot `write_array_attribute!` path; the zero-copy binding
+# is used ONLY when the new count equals that author-time length.  (SPIKE 2: a one-shot resize is
+# reliably honored; resize through a binding sized at author time is NOT relied on — so a same-count
+# re-edit after a differently-sized one-shot must STILL take one-shot, never a binding write.)
 #
 # NOTE: a PER-VERTEX-coloured line whose live positions edit CHANGES the finite topology does not
 # re-filter `displayColor` here (only the `:scaled_color` route rewrites colours, and it fires on a
@@ -453,12 +456,15 @@ function _push_curve_positions!(screen, robj, plot, binding, value)
     r = screen.renderer; prim = robj.prim_path
     fpts, counts, _ = _curve_split(plot, value)
     OV.write_array_attribute!(r, prim, "curveVertexCounts", Int32.(counts))
+    # Gate on the FROZEN author-time bound size (set once in `author_usd_prim!`, never here): the
+    # zero-copy binding is written ONLY at that exact length; any other count → one-shot (the proven
+    # resize path).  `:curve_npoints` is deliberately NOT updated on a push (see the note above) — an
+    # update would let a same-count re-edit resize-through-binding on the author-sized buffer.
     if binding !== nothing && length(fpts) == get(robj.meta, :curve_npoints, -1)
         _push_points_binding!(binding, fpts)
     else
         OV.write_array_attribute!(r, prim, "points", fpts)
     end
-    robj.meta[:curve_npoints] = length(fpts)
     return nothing
 end
 
