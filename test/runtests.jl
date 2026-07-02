@@ -206,3 +206,12 @@ include("review_b4_scatter_positions_test.jl")
 # key so temp PNGs are unique per input per plot (was `tex_<objectid(nothing)>.png`, a process constant
 # → two plots overwrote each other).  Pure: golden volume-USDA byte-identity + reject/escape cases.
 include("review_b6_usd_hygiene_test.jl")
+
+# Review Track B / Task B7 — authoring-path allocations: `_flat_faces` flattens faces ONCE (killing the
+# three per-face `Int[]` comprehensions) and the USDA emitters take flat `(counts, indices)` + stream
+# every number list through one reused IOBuffer (non-allocating Float32/Int writers) instead of
+# per-element Strings + join; `OvrtxRObj.bindings` is typed `Dict{Symbol,OV.Binding}` and
+# `_push_points_binding!` writes through the reinterpreted Float32 view (no full-buffer copy).  Pure:
+# golden USDA byte-identity anchors + `_flat_faces`/reinterpret-view unit tests + an `@allocated`
+# reduction bound on a 10k-vertex `usda_mesh` (the live binding write is covered by B2/B4).
+include("review_b7_authoring_alloc_test.jl")
