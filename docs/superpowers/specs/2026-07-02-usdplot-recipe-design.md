@@ -198,6 +198,24 @@ longest-prefix walk over `path2plot` so picking a usdplot returns the plot from 
   removed, no leak); with `accumulate_across_frames = true`, a bound update triggers NO
   reset (`OV._RESET_OBSERVER` count) while a plot insert still does; `up = :y` renders a
   Y-up-authored quad upright. One `.usdc` + one payload-file smoke composes and renders.
+- **Real-asset demo (user-requested acceptance):** render the **Zeus ZS300 car** from the
+  Omniverse Kit assets download
+  (`~/temp/dsx-content/DSX_BP_/DSX_BP/Library/Assets/Collected_assembly_Site/art.ov.nvidia.com/Projects/GDC-GTC/2025/GTC25_Aurora/Props/Terraform/VEHICLES/Zeus_zs300/sm_ZeusZS300_a1_1.usd`)
+  via `usdplot!`, **spin its wheels with `bind_usd!`, and `record` a video** for the user to
+  review. Verified asset facts (pxr dump, 2026-07-02): crate `.usd`, defaultPrim `/World`,
+  upAxis Z, `metersPerUnit = 0.01` (author units cm; car ≈ 5.2 m → `Makie.scale!(p, 0.01)`
+  or bbox in raw cm), payload-composed model with **relative** texture paths (exercises the
+  from-file anchor), self-contained MDL materials under `/World/Looks`, and Kit cameras +
+  `/Render` prims as SIBLINGS of `/World` — naturally stripped by the defaultPrim rule.
+  Four wheel prim targets: `/SM_ZeusZS300_A1_1/SM_ZeusZS300_Wheel{FrontLeft,FrontRight,
+  RearLeft,RearRight}_A1_1`. Because `omni:xform` REPLACES a prim's local transform, the
+  spin observable composes `T_wheel · R_axle(θ) · L_wheel` where `T`/`L` are the wheel's
+  authored translate/linear parts (dumped offline with pxr; constants baked into the demo
+  script — the recipe does not parse USD). Recording runs with
+  `accumulate_across_frames = true`; the demo asserts non-black + frame-over-frame wheel
+  motion (pixel diff in the wheel region) and writes an `.mp4` the user watches. This demo
+  doubles as the composition-stack integration test (crate + payload + relative textures +
+  in-file materials + subprim bindings in one asset).
 
 ## Non-goals (v1)
 
