@@ -180,3 +180,11 @@ include("review_b1_colormap_test.jl")
 # Pure: split unit cases + golden byte-identity on no-NaN.  Subprocess: a NaN-separated `lines!`
 # renders two clusters with a GAP + a live NaN move re-renders (spike-verified live curveVertexCounts).
 include("review_b2_nan_lines_test.jl")
+
+# Review Track B / Task B3 — empty→fill rebuild is UNIVERSAL: a plot authored EMPTY (author_usd_prim!
+# returned nothing) used to keep robj===nothing forever, silently dropping a later live FILL.  The
+# diff-node callback's else-branch now takes the BUILD path when robj===nothing and a tracked input
+# changed, registering the pick maps on the late build.  Subprocess: an empty scatter + empty lines
+# fill live → render (>LIT_PX_MIN) + become pickable (the volume empty→fill self-heal is in
+# volumes_live_test.jl's flipped testset).
+include("review_b3_empty_fill_test.jl")

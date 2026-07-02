@@ -14,8 +14,9 @@
 # lit-pixel centroid MOVES detectably (spike: MOVED ~26 px).  Also asserts the temp `.nvdb` count
 # stays BOUNDED (the prior temp is deleted each edit; the last one is cleaned on close).
 #
-# A second testset covers the all-zero (empty-field) no-op: a `volume!` of all zeros authors nothing,
-# renders (near-)black, and registers no render object — it must not crash.
+# A second testset covers the empty→fill self-heal (Task B3): a `volume!` of all zeros authors nothing
+# (near-black, no render object), then a live FILL with GRADED data re-renders via the diff-node
+# late-build path (author_usd_prim! re-runs once `:volume` changes) and registers the render object.
 # Skips cleanly when the Kit IndeX libs dir is absent (CI without them stays green).
 
 using Test
@@ -78,18 +79,31 @@ const _EMPTYVOL_PROG = """
 using OmniverseMakie
 import OmniverseMakie as OM
 using OmniverseMakie: OV
-n = 20; z = zeros(Float32, n, n, n)                # all-zero field → author nothing, render nothing
+# GRADED blob (a UNIFORM fill renders transparent under IndeX Direct — must be spatially varying).
+function blob(n, cx, cy, cz; R = 0.3)
+    v = zeros(Float32, n, n, n); CX = cx*n; CY = cy*n; CZ = cz*n; RR = R*n
+    for k in 1:n, j in 1:n, i in 1:n
+        d = sqrt((i-CX)^2 + (j-CY)^2 + (k-CZ)^2); v[i,j,k] = d < RR ? Float32(3*(1 - d/RR)) : 0.0f0
+    end
+    return v
+end
+litpx(img) = count(c -> (Float32(c.r) + Float32(c.g) + Float32(c.b)) > 0.04, img)
+n = 40; z = zeros(Float32, n, n, n)                # start ALL-ZERO → author nothing, no render object
 scene = Scene(size=(128,128)); cam3d!(scene)
 update_cam!(scene, Vec3f(38,38,22), Vec3f(0,0,0), Vec3f(0,0,1))
 p = volume!(scene, -10..10, -10..10, -10..10, z; colormap=:viridis)
 screen = OM.Screen(scene)
-img = Makie.colorbuffer(screen)                    # must NOT crash on the empty field
-lit = count(c -> (Float32(c.r) + Float32(c.g) + Float32(c.b)) > 0.04, img)
-has_robj = haskey(screen.plot2robj, objectid(p))
+lit0 = litpx(Makie.colorbuffer(screen))            # empty field → (near-)black, must NOT crash
+has0 = haskey(screen.plot2robj, objectid(p))       # false: author returned nothing → not registered
+p[4][] = blob(n, 0.5, 0.5, 0.5)                    # LIVE FILL with graded data → :volume fires → late build
+lit1 = litpx(Makie.colorbuffer(screen))            # now RENDERS the filled grid (the B3 self-heal)
+has1 = haskey(screen.plot2robj, objectid(p))       # true: the late build registered the render object
 close(screen)
 println("INDEX_ENABLED=", OV._index_enabled())
-println("EMPTY_LIT=", lit)                          # ~0: an all-zero field renders nothing
-println("EMPTY_HAS_ROBJ=", has_robj)                # false: author returned nothing → not registered
+println("EMPTY_LIT=", lit0)                         # ~0: an all-zero field renders nothing
+println("EMPTY_HAS_ROBJ=", has0)                    # false before the fill
+println("FILLED_LIT=", lit1)                         # >0: the graded fill renders (late build)
+println("FILLED_HAS_ROBJ=", has1)                   # true: late build registered the plot
 println("OK_EMPTY_VOL")
 """
 
@@ -221,20 +235,25 @@ include("helpers.jl")
     end
 end
 
-@testset "Volumes: all-zero volume! no-ops cleanly (subprocess)" begin
+@testset "Volumes: empty→fill volume late-builds and renders (subprocess)" begin
     if !isdir(_LIBS)
-        @test_skip "IndeX libs absent — empty-volume test skipped"
+        @test_skip "IndeX libs absent — empty→fill volume test skipped"
     else
         ec = -1; out = ""
         for _ in 1:4
             ec, out = run_ovrtx_subprocess(_EMPTYVOL_PROG; timeout=600, env=("OMNIVERSEMAKIE_INDEX_LIBS"=>_LIBS))
             contains(out, "EMPTY_LIT=") && break
         end
-        contains(out, "OK_EMPTY_VOL") || @info "empty volume output" out
-        @test ec == 0 && contains(out, "OK_EMPTY_VOL")     # no crash on the empty field
-        @test contains(out, "EMPTY_HAS_ROBJ=false")        # author returned nothing → no render object
-        m = match(r"EMPTY_LIT=(\d+)", out)
-        @test m !== nothing && parse(Int, m.captures[1]) < 300   # renders (near-)black (nothing authored)
+        contains(out, "OK_EMPTY_VOL") || @info "empty→fill volume output" out
+        @test ec == 0 && contains(out, "OK_EMPTY_VOL")     # no crash on the empty field or the fill
+        # Empty author: all-zero field renders (near-)black and registers no render object.
+        @test contains(out, "EMPTY_HAS_ROBJ=false")        # author returned nothing → not registered
+        m0 = match(r"EMPTY_LIT=(\d+)", out)
+        @test m0 !== nothing && parse(Int, m0.captures[1]) < 300   # (near-)black (nothing authored)
+        # Live FILL with graded data: the late build renders the grid AND registers the plot (B3 self-heal).
+        m1 = match(r"FILLED_LIT=(\d+)", out)
+        @test m1 !== nothing && parse(Int, m1.captures[1]) > 100   # the filled grid renders non-black
+        @test contains(out, "FILLED_HAS_ROBJ=true")        # late build registered the render object
     end
 end
 

@@ -337,10 +337,10 @@ function author_usd_prim!(screen, scene, plot::Makie.Volume, args)
         "Set OMNIVERSEMAKIE_INDEX_LIBS (or OMNIVERSEMAKIE_OVRTX_CONFIG) BEFORE creating the Screen, " *
         "then re-create it.")
     scalars = Float32.(Makie.to_value(plot[4]))
-    # KNOWN LIMITATION (grayscale): an all-zero field authors NOTHING (no render object), so a
-    # later live FILL (`plot[4][] = nonzero`) fires `:volume` but the push finds no robj — an
-    # empty→filled transition on the SAME live screen renders nothing.  Self-heals on a NEW screen
-    # (re-authored from now-non-empty data); build-then-edit works.  Rebuild-on-fill deferred.
+    # An all-zero field authors NOTHING: IndeX renders uniform/zero density fully transparent (M2), so
+    # there is no geometry to author.  A later live FILL (`plot[4][] = nonzero`) now SELF-HEALS — the
+    # diff-node callback's late-build path re-runs author_usd_prim! once `:volume` changes, so an
+    # empty→fill transition renders universally (Task B3).
     all(iszero, scalars) && return nothing
     xr = Makie.to_value(plot[1]); yr = Makie.to_value(plot[2]); zr = Makie.to_value(plot[3])
     origin = GeometryBasics.Point3f(first(xr), first(yr), first(zr))
@@ -698,6 +698,18 @@ end
 # register_ovrtx_robj! — register the diff node, force first resolve (build)
 # ------------------------------------------------------------------
 
+# M6.B pick maps: record the plot↔render-object links (`robj.plot` back-reference + the forward
+# `plot2robj` and reverse `path2plot` maps) so a built reference is pickable.  Called at register
+# time AND after a late (empty→fill) rebuild in the diff-node callback, so a plot authored empty
+# then filled is registered — and pickable — identically to one built non-empty.  Kept in one place
+# so the two maps + the `.plot` back-reference can never drift out of lockstep.
+function _register_robj_maps!(screen, plot, robj::OvrtxRObj)
+    robj.plot = plot
+    screen.plot2robj[objectid(plot)] = robj
+    screen.path2plot[robj.prim_path] = objectid(plot)
+    return robj
+end
+
 """
     register_ovrtx_robj!(screen, scene, plot) -> Union{OvrtxRObj,Nothing}
 
@@ -728,10 +740,7 @@ function register_ovrtx_robj!(screen, scene, plot)
             OV.bind_material!(screen.renderer, path, material_prim_path(plot))
             robj.material_shader = material_prim_path(plot) * "/Shader"
         end
-        robj.plot = plot                                    # M6.B: objectid→Plot for pick resolution
-        screen.plot2robj[objectid(plot)] = robj
-        screen.path2plot[robj.prim_path] = objectid(plot)   # M6.B: keep the reverse map in lockstep
-        return robj
+        return _register_robj_maps!(screen, plot, robj)
     end
 
     attr = plot.attributes
@@ -756,7 +765,24 @@ function register_ovrtx_robj!(screen, scene, plot)
                 robj === nothing || bind_hot_attributes!(scr, robj, plot, args)
             else
                 robj = last.ovrtx_renderobject
-                if robj !== nothing
+                if robj === nothing
+                    # Late (empty→fill) build.  The plot was authored EMPTY (author_usd_prim! returned
+                    # nothing on an empty guard: no points / <2 finite curve pts / all-zero volume), so
+                    # no reference exists on this screen.  A later data edit that FILLS it must BUILD now
+                    # — the SAME path as first resolve (author + bind + register pick maps), so every
+                    # author-time side effect happens identically — else the fill is silently dropped and
+                    # it never renders.  Gate on a real tracked-input change; a build that STILL returns
+                    # nothing (edited but still empty) leaves robj nothing and retries on the next fill
+                    # (self-healing).  Register the pick maps here too (register_ovrtx_robj!'s top-level
+                    # code already ran), so a late-built plot is pickable identically to a first-built one.
+                    if any(n -> n !== :ovrtx_screen && changed[n], keys(args))
+                        robj = author_usd_prim!(scr, scene, plot, args)
+                        if robj !== nothing
+                            bind_hot_attributes!(scr, robj, plot, args)
+                            _register_robj_maps!(scr, plot, robj)
+                        end
+                    end
+                else
                     for name in keys(args)
                         name === :ovrtx_screen && continue
                         changed[name] || continue                    # minimal-delta gate
@@ -770,11 +796,7 @@ function register_ovrtx_robj!(screen, scene, plot)
     end
 
     built = attr[:ovrtx_renderobject][]                              # force resolve → (re)build on `screen`
-    if built !== nothing
-        built.plot = plot                                           # M6.B: objectid→Plot for pick resolution
-        screen.plot2robj[objectid(plot)] = built
-        screen.path2plot[built.prim_path] = objectid(plot)          # M6.B: reverse map in lockstep
-    end
+    built === nothing || _register_robj_maps!(screen, plot, built)  # M6.B: pick maps (objectid↔prim↔plot)
     return built
 end
 
