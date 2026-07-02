@@ -191,6 +191,7 @@ function reload_volume_data!(screen, robj, plot, scalars)
             OV.remove_usd!(r, robj.usd_handle)               # drop the current layer (prim disappears)
             robj.meta[:usd_handle_valid] = false             # handle now dangling until the add succeeds
         end
+        _invalidate_path_resolver!(screen)                   # remove+re-reference swaps composition → drop cached resolver
         robj.usd_handle = OV.add_usd_reference!(r, usda, vprim)  # fresh layer → fresh temp; new handle
         robj.meta[:usd_handle_valid] = true
         reloaded = true

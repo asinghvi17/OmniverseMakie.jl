@@ -75,13 +75,36 @@ end
 # Async lifecycle: enqueue (ovrtx_enqueue_result_t) -> wait_op
 # ------------------------------------------------------------------
 
-function enqueue_wait(r::Renderer, enq, op::AbstractString;
+"""
+    enqueue_wait(f, r::Renderer, op::AbstractString; timeout_ns) -> ovrtx_op_wait_result_t
+
+Run one enqueue-then-wait cycle.  `f` is a THUNK returning the
+`ovrtx_enqueue_result_t` (pass it as a `do` block) — the alive check runs FIRST, so a
+closed Renderer errors cleanly BEFORE the enqueue ccall (whose args would otherwise
+pass `C_NULL` into ovrtx).  After the wait, per-op failures reported in
+`ovrtx_op_wait_result_t.error_op_ids` (e.g. a missing USD file — the enqueue AND the
+wait both still report SUCCESS) are resolved via `ovrtx_get_last_op_error` and thrown
+as `OVRTXError`.
+"""
+function enqueue_wait(f, r::Renderer, op::AbstractString;
                      timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
     r.alive || error("enqueue_wait called on a closed Renderer")
+    enq = f()
     LibOVRTX.check(enq, op)
     wait_ref = Ref{LibOVRTX.ovrtx_op_wait_result_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_wait_op(r.ptr, enq.op_index, LibOVRTX.ovrtx_timeout_t(timeout_ns), wait_ref), op * ":wait")
-    return wait_ref[]
+    wr = wait_ref[]
+    if wr.num_error_ops != 0
+        # Per-op failures surface ONLY here.  error_op_ids + the ovrtx_get_last_op_error
+        # strings are transient thread-local data invalidated by the next ovrtx_wait_op —
+        # copy each String(::ovx_string_t) immediately, same discipline as LibOVRTX.check.
+        msgs = String[]
+        for i in 1:wr.num_error_ops
+            push!(msgs, String(LibOVRTX.ovrtx_get_last_op_error(unsafe_load(wr.error_op_ids, i))))
+        end
+        throw(LibOVRTX.OVRTXError(op, join(msgs, "; ")))
+    end
+    return wr
 end
 
 # ------------------------------------------------------------------
@@ -96,7 +119,9 @@ Open a USD stage from the file at `path`.  Synchronous (enqueue + wait);
 """
 function open_usd!(r::Renderer, path::AbstractString)
     GC.@preserve path begin
-        enqueue_wait(r, LibOVRTX.ovrtx_open_usd_from_file(r.ptr, LibOVRTX.ovx_string(path)), "open_usd")
+        enqueue_wait(r, "open_usd") do
+            LibOVRTX.ovrtx_open_usd_from_file(r.ptr, LibOVRTX.ovx_string(path))
+        end
     end
     return nothing
 end
@@ -108,7 +133,9 @@ Open a USD stage from an in-memory USDA string.  Synchronous.
 """
 function open_usd_string!(r::Renderer, usda::AbstractString)
     GC.@preserve usda begin
-        enqueue_wait(r, LibOVRTX.ovrtx_open_usd_from_string(r.ptr, LibOVRTX.ovx_string(usda)), "open_usd_string")
+        enqueue_wait(r, "open_usd_string") do
+            LibOVRTX.ovrtx_open_usd_from_string(r.ptr, LibOVRTX.ovx_string(usda))
+        end
     end
     return nothing
 end
@@ -149,7 +176,17 @@ function step!(r::Renderer, product::AbstractString;
     GC.@preserve product rp begin
         set = LibOVRTX.ovrtx_render_product_set_t(pointer(rp), Csize_t(1))
         h = Ref{LibOVRTX.ovrtx_step_result_handle_t}(0)
-        enqueue_wait(r, LibOVRTX.ovrtx_step(r.ptr, set, dt, h), "step"; timeout_ns)
+        try
+            enqueue_wait(r, "step"; timeout_ns) do
+                LibOVRTX.ovrtx_step(r.ptr, set, dt, h)
+            end
+        catch
+            # A1 made enqueue_wait a thunk: the enqueue ccall fills h[] BEFORE the wait.
+            # If the wait times out/fails (a finite-timeout M5 path), the results handle
+            # is live but no StepResult owns it — free it best-effort, then rethrow.
+            h[] != 0 && r.alive && LibOVRTX.ovrtx_destroy_results(r.ptr, h[])
+            rethrow()
+        end
         sr = StepResult(r, h[], true)
         finalizer(close, sr)
         return sr
@@ -193,83 +230,100 @@ function _find_var(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::Abst
     return h
 end
 
+# A successful ovrtx_map_render_var_output can still hand back a FAILED output whose
+# .status/.error_message the map result code does NOT reflect (review: never inspected).
+# Throw so a bad map surfaces instead of feeding garbage into the readback.
+function _check_var_output(out::LibOVRTX.ovrtx_render_var_output_t, op::AbstractString)
+    out.status == LibOVRTX.OVRTX_EVENT_FAILURE &&
+        throw(LibOVRTX.OVRTXError(op, String(out.error_message)))
+    return nothing
+end
+
 # ------------------------------------------------------------------
-# map_cpu — fetch results, find LdrColor, map to CPU, copy, unmap
+# map_cpu — fetch results, find LdrColor, map to CPU, single-pass build, unmap
 # ------------------------------------------------------------------
 
 """
-    map_cpu(sr::StepResult, name="LdrColor") -> (pixels::Array{UInt8,3}, W, H)
+    map_cpu(sr::StepResult, name="LdrColor") -> (img::Matrix{RGBA{N0f8}}, W, H)
 
-Fetch results, find render var `name`, map to CPU, COPY (mandatory — mapped mem is
-invalid after unmap), unmap, return `(pixels, W, H)`.  `pixels` is `[C=4, W, H]`
-(channel-fastest).
+Fetch results, find render var `name` (kDLUInt/8 RGBA), map to CPU, and build the
+`(H, W)` display matrix in ONE pass (`cwh_to_matrix`, reinterpret+permute) straight
+from the still-mapped `[C,W,H]` memory — no separate byte copy.  The mapping is
+released in a `finally` (a throw mid-build never leaks it); the returned `img` is
+owned and valid after unmap.  Top-left origin, no y-flip.
 """
 function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
     sr.r.alive || error("map_cpu: the StepResult's Renderer is already closed")
     outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
-
     h = _find_var(outs[], name)
-
     mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
     ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
-
-    # DLTensor: shape [H,W,C], dtype kDLUInt/8/1 (LdrColor)
-    t0  = unsafe_load(ro[].tensors, 1)          # ovrtx_render_var_tensor_t
-    dlt = unsafe_load(t0.dl)                    # DLTensor (Ptr{DLTensor} → value)
-    H   = Int(unsafe_load(dlt.shape, 1))
-    W   = Int(unsafe_load(dlt.shape, 2))
-    C   = Int(unsafe_load(dlt.shape, 3))
-
-    # non-owning [C,W,H] view; COPY before unmap (mapped mem dies on unmap)
-    raw    = unsafe_wrap(Array, Ptr{UInt8}(dlt.data), (C, W, H); own=false)
-    pixels = copy(raw)
-
-    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)  # NOSYNC: CPU map
-
-    return (pixels, W, H)
+    return try
+        _check_var_output(ro[], "map_render_var_output($name)")
+        # DLTensor shape [H,W,C]; wrap the mapped bytes as a non-owning [C,W,H] view.
+        dlt = unsafe_load(unsafe_load(ro[].tensors, 1).dl)
+        H, W, C = Int(unsafe_load(dlt.shape, 1)), Int(unsafe_load(dlt.shape, 2)), Int(unsafe_load(dlt.shape, 3))
+        raw = unsafe_wrap(Array, Ptr{UInt8}(dlt.data), (C, W, H); own=false)
+        (cwh_to_matrix(raw), W, H)          # single pass → owned Matrix, safe post-unmap
+    finally
+        # NOSYNC: CPU map.  Checked — an unmap failure means the build above may be invalid.
+        LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
+                       "unmap_render_var_output")
+    end
 end
 
 # ------------------------------------------------------------------
-# map_cpu_f32 — like map_cpu but returns a Float32 [C,W,H] array.
-# HdrColor is kDLFloat/16 (verified: dtype.code=kDLFloat, dtype.bits=16);
-# we read via Ptr{Float16} and convert to Float32 for the tonemap path.
+# with_mapped_hdr — map an HDR render var, run `f` on the mapped view, unmap
+#
+# HdrColor is kDLFloat/16 (verified: dtype.code=kDLFloat, dtype.bits=16).  The
+# scoped/callback form owns the map lifetime (unmap in `finally`) so a throwing `f`
+# never leaks it; `map_cpu_f32` is the eager-copy convenience over it.  INT-2 tonemaps
+# the mapped view in place through this same signature.
 # ------------------------------------------------------------------
+
+"""
+    with_mapped_hdr(f, sr::StepResult, name="HdrColor") -> f's result
+
+Fetch results, find render var `name`, map it to CPU, and call `f(raw16, W, H)` where
+`raw16` is the still-mapped, non-owning `[C=4, W, H]` `Float16` view (channel-fastest).
+The mapping is released in a `finally` — even if `f` throws — so it never leaks; `f`'s
+return value is passed through.  `raw16` is INVALID once `f` returns (mapped memory
+dies on unmap): copy anything you keep.
+"""
+function with_mapped_hdr(f, sr::StepResult, name::AbstractString="HdrColor")
+    sr.r.alive || error("with_mapped_hdr on a closed Renderer")
+    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
+    h = _find_var(outs[], name)
+    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
+    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
+    return try
+        _check_var_output(ro[], "map_render_var_output($name)")
+        # DLTensor shape [H,W,C], dtype kDLFloat/16/1; wrap mapped bytes as [C,W,H] Float16.
+        dlt = unsafe_load(unsafe_load(ro[].tensors, 1).dl)
+        H, W, C = Int(unsafe_load(dlt.shape, 1)), Int(unsafe_load(dlt.shape, 2)), Int(unsafe_load(dlt.shape, 3))
+        raw16 = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
+        f(raw16, W, H)
+    finally
+        # NOSYNC: CPU map.  Checked — an unmap failure means the mapped read may be invalid.
+        LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
+                       "unmap_render_var_output")
+    end
+end
 
 """
     map_cpu_f32(sr::StepResult, name) -> (pixels::Array{Float32,3}, W, H)
 
-Like `map_cpu` but for the HDR path: `HdrColor` is kDLFloat/16 on the wire; read
-via `Ptr{Float16}` and convert to Float32 (copy before unmap).  `pixels` is
-`[C=4, W, H]` (channel-fastest).
+Eager HDR readback: `with_mapped_hdr` + a `Float16`→`Float32` copy of the mapped
+view.  `pixels` is an owned `[C=4, W, H]` (channel-fastest) array.
 """
-function map_cpu_f32(sr::StepResult, name::AbstractString)
-    sr.r.alive || error("map_cpu_f32 on a closed Renderer")
-    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
-
-    h = _find_var(outs[], name)
-
-    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
-    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
-
-    # DLTensor: shape [H,W,C], dtype kDLFloat/16/1 (HdrColor)
-    t0  = unsafe_load(ro[].tensors, 1)
-    dlt = unsafe_load(t0.dl)
-    H   = Int(unsafe_load(dlt.shape, 1))
-    W   = Int(unsafe_load(dlt.shape, 2))
-    C   = Int(unsafe_load(dlt.shape, 3))
-
-    # non-owning Float16 [C,W,H] view; Float16→Float32 + copy before unmap
-    raw16  = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
-    pixels = Float32.(raw16)
-
-    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)  # NOSYNC: CPU map
-
-    return (pixels, W, H)
-end
+map_cpu_f32(sr::StepResult, name::AbstractString) =
+    with_mapped_hdr(sr, name) do raw16, W, H
+        (Float32.(raw16), W, H)
+    end
 
 # ------------------------------------------------------------------
 # map_cuda / unmap_cuda — map a render var as LINEAR CUDA device memory (M6.A)
@@ -315,6 +369,14 @@ function map_cuda(sr::StepResult, name::AbstractString="HdrColor")
     mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CUDA, Csize_t(0)))
     ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output(cuda)")
+
+    # This path returns the LIVE mapping (no finally), so on a FAILED output release the
+    # just-acquired mapping before surfacing the error (review: .status was never checked).
+    if ro[].status == LibOVRTX.OVRTX_EVENT_FAILURE
+        msg = String(ro[].error_message)
+        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)
+        throw(LibOVRTX.OVRTXError("map_render_var_output(cuda:$name)", msg))
+    end
 
     # DLTensor: shape [H,W,C], dtype kDLFloat/16/1 (HdrColor); CUdeviceptr in .data
     t0  = unsafe_load(ro[].tensors, 1)          # ovrtx_render_var_tensor_t
@@ -380,7 +442,9 @@ function enqueue_pick_query(r::Renderer, product::AbstractString, rect::NTuple{4
     GC.@preserve prod_s begin
         desc = Ref(LibOVRTX.ovrtx_pick_query_desc_t(LibOVRTX.ovx_string(prod_s),
                    Int32(rect[1]), Int32(rect[2]), Int32(rect[3]), Int32(rect[4]), flags))
-        enqueue_wait(r, LibOVRTX.ovrtx_enqueue_pick_query(r.ptr, desc), "enqueue_pick_query")
+        enqueue_wait(r, "enqueue_pick_query") do
+            LibOVRTX.ovrtx_enqueue_pick_query(r.ptr, desc)
+        end
     end
     return nothing
 end
@@ -467,11 +531,18 @@ end
 """
     PathResolver
 
-Wraps the renderer's `path_dictionary_instance_t` + loaded vtable so
+Wraps the owning `Renderer` + its `path_dictionary_instance_t` + loaded vtable so
 `resolve_prim_path` can call the two path-dictionary fns via raw fn-pointers.  Build
-with `path_resolver(r)`; valid while the stage composition is unchanged.
+with `path_resolver(r)`.
+
+COMPOSITION-SCOPED: the captured dictionary context is valid only while the stage
+composition is unchanged — DISCARD and rebuild after any `add_usd_reference!` /
+`remove_usd!` (the Screen cache does exactly this in `path_resolver_for`).  `r` is
+retained so it can be alive-checked and `GC.@preserve`d across the raw-pointer ccalls
+(the vtable fns dereference the renderer-owned context).
 """
 struct PathResolver
+    r::Renderer
     pd::Base.RefValue{LibOVRTX.path_dictionary_instance_t}
     vt::LibOVRTX.path_dictionary_vtable_t
 end
@@ -486,7 +557,7 @@ function path_resolver(r::Renderer)
     r.alive || error("path_resolver on a closed Renderer")
     pd = Ref{LibOVRTX.path_dictionary_instance_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_get_path_dictionary(r.ptr, pd), "get_path_dictionary")
-    return PathResolver(pd, unsafe_load(pd[].vtable))
+    return PathResolver(r, pd, unsafe_load(pd[].vtable))
 end
 
 """
@@ -498,6 +569,8 @@ vtable: `get_tokens_from_paths`, then per-token `get_strings_from_tokens`, joine
 `docs_resolve_primpath`.
 """
 function resolve_prim_path(pr::PathResolver, id::UInt64)::String
+    r = pr.r
+    r.alive || error("resolve_prim_path on a closed Renderer")
     ctx        = Ptr{Cvoid}(pr.pd[].context)
     idref      = Ref(id)
     token_buf  = Vector{UInt64}(undef, 64)
@@ -505,7 +578,9 @@ function resolve_prim_path(pr::PathResolver, id::UInt64)::String
     out_ntok   = Ref{Csize_t}(0)
     out_nproc  = Ref{Csize_t}(0)
     # out_tokens points INTO token_buf; keep it (and idref) preserved across BOTH ccalls.
-    GC.@preserve token_buf idref begin
+    # `r` is preserved too so the Renderer owning the dictionary context these raw vtable
+    # pointers dereference cannot be finalized mid-ccall.
+    GC.@preserve token_buf idref r begin
         res = @ccall $(pr.vt.get_tokens_from_paths)(
             ctx::Ptr{Cvoid}, idref::Ptr{UInt64}, Csize_t(1)::Csize_t,
             pointer(token_buf)::Ptr{UInt64}, Csize_t(64)::Csize_t,
@@ -566,8 +641,9 @@ function set_selection_outline_group!(r::Renderer, prim_paths::Vector{String}, g
         GC.@preserve dl_arr begin
             ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
                        Ptr{UInt8}(C_NULL), Csize_t(0), LibOVRTX.NOSYNC, LibOVRTX.NOSYNC))
-            enqueue_wait(r, LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
-                         "set_selection_outline_group")
+            enqueue_wait(r, "set_selection_outline_group") do
+                LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC)
+            end
         end
     end
     return nothing
@@ -586,8 +662,10 @@ function set_selection_group_styles!(r::Renderer, group_ids::Vector{UInt8},
     length(group_ids) == length(styles) ||
         error("set_selection_group_styles!: group_ids ($(length(group_ids))) and styles ($(length(styles))) length mismatch")
     GC.@preserve group_ids styles begin
-        enqueue_wait(r, LibOVRTX.ovrtx_set_selection_group_styles(r.ptr, pointer(group_ids),
-                     pointer(styles), Csize_t(length(group_ids))), "set_selection_group_styles")
+        enqueue_wait(r, "set_selection_group_styles") do
+            LibOVRTX.ovrtx_set_selection_group_styles(r.ptr, pointer(group_ids),
+                pointer(styles), Csize_t(length(group_ids)))
+        end
     end
     return nothing
 end
@@ -634,12 +712,12 @@ function render_to_matrix(r::Renderer, product::AbstractString;
         sr = step!(r, product; timeout_ns); close(sr)
     end
     sr = step!(r, product; timeout_ns)
-    pixels, W, H = try
-        map_cpu(sr, "LdrColor")
+    img, _W, _H = try
+        map_cpu(sr, "LdrColor")     # single-pass: already the (H, W) RGBA matrix
     finally
         close(sr)
     end
-    return cwh_to_matrix(pixels)
+    return img
 end
 
 # ------------------------------------------------------------------
@@ -653,7 +731,9 @@ Enqueue + wait an RT2 accumulation reset.  Call after any geometry/camera change
 the path-tracer restarts fresh.
 """
 function reset!(r::Renderer; time::Float64=0.0)
-    enqueue_wait(r, LibOVRTX.ovrtx_reset(r.ptr, time), "reset")
+    enqueue_wait(r, "reset") do
+        LibOVRTX.ovrtx_reset(r.ptr, time)
+    end
     return nothing
 end
 
@@ -705,8 +785,9 @@ function _write_attribute!(r::Renderer, prim::AbstractString, attr_name::Abstrac
                 LibOVRTX.NOSYNC,
                 LibOVRTX.NOSYNC,
             ))
-            enqueue_wait(r, LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
-                         "write_attribute($attr_name)")
+            enqueue_wait(r, "write_attribute($attr_name)") do
+                LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC)
+            end
         end
     end
     return nothing
@@ -872,10 +953,10 @@ function add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::Abstra
     path_s  = String(prim_path)
     h = Ref{LibOVRTX.ovrtx_usd_handle_t}(0)
     GC.@preserve layer_s path_s begin
-        enqueue_wait(r,
+        enqueue_wait(r, "add_usd_reference") do
             LibOVRTX.ovrtx_add_usd_reference_from_string(
-                r.ptr, LibOVRTX.ovx_string(layer_s), LibOVRTX.ovx_string(path_s), h),
-            "add_usd_reference")
+                r.ptr, LibOVRTX.ovx_string(layer_s), LibOVRTX.ovx_string(path_s), h)
+        end
     end
     return h[]
 end
@@ -886,7 +967,9 @@ end
 Remove the USD layer previously added via `add_usd_reference!`.
 """
 function remove_usd!(r::Renderer, handle::LibOVRTX.ovrtx_usd_handle_t)
-    enqueue_wait(r, LibOVRTX.ovrtx_remove_usd(r.ptr, handle), "remove_usd")
+    enqueue_wait(r, "remove_usd") do
+        LibOVRTX.ovrtx_remove_usd(r.ptr, handle)
+    end
     return nothing
 end
 
@@ -962,13 +1045,14 @@ function create_binding(r::Renderer, prim::AbstractString, name::AbstractString,
             attr_lookup, attr_type, LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY, flags)
         bref = Ref(bdesc)
         GC.@preserve bref begin
-            enqueue_wait(r, LibOVRTX.ovrtx_create_attribute_binding(r.ptr, bref, handle),
-                         "create_attribute_binding($name)")
+            enqueue_wait(r, "create_attribute_binding($name)") do
+                LibOVRTX.ovrtx_create_attribute_binding(r.ptr, bref, handle)
+            end
         end
     end
     b = Binding(r, handle[], prim_s, name_s, dtype, array, semantic,
                 LibOVRTX.ovrtx_map_handle_t(0), true)
-    finalizer(destroy!, b)
+    finalizer(b -> destroy!(b; from_finalizer=true), b)
     return b
 end
 
@@ -992,16 +1076,40 @@ function map_binding(b::Binding; device=LibOVRTX.kDLCPU, device_id::Integer=0)
     return Ptr{Cvoid}(m.dl.data)
 end
 
-"""
-    unmap!(b::Binding)
+# Finalizer-path teardown must not wedge GC and must never let an error escape (a throw would
+# abort the finalizer before we clear `alive`, and finalizers must not throw).  So the
+# finalizer path (from_finalizer=true) waits under this FINITE bound instead of INFINITE and
+# swallows any failure — 5 s is generous for a normal unmap/destroy yet keeps GC bounded.
+const _FINALIZER_TIMEOUT_NS = UInt64(5_000_000_000)
 
-Commit + release a `map_binding` mapping (async unmap + wait).  No-op when not mapped
-or the Renderer is closed.
+# Bindings whose finalizer-path teardown swallowed an error (a leaked GPU handle — the
+# renderer close frees the whole pool regardless).  A bare counter, NOT a @warn: logging from
+# a finalizer would build a String and do I/O, both of which task-switch (illegal there).
+const _BINDING_FINALIZER_LEAKS = Ref{Int}(0)
+
 """
-function unmap!(b::Binding)
+    binding_finalizer_leak_count() -> Int
+
+How many `Binding`s had their GC-finalizer teardown swallow an ovrtx error (handle leaked,
+reclaimed at renderer close).  Observability for the otherwise-silent finalizer path.
+"""
+binding_finalizer_leak_count() = _BINDING_FINALIZER_LEAKS[]
+
+"""
+    unmap!(b::Binding; from_finalizer::Bool=false)
+
+Commit + release a `map_binding` mapping (async unmap + wait).  No-op when not mapped or the
+Renderer is closed.  `from_finalizer=true` bounds the wait (`_FINALIZER_TIMEOUT_NS`) for the
+GC-finalizer teardown path, where the caller (`destroy!`) swallows any resulting error.
+"""
+function unmap!(b::Binding; from_finalizer::Bool=false)
     b.map_handle == 0 && return nothing
-    b.r.alive && enqueue_wait(b.r, LibOVRTX.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, LibOVRTX.NOSYNC),
-                              "unmap_attribute")
+    if b.r.alive
+        timeout_ns = from_finalizer ? _FINALIZER_TIMEOUT_NS : _TIMEOUT_INFINITE_NS
+        enqueue_wait(b.r, "unmap_attribute"; timeout_ns) do
+            LibOVRTX.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, LibOVRTX.NOSYNC)
+        end
+    end
     b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
     return nothing
 end
@@ -1048,28 +1156,54 @@ function write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
         GC.@preserve dl_arr begin
             ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
                        Ptr{UInt8}(C_NULL), Csize_t(0), LibOVRTX.NOSYNC, LibOVRTX.NOSYNC))
-            enqueue_wait(b.r, LibOVRTX.ovrtx_write_attribute(b.r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
-                         "write_attribute(binding:$(b.attr_name))")
+            enqueue_wait(b.r, "write_attribute(binding:$(b.attr_name))") do
+                LibOVRTX.ovrtx_write_attribute(b.r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC)
+            end
         end
     end
     return nothing
 end
 
-"""
-    destroy!(b::Binding)
-
-Release the persistent binding (`ovrtx_destroy_attribute_binding`).  Idempotent;
-unmaps first if mapped; no-op once the Renderer is closed (GPU pool already freed).
-"""
-function destroy!(b::Binding)
-    b.alive || return nothing
-    if b.r.alive
-        b.map_handle == 0 || unmap!(b)
-        enqueue_wait(b.r, LibOVRTX.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle),
-                     "destroy_attribute_binding")
+# The ovrtx side of teardown: unmap-if-mapped, then destroy the handle, waiting under
+# `timeout_ns`.  NO flag-clearing here — `destroy!` owns `alive`/`map_handle`, so its throwing
+# and swallowing paths share this.  No-op once the Renderer is closed (GPU pool already freed).
+function _destroy_binding_ovrtx!(b::Binding, timeout_ns::UInt64, from_finalizer::Bool)
+    b.r.alive || return nothing
+    b.map_handle == 0 || unmap!(b; from_finalizer)
+    enqueue_wait(b.r, "destroy_attribute_binding"; timeout_ns) do
+        LibOVRTX.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle)
     end
-    b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
-    b.alive = false
+    return nothing
+end
+
+"""
+    destroy!(b::Binding; from_finalizer::Bool=false)
+
+Release the persistent binding (`ovrtx_destroy_attribute_binding`).  Idempotent; unmaps
+first if mapped; no-op once the Renderer is closed.
+
+Explicit calls wait INFINITE and propagate ovrtx errors.  The GC finalizer registers
+`from_finalizer=true`: that path waits under `_FINALIZER_TIMEOUT_NS` and swallows any error
+AFTER marking the binding dead (`alive=false`, `map_handle=0`) — leaking one handle beats
+wedging GC on a stuck queue or throwing out of a finalizer, and renderer close frees the
+pool.  Each swallowed error bumps `binding_finalizer_leak_count()`.
+"""
+function destroy!(b::Binding; from_finalizer::Bool=false)
+    b.alive || return nothing
+    if from_finalizer
+        try
+            _destroy_binding_ovrtx!(b, _FINALIZER_TIMEOUT_NS, true)
+        catch
+            _BINDING_FINALIZER_LEAKS[] += 1
+        finally
+            b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
+            b.alive = false
+        end
+    else
+        _destroy_binding_ovrtx!(b, _TIMEOUT_INFINITE_NS, false)
+        b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
+        b.alive = false
+    end
     return nothing
 end
 

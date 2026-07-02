@@ -25,11 +25,13 @@ include("libovrtx_api.jl")  # generated 1:1 ccalls + structs + @cenum + const ma
 const OVRTX_TIMEOUT_INFINITE = ovrtx_timeout_t(typemax(UInt64))
 const NOSYNC = ovrtx_cuda_sync_t(0, 0)
 
-# --- ovx_string_t surfacing (caller must GC.@preserve the backing String) ---------
-# String / SubString only: Base.unsafe_convert(Cstring, ⋅) needs contiguous,
-# NUL-terminated bytes — convert other AbstractString subtypes to String first.
-ovx_string(s::Union{String,SubString{String}}) =
-    ovx_string_t(Base.unsafe_convert(Cstring, s), ncodeunits(s))
+# --- ovx_string_t surfacing (a raw ptr+len; caller GC.@preserve's the backing String) ---
+# Only a `String` is contiguous AND NUL-terminated, so Base.unsafe_convert(Cstring, ::String)
+# hands back its pointer with no copy.  Every other AbstractString — SubString included; it
+# carries no terminating NUL, so unsafe_convert(Cstring, ⋅) has no method for it — is first
+# materialized via String(s); that fresh String is then what backs the ovx_string_t.
+ovx_string(s::String) = ovx_string_t(Base.unsafe_convert(Cstring, s), ncodeunits(s))
+ovx_string(s::AbstractString) = ovx_string(String(s))
 function Base.String(s::ovx_string_t)
     s.ptr == C_NULL && return ""
     return unsafe_string(Ptr{UInt8}(s.ptr), s.length)

@@ -215,3 +215,37 @@ include("review_b6_usd_hygiene_test.jl")
 # golden USDA byte-identity anchors + `_flat_faces`/reinterpret-view unit tests + an `@allocated`
 # reduction bound on a 10k-vertex `usda_mesh` (the live binding write is covered by B2/B4).
 include("review_b7_authoring_alloc_test.jl")
+
+# Review Track A / Task A1 — OV.enqueue_wait op-error propagation + alive-check ordering:
+# open_usd! on a missing file throws OVRTXError (resolved from ovrtx_op_wait_result_t.error_op_ids,
+# which the enqueue/wait status hides); step!/reset! on a closed Renderer error cleanly before any
+# ccall now that the enqueue is a deferred thunk (subprocess).
+include("a1_op_error_test.jl")
+
+# Review Track A / Task A2 — leak-proof readback + with_mapped_hdr: the single-pass
+# OV.cwh_to_matrix equals the old two-pass loop (pure, synthetic [C,W,H]); with_mapped_hdr
+# passes f's result through and unmaps in `finally` when f throws (subsequent map succeeds)
+# (subprocess, CPU map — no CUDA/GL).
+include("a2_readback_test.jl")
+
+# Review Track A / Task A3 — PathResolver lifetime + Screen path-resolver cache invalidation:
+# the cached resolver is composition-scoped, so it is dropped at every add_usd_reference!/
+# remove_usd! (plot delete/insert, empty!, volume reload) and rebuilt lazily on the next pick;
+# a pick after delete+re-add resolves the NEW plot, not a stale dictionary (subprocess).
+include("a3_resolver_test.jl")
+
+# Review Track A / Task A4 — GC-safe Binding finalizer + ovx_string SubString fix: the
+# finalizer registers destroy!(; from_finalizer=true), which bounds its wait + swallows errors
+# after force-marking the binding dead (leak-count observability); ovx_string routes non-String
+# AbstractStrings through String(s) (the SubString branch was a guaranteed MethodError) while a
+# plain String stays zero-copy.  Both testsets are PURE (no GPU): ovx_string round-trip + the
+# destroy! flag paths on a hand-built closed Renderer (ccall teardown stays on m2_binding/m2_delete).
+include("a4_binding_string_test.jl")
+
+# Review Track A / Task A5 — index-config synthesis robustness: _synth_index_config now
+# JSON-escapes the env libs path (OV._json_escape: backslash/quote/control chars) so a `"`
+# or `\` can't produce invalid JSON, and anchors the token merge to the TOP-LEVEL (line-start,
+# top-indent) `"app": {` via OV._find_top_level_app (skipping a nested/decoy "app" and erroring
+# when no top-level block exists).  PURE: JSON5 fixtures in a temp dir, golden byte-stability,
+# escaped-value round-trip, nested-before-top-level targeting, and no-top-level-app errors.
+include("a5_index_config_test.jl")

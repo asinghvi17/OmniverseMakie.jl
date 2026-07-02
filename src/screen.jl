@@ -192,6 +192,7 @@ end
 function _teardown_usd_reference!(screen::Screen, robj::OvrtxRObj)
     if screen.renderer.alive && get(robj.meta, :usd_handle_valid, true)
         OV.remove_usd!(screen.renderer, robj.usd_handle)
+        _invalidate_path_resolver!(screen)          # stage composition changed → drop cached resolver
     end
     return nothing
 end
@@ -414,9 +415,11 @@ function _element_index(plot, instance_id::UInt64)::Int
     return (plot isa Makie.Scatter || plot isa Makie.MeshScatter) ? Int(instance_id) + 1 : 0
 end
 
-# Build + cache the renderer's PathResolver ONCE per Screen.  The path dictionary is a LIVE
-# renderer handle (valid for the renderer's life, reflects stage edits), so one resolver serves
-# every pick.  A rebuilt Screen (resize) starts at `path_resolver === nothing` and builds its own.
+# Lazily build + cache the renderer's PathResolver for picks.  COMPOSITION-SCOPED: the cached
+# resolver captures the path dictionary as of the CURRENT stage composition, so it is dropped
+# (`_invalidate_path_resolver!`) at every composition change — plot insert/delete, empty!, volume
+# reload — and rebuilt here on the next pick.  A rebuilt Screen (resize) also starts at
+# `path_resolver === nothing` and builds its own.
 function path_resolver_for(screen::Screen)
     pr = screen.path_resolver
     pr === nothing || return pr
@@ -424,6 +427,11 @@ function path_resolver_for(screen::Screen)
     screen.path_resolver = pr
     return pr
 end
+
+# Drop the cached PathResolver: the dictionary it captured is valid only for the stage
+# composition at build time, so any add_usd_reference!/remove_usd! (plot insert/delete, empty!,
+# volume reload) must invalidate it.  Rebuilt lazily on the next pick (path_resolver_for).
+_invalidate_path_resolver!(screen::Screen) = (screen.path_resolver = nothing; nothing)
 
 # Resolve a hit prim path to the owning plot's `objectid` by walking UP the path until a
 # `path2plot` entry matches.  A Mesh hit hits the plot prim exactly; a Scatter/MeshScatter hit

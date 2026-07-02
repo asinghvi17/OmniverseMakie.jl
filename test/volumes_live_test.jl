@@ -172,8 +172,10 @@ const INJECT = Ref(false)
     layer_s = String(usda); path_s = String(prim_path)
     h = Ref{LibOVRTX.ovrtx_usd_handle_t}(0)
     GC.@preserve layer_s path_s begin
-        enqueue_wait(r, LibOVRTX.ovrtx_add_usd_reference_from_string(
-            r.ptr, LibOVRTX.ovx_string(layer_s), LibOVRTX.ovx_string(path_s), h), "add_usd_reference")
+        enqueue_wait(r, "add_usd_reference") do
+            LibOVRTX.ovrtx_add_usd_reference_from_string(
+                r.ptr, LibOVRTX.ovx_string(layer_s), LibOVRTX.ovx_string(path_s), h)
+        end
     end
     return h[]
 end

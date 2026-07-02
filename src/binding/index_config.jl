@@ -23,18 +23,56 @@
 # Set to true by `_ensure_index` iff IndeX was enabled this process.  Read by `_index_enabled`.
 const _INDEX_ENABLED = Ref(false)
 
+# JSON-escape a value for embedding as a JSON string: backslash, double-quote, and the
+# control chars U+0000-U+001F (the JSON-mandatory escape set); everything else (incl. non-ASCII
+# UTF-8) is emitted verbatim.  The env-supplied `libs` path flows through here so a `"` or `\`
+# in it can't produce invalid JSON that carb rejects at init.
+function _json_escape(s::AbstractString)
+    io = IOBuffer()
+    for c in s
+        if     c == '\\';  print(io, "\\\\")
+        elseif c == '"';   print(io, "\\\"")
+        elseif c == '\b';  print(io, "\\b")
+        elseif c == '\f';  print(io, "\\f")
+        elseif c == '\n';  print(io, "\\n")
+        elseif c == '\r';  print(io, "\\r")
+        elseif c == '\t';  print(io, "\\t")
+        elseif c < '\x20'; print(io, "\\u", string(UInt32(c); base = 16, pad = 4))
+        else               print(io, c)
+        end
+    end
+    return String(take!(io))
+end
+
+# Locate the TOP-LEVEL `"app": {` object key carb actually reads — a line-start `"app"` key at
+# the file's top-level indentation (that of the first object key line) — and return its
+# `RegexMatch` (whose `.match` ends at the opening `{`), or `nothing` if there is no top-level
+# block.  A NESTED `"app"` (deeper indent) or a `"app": {` inside a string value is NOT matched:
+# the old first-substring merge could plant the token in such a spot, where carb silently
+# ignores it.  Spacing around the colon/brace is tolerated (the old exact-string match was
+# brittle).  `indent` holds only spaces/tabs, so it is regex-safe to interpolate.
+function _find_top_level_app(base::AbstractString)
+    first_key = match(r"^([ \t]+)\""m, base)   # first indented object key ⇒ top-level indent
+    first_key === nothing && return nothing
+    indent = first_key.captures[1]
+    return match(Regex("^" * indent * "\"app\"[ \\t]*:[ \\t]*\\{", "m"), base)
+end
+
 # Synthesize a carb config registering /app/tokens/omni.index.libs = `libs`; return its path.
 # The install ovrtx.config.json is JSON5 (trailing commas) with a top-level `"app": {` block,
 # so MERGE a `tokens` sub-key by minimal text surgery — NOT parse+reserialize (a strict JSON
 # writer would drop comments/trailing-commas and reorder keys).  Copying the whole file keeps
 # the install's log/graphics/crashreporter settings, since the CARB_FRAMEWORK_CONFIG_NAME
-# config REPLACES the default ovrtx.config.json.
+# config REPLACES the default ovrtx.config.json.  The libs value is JSON-escaped and the merge
+# is anchored to the top-level `"app"` block (see `_json_escape` / `_find_top_level_app`).
 function _synth_index_config(ovrtx_bin::AbstractString, libs::AbstractString)
     base = read(joinpath(ovrtx_bin, "ovrtx.config.json"), String)
-    occursin("\"app\": {", base) ||
+    m = _find_top_level_app(base)
+    m === nothing &&
         error("ovrtx.config.json has no top-level \"app\" block to merge the IndeX token into")
-    token_block = "\n        \"tokens\": {\n            \"omni.index.libs\": \"$(libs)\"\n        },"
-    merged = replace(base, "\"app\": {" => "\"app\": {" * token_block; count = 1)
+    token_block = "\n        \"tokens\": {\n            \"omni.index.libs\": \"$(_json_escape(libs))\"\n        },"
+    endidx = m.offset + ncodeunits(m.match) - 1      # byte index of the matched `… "app": {` end
+    merged = base[1:endidx] * token_block * base[endidx + 1:end]
     path = joinpath(mktempdir(), "idx.config.json")
     write(path, merged)
     return path
