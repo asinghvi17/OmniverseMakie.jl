@@ -197,3 +197,12 @@ include("review_b3_empty_fill_test.jl")
 # reset burn).  Subprocess: a live position edit MOVES a non-materialized scatter+meshscatter centroid;
 # a materialized edit leaves the image UNCHANGED + warns once + is NOT routed.
 include("review_b4_scatter_positions_test.jl")
+
+# Review Track B / Task B6 — USD string hygiene + texture-name collision: user-supplied strings enter
+# USDA as identifiers (VDB `field`, camera-path segments) and `@asset@` paths (textures, MDL source,
+# `.vdb` filePath).  `_usd_identifier` (assert [A-Za-z_][A-Za-z0-9_]*) + `_usd_asset_path` (wrap `@…@`,
+# escape `@`→`@@@…@@@`, error on embedded `@@@`) guard every emit site; camera-path SEGMENTS are now
+# identifier-checked (a space no longer passes).  `_texture_asset_for` gets the REAL plot + a per-input
+# key so temp PNGs are unique per input per plot (was `tex_<objectid(nothing)>.png`, a process constant
+# → two plots overwrote each other).  Pure: golden volume-USDA byte-identity + reject/escape cases.
+include("review_b6_usd_hygiene_test.jl")

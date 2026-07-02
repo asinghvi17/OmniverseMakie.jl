@@ -145,7 +145,7 @@ function _usda_mdl_material(name::AbstractString, mdl_asset::AbstractString,
         elseif input_value isa Bool                      # bool; MUST precede float (Bool <: Real)
             push!(lines, "                bool inputs:$(input_name) = $(input_value ? 1 : 0)")
         elseif input_value isa AbstractString            # asset (texture)
-            push!(lines, "                asset inputs:$(input_name) = @$(input_value)@")
+            push!(lines, "                asset inputs:$(input_name) = $(_usd_asset_path(input_value; what = "texture asset for input `$(input_name)`"))")
         else                                             # float
             push!(lines, "                float inputs:$(input_name) = $(Float32(input_value))")
         end
@@ -157,7 +157,7 @@ function _usda_mdl_material(name::AbstractString, mdl_asset::AbstractString,
             def Shader "Shader"
             {
                 uniform token info:implementationSource = "sourceAsset"
-                uniform asset info:mdl:sourceAsset = @$(mdl_asset)@
+                uniform asset info:mdl:sourceAsset = $(_usd_asset_path(mdl_asset; what = "MDL source asset"))
                 uniform token info:mdl:sourceAsset:subIdentifier = "$(subid)"
 $(join(lines, "\n"))
                 token outputs:out
@@ -232,19 +232,24 @@ function _texture_dir()
 end
 
 """
-    _texture_asset_for(img_or_path, plot) -> String
+    _texture_asset_for(img_or_path, plot, key) -> String
 
 Resolve an image `color` or `*_texture` value to an on-disk asset PATH for an
 OmniPBR texture input, at open-time:
-- `AbstractString` → returned AS-IS (an existing path, no write).
+- `AbstractString` → returned AS-IS (an existing path, no write; `plot`/`key` unused).
 - `Matrix{<:Colorant}` → written to a stable session-temp PNG (`PNGFiles.save`,
-  converted to `RGBA{N0f8}`), named by `objectid(plot)`; its ABSOLUTE path is
-  returned (USD needs it absolute — the in-memory root stage has no anchor for a
-  relative `@…@` path).
+  converted to `RGBA{N0f8}`), named `tex_<objectid(plot)>_<key>.png`; its ABSOLUTE
+  path is returned (USD needs it absolute — the in-memory root stage has no anchor
+  for a relative `@…@` path).
+
+`key` (a Symbol/String naming the input, e.g. `:color`, `:base_color_texture`)
+makes the filename unique PER INPUT PER PLOT. Without it two image inputs on ONE
+plot — or, via the former `objectid(nothing)` process-constant, two DIFFERENT
+plots — would collide on one shared temp file and silently overwrite each other (B6).
 """
-_texture_asset_for(path::AbstractString, plot) = String(path)
-function _texture_asset_for(img::AbstractMatrix{<:Colorant}, plot)
-    path = joinpath(_texture_dir(), "tex_$(objectid(plot)).png")
+_texture_asset_for(path::AbstractString, plot, key) = String(path)
+function _texture_asset_for(img::AbstractMatrix{<:Colorant}, plot, key)
+    path = joinpath(_texture_dir(), "tex_$(objectid(plot))_$(key).png")
     PNGFiles.save(path, convert.(RGBA{N0f8}, img))
     return path
 end
@@ -305,8 +310,9 @@ function material_inputs_from(plot)
     have_texture = false
     if color isa AbstractMatrix
         # Image → diffuse_texture (resolved at open-time); project_uvw=false so
-        # OmniPBR samples the mesh's `st` UVs, not world-space triplanar.
-        inputs["diffuse_texture"] = _texture_asset_for(color, plot)
+        # OmniPBR samples the mesh's `st` UVs, not world-space triplanar. Stable
+        # key `:color` keeps this input's temp PNG distinct from any `*_texture` one.
+        inputs["diffuse_texture"] = _texture_asset_for(color, plot, :color)
         inputs["project_uvw"]     = false
         have_texture = true
     elseif color isa AbstractVector
@@ -325,14 +331,17 @@ function material_inputs_from(plot)
     if mat !== nothing
         for key in keys(mat)
             _merge_material_input!(inputs, Symbol(key), Makie.to_value(mat[key]),
-                                   have_base, have_texture)
+                                   plot, have_base, have_texture)
         end
     end
     return inputs
 end
 
 # Merge ONE `material=` key/value into `inputs`, mapped to its OmniPBR name.
-function _merge_material_input!(inputs::AbstractDict, key::Symbol, value,
+# `plot` threads through to `_texture_asset_for` so an image `*_texture` value is
+# written to a temp PNG keyed by THIS plot + THIS input `key` (unique per input
+# per plot); previously a shared `objectid(nothing)` name collided across plots (B6).
+function _merge_material_input!(inputs::AbstractDict, key::Symbol, value, plot,
                                 have_base::Bool, have_texture::Bool = false)
     if key === :base_color
         have_base && @warn "OmniverseMakie: `material=(; base_color=…)` overrides the \
@@ -342,10 +351,11 @@ function _merge_material_input!(inputs::AbstractDict, key::Symbol, value,
         # Explicit texture path overrides an image `color` (precedence).
         have_texture && @warn "OmniverseMakie: `material=(; base_color_texture=…)` \
                               overrides the image `color` texture for this material."
-        inputs["diffuse_texture"] = _texture_asset_for(value, nothing)
+        inputs["diffuse_texture"] = _texture_asset_for(value, plot, key)
     elseif key in (:normal_texture, :roughness_texture, :metallic_texture)
-        # Other `*_texture` paths used AS-IS (asset paths, no temp write).
-        inputs[_OMNIPBR_KEY_MAP[key]] = _texture_asset_for(value, nothing)
+        # Other `*_texture` values: a path used AS-IS, or an image written to a
+        # temp PNG keyed by (plot, key) so it can't collide with another input.
+        inputs[_OMNIPBR_KEY_MAP[key]] = _texture_asset_for(value, plot, key)
     elseif key === :emissive
         inputs["emissive_color"]     = _rgb(Makie.to_color(value))
         # enable_emission/_opacity are MDL `uniform bool` gates. MUST be

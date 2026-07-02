@@ -43,8 +43,10 @@ const GeometryBasics = OmniverseMakie.GeometryBasics
     @test occursin("bool inputs:project_uvw = 0", frag)
 
     # `_texture_asset_for`: a String path is used AS-IS (no temp write); an image is written.
-    @test OmniverseMakie._texture_asset_for("/abs/already.png", mimg) == "/abs/already.png"
-    written = OmniverseMakie._texture_asset_for(img, mimg)
+    # B6: the third arg is the per-input key (`:color` = the image-`color` path) that keeps
+    # the temp PNG unique per input per plot.
+    @test OmniverseMakie._texture_asset_for("/abs/already.png", mimg, :color) == "/abs/already.png"
+    written = OmniverseMakie._texture_asset_for(img, mimg, :color)
     @test isfile(written) && endswith(written, ".png")
 
     # The written PNG is a valid PNG (8-byte signature) of the image's dimensions.

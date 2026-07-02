@@ -10,6 +10,59 @@
 const _ROOT_OPEN_COUNT = Ref(0)
 
 # ------------------------------------------------------------------
+# USD string hygiene — guard user-supplied strings that enter USDA (B6)
+# ------------------------------------------------------------------
+# User values reach the authored stage as prim/property IDENTIFIERS (a VDB
+# `field` name, a camera-path segment) and as `@asset@` PATHS (texture files, the
+# MDL source, a `.vdb`/`.nvdb` file). An identifier with a space/dash/dot or a
+# path with a literal `@` authors a CORRUPT stage that renders black (or fails to
+# open) with no clear cause. These two guards fail LOUD — naming the offender and
+# where it came from — instead of emitting broken USDA. Clean inputs pass through
+# byte-for-byte (the non-`@` asset wrap is exactly the old `@$(path)@`).
+
+# A legal USD prim/property identifier: an ASCII letter or underscore, then ASCII
+# letters/digits/underscores (compiled once). Explicit ASCII ranges — NOT `\w` —
+# so non-ASCII letters (e.g. "café") are rejected, as USD identifiers require.
+const _USD_IDENTIFIER_RX = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
+"""
+    _usd_identifier(name; what="USD identifier") -> String
+
+Return `name` as a `String` if it is a legal USD identifier
+(`[A-Za-z_][A-Za-z0-9_]*`), else `error` naming the offender and where it came
+from (`what`). Guards every site that interpolates a user-supplied string into a
+prim/property name (a VDB `field`, a camera-path segment). Rejects spaces,
+dashes, dots, leading digits, non-ASCII, and the empty string.
+"""
+function _usd_identifier(name::AbstractString; what::AbstractString = "USD identifier")
+    occursin(_USD_IDENTIFIER_RX, name) && return String(name)
+    error("OmniverseMakie: $(what) \"$(name)\" is not a valid USD identifier — a USD " *
+          "prim/property name must match [A-Za-z_][A-Za-z0-9_]* (an ASCII letter or " *
+          "underscore, then ASCII letters/digits/underscores; no spaces, dashes, dots, " *
+          "leading digits, or non-ASCII characters).")
+end
+
+"""
+    _usd_asset_path(path; what="asset path") -> String
+
+Wrap `path` as a USDA asset reference: `@path@` normally, but `@@@path@@@` when
+`path` contains a literal `@` (USDA's escape for `@` inside an asset path). A
+`path` that itself contains the `@@@` delimiter is unrepresentable → `error`
+naming the offender and where it came from (`what`). A clean `path` (no `@`)
+returns `@path@`, byte-identical to the prior hand-written `@…@` interpolation.
+"""
+function _usd_asset_path(path::AbstractString; what::AbstractString = "asset path")
+    if occursin("@@@", path)
+        error("OmniverseMakie: $(what) \"$(path)\" contains the reserved sequence \"@@@\", " *
+              "which cannot be represented in a USDA `@…@` asset reference.")
+    elseif occursin('@', path)
+        return "@@@$(path)@@@"
+    else
+        return "@$(path)@"
+    end
+end
+
+# ------------------------------------------------------------------
 # usda_matrix4d — convert a Makie model matrix to USD matrix4d text
 # ------------------------------------------------------------------
 

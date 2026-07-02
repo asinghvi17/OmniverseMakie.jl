@@ -64,6 +64,11 @@ emitted string.  Metadata is multi-line (the RenderProduct-prim gotcha — see u
 """
 function _vdb_volume_usda(vdb_path; prim_path = "/World/Volume", field = "density",
                           field_dtype = "float", colormap = :viridis, colorrange = nothing)
+    # `field` is interpolated FOUR ways below (the `field:<field>` rel name, the
+    # `</Volume/<field>>` target, the `OpenVDBAsset` prim name, and the `fieldName`
+    # value), so it must be a legal USD identifier — validate ONCE here. A hostile
+    # grid name (space/dash/…) would otherwise author a corrupt Volume prim.
+    field = _usd_identifier(string(field); what = "volume `field` name")
     rgba_str, x_str = _colormap_points(colormap)
     lo, hi = something(colorrange, (0.0, 1.0))
     return """#usda 1.0
@@ -81,7 +86,7 @@ def Volume "Volume" (
     {
         token fieldName = "$(field)"
         token fieldDataType = "$(field_dtype)"
-        asset filePath = @$(vdb_path)@
+        asset filePath = $(_usd_asset_path(vdb_path; what = "VDB `filePath`"))
     }
 
     def Material "Material"

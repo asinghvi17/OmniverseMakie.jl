@@ -67,7 +67,7 @@ end
 # The pre-authored Looks scope must carry the diffuse_texture asset (open-time resolve).
 looks = OM.materialized_looks_usda(ax.scene)
 has_difftex = occursin("inputs:diffuse_texture = @", looks)
-texpath = OM._texture_asset_for(OM._plot_color(plt), plt)
+texpath = OM._texture_asset_for(OM._plot_color(plt), plt, :color)
 
 s = classify(img)
 println("ELTYPE=", eltype(img))

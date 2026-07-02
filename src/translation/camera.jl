@@ -78,6 +78,12 @@ function _validate_camera_path(camera_path::String)
     # "/World/Camera" splits to ["", "World", "Camera"] — length 3,
     # first part empty (leading /), second "World", third non-empty name.
     if length(parts) == 3 && parts[1] == "" && parts[2] == "World" && !isempty(parts[3])
+        # Depth alone is NOT enough: "/World/My Camera" has the right shape but the
+        # segment "My Camera" (space) is not a legal USD identifier — it would
+        # author a broken `def Camera "My Camera"` prim. Each segment (the "World"
+        # scope and the camera name, both prim identifiers) must validate.
+        _usd_identifier(parts[2]; what = "camera_path segment")
+        _usd_identifier(parts[3]; what = "camera_path segment")
         return camera_path
     end
     error("camera_path must be a direct /World/<name> child " *

@@ -556,7 +556,12 @@ function _push_material!(r, shader_prim::AbstractString, kind::Symbol, material_
         if kind === :glass
             _merge_glass_input!(inputs, Symbol(k), Makie.to_value(material_attrs[k]))
         else
-            _merge_material_input!(inputs, Symbol(k), Makie.to_value(material_attrs[k]), false, false)
+            # `plot = nothing`: this LIVE path writes only scalar/color3f inputs and
+            # warn+skips any texture-asset swap (M3.4 scope, below), so the plot that
+            # `_merge_material_input!` would thread into `_texture_asset_for` for a
+            # `*_texture` value is irrelevant here (the temp PNG is discarded). Matches
+            # the pre-B6 behavior, where texture resolution was hardcoded to `nothing`.
+            _merge_material_input!(inputs, Symbol(k), Makie.to_value(material_attrs[k]), nothing, false, false)
         end
     end
     for (input_name, v) in inputs
