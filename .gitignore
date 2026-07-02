@@ -1,4 +1,6 @@
 Manifest.toml
+# Keep the reproducible example gallery's lockfile tracked (see examples/README.md).
+!examples/Manifest.toml
 /docs/build/
 *.jl.cov
 *.jl.*.cov
