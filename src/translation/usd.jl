@@ -23,7 +23,10 @@ const _ROOT_OPEN_COUNT = Ref(0)
 # A legal USD prim/property identifier: an ASCII letter or underscore, then ASCII
 # letters/digits/underscores (compiled once). Explicit ASCII ranges — NOT `\w` —
 # so non-ASCII letters (e.g. "café") are rejected, as USD identifiers require.
-const _USD_IDENTIFIER_RX = r"^[A-Za-z_][A-Za-z0-9_]*$"
+# End anchor is `\z` (true end of string), NOT `$`: PCRE `$` also matches BEFORE a
+# trailing newline, so `$` let "density\n" through and authored a corrupt
+# `def OpenVDBAsset "density\n"`. `\z` admits no trailing newline.
+const _USD_IDENTIFIER_RX = r"^[A-Za-z_][A-Za-z0-9_]*\z"
 
 """
     _usd_identifier(name; what="USD identifier") -> String

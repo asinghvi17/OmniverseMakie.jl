@@ -86,7 +86,10 @@ _errmsg(f) = try; f(); ""; catch e; e isa ErrorException ? e.msg : sprint(shower
 
     # Reject space, dash, leading-digit, unicode, dot, and empty — each error
     # message must NAME the offending string and carry the `what` context.
-    for bad in ("my name", "my-name", "1name", "café", "naïve", "field.x", "")
+    # Trailing/embedded newlines are rejected too: PCRE `$` matches BEFORE a final
+    # newline, so "density\n" bypassed the guard until the end anchor became `\z`.
+    for bad in ("my name", "my-name", "1name", "café", "naïve", "field.x", "",
+                "density\n", "density\r\n", "\ndensity")
         msg = _errmsg(() -> OM._usd_identifier(bad; what = "volume `field` name"))
         @test !isempty(msg)                       # it threw
         @test occursin(bad, msg) || bad == ""     # names the offender (empty string is unprintable)
