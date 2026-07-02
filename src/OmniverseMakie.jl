@@ -49,11 +49,17 @@ function gpu_unregister! end
 function attach_picking! end
 function detach_picking! end
 function _pick_at! end
-export interactive_display
+# Hybrid figures: replace ONE scene (LScene / Axis3 / Scene) in an already-displayed GLMakie
+# figure with a live ovrtx raytraced render, leaving the other axes as GLMakie 2D diagnostics
+# (the RPRMakie `replace_scene_rpr!` pattern).  GLMakie ext adds the method.
+function replace_scene! end
+export interactive_display, replace_scene!
 
-# Errors helpfully when no GLMakie extension is loaded (no method otherwise).
+# Error helpfully when no GLMakie extension is loaded (no method otherwise).
 interactive_display(::Any; kwargs...) =
     error("interactive_display requires GLMakie — run `using GLMakie` (and `using CUDA` for GPU-direct).")
+replace_scene!(::Any; kwargs...) =
+    error("replace_scene! requires GLMakie — run `using GLMakie` and display the figure first.")
 
 # Re-export every Makie name verbatim (GLMakie/src/GLMakie.jl:36-41).
 for name in names(Makie, all = true)

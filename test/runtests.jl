@@ -291,3 +291,9 @@ include("review_e2_prelude_test.jl")
 # lands a converged frame, and default mode resets every frame (control).
 include("accumulate_config_test.jl")
 include("accumulate_render_test.jl")
+
+# replace_scene! — RPRMakie-style hybrid: replace ONE scene (LScene) in a displayed GLMakie
+# figure with a live ovrtx render, other axes stay GLMakie 2D. Subprocess (GLMakie): the
+# embedded region changes vs a pure-GL baseline while the 2D diagnostic region does not, the
+# ovrtx present buffer responds to orbiting, and close() leaves the host window open.
+include("replace_scene_test.jl")

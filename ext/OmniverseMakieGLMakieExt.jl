@@ -5,7 +5,8 @@ using OmniverseMakie: Makie, RGBA, N0f8, ColorTypes
 # main-module internals used by the moved src/interactive code (bare names):
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
     _scene_for_camera, interactive_display, present!, on_render_tick!, cpu_blit!,
-    attach_picking!, detach_picking!, _pick_at!   # M6.B Task 5: picking
+    attach_picking!, detach_picking!, _pick_at!,  # M6.B Task 5: picking
+    replace_scene!, ScreenConfig                   # hybrid embedded viewport
 using OmniverseMakie: tonemap
 using Makie: Consume, MouseButtonEvent  # event types for the input forwarders
 
@@ -395,7 +396,12 @@ size guard reallocates + re-seats the buffer after a resize (Screen rebuilt).  T
 (on-device tonemap + CUDA→GL copy, no host roundtrip) lives in the CUDA extension; both are selected
 via `present!(session, Val(session.blitter))`.
 """
-function OmniverseMakie.present!(session::ViewportSession, ::Val{:cpu})
+OmniverseMakie.present!(session::ViewportSession, ::Val{:cpu}) = _cpu_present!(session)
+
+# Shared CPU blit, duck-typed over any session with `screen`/`steps_per_tick`/`present_buf`/
+# `image_plot`/`exposure` — used by BOTH the standalone ViewportSession and the embedded
+# `replace_scene!` session, so there is exactly one host tonemap-present path (no drift).
+function _cpu_present!(session)
     screen = session.screen
     # Host twin of the CUDA ext's _gpu_present! step loop: run `steps_per_tick` bounded RT2 steps,
     # closing each dropped StepResult; KEEP the final `sr` to map its HdrColor.  (Was
@@ -602,6 +608,172 @@ function detach_picking!(h::PickHandle)
     h.listener = nothing
     h.last_plot === nothing || OmniverseMakie.clear_selection!(h.session.screen, h.last_plot)
     h.last_plot = nothing
+    return nothing
+end
+
+# ==================================================================
+# replace_scene! — embed a live ovrtx render of ONE scene inside an
+# already-displayed GLMakie figure (RPRMakie replace_scene_rpr! pattern).
+#
+# The other axes stay GLMakie 2D diagnostics; the target 3D scene is replaced by a live
+# raytraced image.  Unlike `interactive_display` (its own window, whole-figure blit), this
+# attaches to the HOST window's render loop and overlays a pixel-space `image!` pinned to the
+# target scene's viewport rectangle.  The target keeps its OWN Camera3D, so the user orbits it
+# with normal GLMakie interaction — no input forwarding.
+#
+# v1 = CPU blit, one embedded scene.  The opaque ovrtx image occludes the GL 3D plots beneath
+# (we do NOT toggle `plot.visible`: the open ovrtx stage live-diffs that same observable, so
+# hiding for GL would also hide in the render — occlusion sidesteps the conflict).  GPU-direct
+# blit and multiple concurrent embeds are follow-ups.
+# ==================================================================
+
+mutable struct EmbeddedSession
+    screen::Screen                  # the embedded ovrtx Screen (renders at the sub-scene size)
+    parent_glscreen                 # host figure's GLMakie.Screen — NOT owned; never closed here
+    sub_scene::Makie.Scene          # pixel-space overlay child, pinned to target_scene.viewport
+    image_plot                      # image! in sub_scene = the blit target (fields present! reads)
+    present_buf::Matrix{RGBA{N0f8}} # [W,H] display buffer = image_plot's data array
+    cam_scene::Makie.Scene          # the target's Camera3D scene (drives the ovrtx view)
+    target_scene::Makie.Scene       # the scene being replaced
+    steps_per_tick::Int
+    exposure::Float32
+    blitter::Symbol                 # :cpu (v1)
+    tick_listener
+    resize_listener
+end
+
+# Resolve the user's argument to the Scene to render: an LScene / Axis3 expose `.scene`; a raw
+# Scene is itself.
+_embed_target_scene(s::Makie.Scene) = s
+_embed_target_scene(x) = hasproperty(x, :scene) ? x.scene :
+    throw(ArgumentError("replace_scene!: expected an LScene, Axis3, or Scene, got $(typeof(x))"))
+
+"""
+    replace_scene!(target; steps_per_tick=2, exposure=0f0, accumulate=true) -> EmbeddedSession
+
+Replace `target` (an `LScene`, `Axis3`, or `Scene`) inside an ALREADY-DISPLAYED GLMakie figure
+with a live ovrtx RTX render, leaving the figure's other axes as GLMakie 2D diagnostics — the
+RPRMakie `replace_scene_rpr!` hybrid.
+
+Requires the figure to be displayed in a GLMakie window first (`GLMakie.activate!(); display(fig)`)
+so the target scene has a laid-out pixel viewport and a host render loop to attach to.  The
+target keeps its own `Camera3D`, so ordinary GLMakie orbit/zoom drives the raytraced view; a
+per-frame hook on the host window re-renders.  `accumulate=true` (default) uses the
+across-frames accumulation mode (realtime-style; only structural edits reset) — set `false` for
+a full per-frame reconverge.  `steps_per_tick` bounds RTX steps per frame; `exposure` is EV
+stops.  v1 is CPU-blit and one embedded scene per figure.
+
+Returns an `EmbeddedSession`; `close(session)` detaches the hooks, removes the overlay, and
+frees the ovrtx renderer WITHOUT touching the host GLMakie window.
+"""
+# Typed narrower than the main module's `replace_scene!(::Any)` fallback so it OVERRIDES (not
+# overwrites) it: LScene / Axis3 are `Makie.Block`s, a raw target is a `Makie.Scene`.
+function replace_scene!(target::Union{Makie.Scene,Makie.Block};
+                        steps_per_tick::Int = 2, exposure = 0f0, accumulate::Bool = true)
+    tscene = _embed_target_scene(target)
+    parent = Makie.getscreen(Makie.root(tscene), GLMakie)
+    parent === nothing && throw(ArgumentError(
+        "replace_scene!: the figure is not shown in a GLMakie window. Run `GLMakie.activate!(); \
+         display(fig)` before replace_scene! (the target needs a laid-out viewport + a render loop)."))
+    cam_scene = something(_scene_for_camera(tscene), tscene)
+
+    # Render size = the target scene's pixel rectangle (blitted 1:1 into that rectangle).
+    rect = tscene.viewport[]
+    W, H = Int.(widths(rect))
+    (W > 0 && H > 0) || throw(ArgumentError(
+        "replace_scene!: target has a degenerate viewport $(rect) — display/lay out the figure first."))
+
+    # Build an ovrtx Screen at the sub-scene size (fb_size override), accumulate for smooth
+    # realtime streaming (exactly RPR's 1-sample/frame accumulate model).
+    cfg = Makie.merge_screen_config(ScreenConfig,
+        Dict{Symbol,Any}(:accumulate_across_frames => accumulate))
+    screen = Screen(cam_scene, cfg; fb_size = (W, H))
+    _author_screen!(screen, cam_scene, tscene)
+    warmup_hdr = OV.render_hdr_to_array(screen.renderer, screen.product; warmup = cfg.warmup)
+    screen.requires_update = false          # the warmup already drew the eager insertplots!
+
+    # Overlay: a pixel-space child scene SHARING the target's viewport Observable (so it tracks
+    # the rectangle across layout/resize), with our opaque image! drawn over the GL 3D beneath.
+    GLMakie.activate!()
+    sub = Makie.Scene(tscene; viewport = tscene.viewport, clear = false)
+    Makie.campixel!(sub)
+    present_buf = Matrix{RGBA{N0f8}}(undef, W, H)
+    _tonemap_orient!(present_buf, warmup_hdr, Float32(exposure))
+    # `image!` on a child of the already-displayed target scene auto-registers the sub-scene +
+    # plot with the host GL screen (verified: it renders on top of the GL 3D in the rectangle);
+    # an explicit insertplots! here would DOUBLE-register and error on the compute edge.
+    img = image!(sub, 0 .. W, 0 .. H, present_buf; interpolate = false)
+
+    session = EmbeddedSession(screen, parent, sub, img, present_buf, cam_scene, tscene,
+                              steps_per_tick, Float32(exposure), :cpu, nothing, nothing)
+
+    # Hook the HOST window's render loop (never open our own).  Observer only — Consume(false).
+    session.tick_listener = on(parent.render_tick) do _
+        _embedded_tick!(session)
+        return Makie.Consume(false)
+    end
+
+    # Track the target rectangle: a layout/window resize changes tscene.viewport → rebuild the
+    # ovrtx render + image at the new size.
+    session.resize_listener = on(tscene.viewport) do rect2
+        w, h = Int.(widths(rect2))
+        ((w, h) == session.screen.fb_size || w <= 0 || h <= 0) && return nothing
+        _resize_embedded!(session, (w, h))
+        return nothing
+    end
+
+    return session
+end
+
+# Per-frame embedded hook: push live camera/light/plot deltas, reset RT2 only on a real change
+# (accumulate mode → only a structural edit), step, and CPU-blit into the overlay image.  Runs on
+# the host window's render task.
+function _embedded_tick!(session::EmbeddedSession)
+    _sync_and_needs_reset!(session.screen, session.cam_scene) &&
+        OV.reset!(session.screen.renderer)
+    _cpu_present!(session)
+    return nothing
+end
+
+# Rebuild the embedded ovrtx render + overlay image at a new target-rectangle size.
+function _resize_embedded!(session::EmbeddedSession, (W, H)::Tuple{Int,Int})
+    cfg        = session.screen.config
+    new_screen = Screen(session.cam_scene, cfg; fb_size = (W, H))
+    _author_screen!(new_screen, session.cam_scene, session.target_scene)
+    warmup_hdr = OV.render_hdr_to_array(new_screen.renderer, new_screen.product; warmup = cfg.warmup)
+    new_screen.requires_update = false
+    close(session.screen)                    # free the old renderer
+    session.screen = new_screen
+    delete!(session.sub_scene, session.image_plot)   # Makie's delete!(::Scene, ::Plot)
+    buf = Matrix{RGBA{N0f8}}(undef, W, H)
+    _tonemap_orient!(buf, warmup_hdr, session.exposure)
+    # The sub-scene is still GL-registered; adding the replacement image to it auto-inserts the
+    # new plot (same path as the initial image!).
+    session.image_plot  = image!(session.sub_scene, 0 .. W, 0 .. H, buf; interpolate = false)
+    session.present_buf = buf
+    return nothing
+end
+
+"""
+    Base.close(session::EmbeddedSession) -> Nothing
+
+Detach the render-loop + resize hooks, remove the overlay image, and free the embedded ovrtx
+renderer.  Does NOT close the host GLMakie window (the figure lives on).  Idempotent.
+"""
+function Base.close(session::EmbeddedSession)
+    session.tick_listener   === nothing || off(session.tick_listener)
+    session.resize_listener === nothing || off(session.resize_listener)
+    session.tick_listener   = nothing     # no more ticks BEFORE freeing the ovrtx Screen
+    session.resize_listener = nothing
+    try
+        # Remove the overlay sub-scene's GL renderobjects from the host screen (the GL 3D beneath
+        # reappears), then drop the sub-scene from the target's children.
+        delete!(session.parent_glscreen, session.sub_scene)
+        filter!(c -> c !== session.sub_scene, session.target_scene.children)
+    catch e
+        @warn "replace_scene!: error removing overlay" exception = e
+    end
+    close(session.screen)                 # ovrtx renderer + bindings; host window untouched
     return nothing
 end
 

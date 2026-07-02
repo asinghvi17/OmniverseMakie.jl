@@ -97,9 +97,9 @@ OmniverseMakie.activate!(; mode = :pathtracing, samples = 512)
 
 ### Interactive viewport
 
-`interactive_display` (the package's one export) opens an orbit-able GLMakie window
-showing the live RTX render; drag orbits and scroll zooms. It needs GLMakie for the
-window and input; load CUDA too for the GPU-direct blit.
+`interactive_display` opens an orbit-able GLMakie window showing the live RTX render of a
+whole figure; drag orbits and scroll zooms. It needs GLMakie for the window and input; load
+CUDA too for the GPU-direct blit.
 
 ```julia
 using OmniverseMakie, GLMakie              # GLMakie: window + input capture
@@ -111,6 +111,32 @@ surface!(ax, -3:0.1:3, -3:0.1:3, (x, y) -> exp(-(x^2 + y^2)))
 
 interactive_display(fig)                   # live, orbit-able RTX viewport
 ```
+
+### Hybrid figures: `replace_scene!` (RTX 3D + GLMakie 2D diagnostics)
+
+`replace_scene!` replaces ONE scene (an `LScene`, `Axis3`, or `Scene`) in an
+already-displayed GLMakie figure with a live raytraced render, leaving the figure's other
+axes as ordinary GLMakie 2D plots — the RPRMakie `replace_scene_rpr!` hybrid. The target keeps
+its own camera, so you orbit it with normal GLMakie interaction; a hook on the host window
+re-renders each frame.
+
+```julia
+using OmniverseMakie, GLMakie
+GLMakie.activate!()
+
+fig = Figure()
+ls  = LScene(fig[1, 1])                     # the 3D panel → RTX raytraced
+mesh!(ls, load(assetpath("brain.stl")); color = :bisque)
+ax  = Axis(fig[1, 2])                       # a 2D diagnostic → stays GLMakie
+lines!(ax, cumsum(randn(200)))
+
+display(fig)                                # show the figure FIRST (GLMakie)
+session = replace_scene!(ls)                # ls is now a live RTX viewport, ax untouched
+# ... orbit ls, mutate plots; close(session) restores it without closing the window
+```
+
+v1 is CPU-blit and one embedded scene per figure; GPU-direct blit and multiple concurrent
+embeds are planned follow-ups.
 
 ### Realtime-style recording (accumulate across frames)
 
@@ -168,11 +194,11 @@ extension that ships no library here. See the explanation and tripwire test in
 
 ## API surface
 
-- **Exported:** `interactive_display`. (Every exported Makie name is re-exported too, so
-  `using OmniverseMakie` gives you `Figure`, `mesh!`, `save`, etc.)
+- **Exported:** `interactive_display`, `replace_scene!`. (Every exported Makie name is
+  re-exported too, so `using OmniverseMakie` gives you `Figure`, `mesh!`, `save`, etc.)
 - **Documented but unexported** (qualify with `OmniverseMakie.`): `Screen`,
   `Makie.colorbuffer`, `select!` (selection outline, offscreen), `author_vdb_volume!`
-  (low-level VDB authoring).
+  (low-level VDB authoring), `reset_accumulation!` (force an RT2 reset in accumulate mode).
 
 ---
 

@@ -29,16 +29,18 @@ end
 # Core constructor: build the OV.Renderer and capture scene dimensions.
 # ------------------------------------------------------------------
 
-function Screen(scene::Makie.Scene, config::ScreenConfig)
+function Screen(scene::Makie.Scene, config::ScreenConfig;
+               fb_size::Tuple{Int,Int} = size(Makie.root(scene)))
     # M6.B: selection-outline is a creation-time renderer config (on `ScreenConfig` so
     # `resize_viewport!`, which rebuilds the Screen, preserves it).  Default false ⇒ empty
     # config, identical to the pre-M6.B path.
     renderer = OV.Renderer(; selection_outline = config.selection_outline)
-    # Render at the ROOT scene size: `Makie.colorbuffer(scene)` crops a NON-root (e.g. LScene)
-    # scene out of the full figure via `get_sub_picture`, indexing with the scene's viewport in
-    # ROOT pixel coords — so the image must be root-sized for that crop to be in-bounds.  For a
-    # root scene `Makie.root(scene) === scene`, so this is unchanged.
-    fb_size  = size(Makie.root(scene))   # (w, h)
+    # Default fb_size is the ROOT scene size: `Makie.colorbuffer(scene)` crops a NON-root (e.g.
+    # LScene) scene out of the full figure via `get_sub_picture`, indexing with the scene's
+    # viewport in ROOT pixel coords — so the image must be root-sized for that crop to be
+    # in-bounds.  For a root scene `Makie.root(scene) === scene`, so this is unchanged.  The
+    # `fb_size` override lets `replace_scene!` render an EMBEDDED sub-scene at its OWN viewport
+    # size (blitted into that scene's rectangle, no crop).
     product  = "/Render/OVMakie/RenderProduct"
     return Screen(
         renderer,
