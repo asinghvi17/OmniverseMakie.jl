@@ -531,11 +531,18 @@ end
 """
     PathResolver
 
-Wraps the renderer's `path_dictionary_instance_t` + loaded vtable so
+Wraps the owning `Renderer` + its `path_dictionary_instance_t` + loaded vtable so
 `resolve_prim_path` can call the two path-dictionary fns via raw fn-pointers.  Build
-with `path_resolver(r)`; valid while the stage composition is unchanged.
+with `path_resolver(r)`.
+
+COMPOSITION-SCOPED: the captured dictionary context is valid only while the stage
+composition is unchanged — DISCARD and rebuild after any `add_usd_reference!` /
+`remove_usd!` (the Screen cache does exactly this in `path_resolver_for`).  `r` is
+retained so it can be alive-checked and `GC.@preserve`d across the raw-pointer ccalls
+(the vtable fns dereference the renderer-owned context).
 """
 struct PathResolver
+    r::Renderer
     pd::Base.RefValue{LibOVRTX.path_dictionary_instance_t}
     vt::LibOVRTX.path_dictionary_vtable_t
 end
@@ -550,7 +557,7 @@ function path_resolver(r::Renderer)
     r.alive || error("path_resolver on a closed Renderer")
     pd = Ref{LibOVRTX.path_dictionary_instance_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_get_path_dictionary(r.ptr, pd), "get_path_dictionary")
-    return PathResolver(pd, unsafe_load(pd[].vtable))
+    return PathResolver(r, pd, unsafe_load(pd[].vtable))
 end
 
 """
@@ -562,6 +569,8 @@ vtable: `get_tokens_from_paths`, then per-token `get_strings_from_tokens`, joine
 `docs_resolve_primpath`.
 """
 function resolve_prim_path(pr::PathResolver, id::UInt64)::String
+    r = pr.r
+    r.alive || error("resolve_prim_path on a closed Renderer")
     ctx        = Ptr{Cvoid}(pr.pd[].context)
     idref      = Ref(id)
     token_buf  = Vector{UInt64}(undef, 64)
@@ -569,7 +578,9 @@ function resolve_prim_path(pr::PathResolver, id::UInt64)::String
     out_ntok   = Ref{Csize_t}(0)
     out_nproc  = Ref{Csize_t}(0)
     # out_tokens points INTO token_buf; keep it (and idref) preserved across BOTH ccalls.
-    GC.@preserve token_buf idref begin
+    # `r` is preserved too so the Renderer owning the dictionary context these raw vtable
+    # pointers dereference cannot be finalized mid-ccall.
+    GC.@preserve token_buf idref r begin
         res = @ccall $(pr.vt.get_tokens_from_paths)(
             ctx::Ptr{Cvoid}, idref::Ptr{UInt64}, Csize_t(1)::Csize_t,
             pointer(token_buf)::Ptr{UInt64}, Csize_t(64)::Csize_t,

@@ -180,3 +180,9 @@ include("a1_op_error_test.jl")
 # passes f's result through and unmaps in `finally` when f throws (subsequent map succeeds)
 # (subprocess, CPU map — no CUDA/GL).
 include("a2_readback_test.jl")
+
+# Review Track A / Task A3 — PathResolver lifetime + Screen path-resolver cache invalidation:
+# the cached resolver is composition-scoped, so it is dropped at every add_usd_reference!/
+# remove_usd! (plot delete/insert, empty!, volume reload) and rebuilt lazily on the next pick;
+# a pick after delete+re-add resolves the NEW plot, not a stale dictionary (subprocess).
+include("a3_resolver_test.jl")

@@ -672,6 +672,7 @@ function register_ovrtx_robj!(screen, scene, plot)
         robj.plot = plot                                    # M6.B: objectid→Plot for pick resolution
         screen.plot2robj[objectid(plot)] = robj
         screen.path2plot[robj.prim_path] = objectid(plot)   # M6.B: keep the reverse map in lockstep
+        _invalidate_path_resolver!(screen)                  # new prim in the stage → drop cached resolver
         return robj
     end
 
@@ -715,6 +716,7 @@ function register_ovrtx_robj!(screen, scene, plot)
         built.plot = plot                                           # M6.B: objectid→Plot for pick resolution
         screen.plot2robj[objectid(plot)] = built
         screen.path2plot[built.prim_path] = objectid(plot)          # M6.B: reverse map in lockstep
+        _invalidate_path_resolver!(screen)                          # new prim in the stage → drop cached resolver
     end
     return built
 end
