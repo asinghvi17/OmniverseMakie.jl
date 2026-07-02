@@ -176,8 +176,16 @@ function step!(r::Renderer, product::AbstractString;
     GC.@preserve product rp begin
         set = LibOVRTX.ovrtx_render_product_set_t(pointer(rp), Csize_t(1))
         h = Ref{LibOVRTX.ovrtx_step_result_handle_t}(0)
-        enqueue_wait(r, "step"; timeout_ns) do
-            LibOVRTX.ovrtx_step(r.ptr, set, dt, h)
+        try
+            enqueue_wait(r, "step"; timeout_ns) do
+                LibOVRTX.ovrtx_step(r.ptr, set, dt, h)
+            end
+        catch
+            # A1 made enqueue_wait a thunk: the enqueue ccall fills h[] BEFORE the wait.
+            # If the wait times out/fails (a finite-timeout M5 path), the results handle
+            # is live but no StepResult owns it — free it best-effort, then rethrow.
+            h[] != 0 && r.alive && LibOVRTX.ovrtx_destroy_results(r.ptr, h[])
+            rethrow()
         end
         sr = StepResult(r, h[], true)
         finalizer(close, sr)
@@ -222,89 +230,100 @@ function _find_var(outs::LibOVRTX.ovrtx_render_product_set_outputs_t, name::Abst
     return h
 end
 
+# A successful ovrtx_map_render_var_output can still hand back a FAILED output whose
+# .status/.error_message the map result code does NOT reflect (review: never inspected).
+# Throw so a bad map surfaces instead of feeding garbage into the readback.
+function _check_var_output(out::LibOVRTX.ovrtx_render_var_output_t, op::AbstractString)
+    out.status == LibOVRTX.OVRTX_EVENT_FAILURE &&
+        throw(LibOVRTX.OVRTXError(op, String(out.error_message)))
+    return nothing
+end
+
 # ------------------------------------------------------------------
-# map_cpu — fetch results, find LdrColor, map to CPU, copy, unmap
+# map_cpu — fetch results, find LdrColor, map to CPU, single-pass build, unmap
 # ------------------------------------------------------------------
 
 """
-    map_cpu(sr::StepResult, name="LdrColor") -> (pixels::Array{UInt8,3}, W, H)
+    map_cpu(sr::StepResult, name="LdrColor") -> (img::Matrix{RGBA{N0f8}}, W, H)
 
-Fetch results, find render var `name`, map to CPU, COPY (mandatory — mapped mem is
-invalid after unmap), unmap, return `(pixels, W, H)`.  `pixels` is `[C=4, W, H]`
-(channel-fastest).
+Fetch results, find render var `name` (kDLUInt/8 RGBA), map to CPU, and build the
+`(H, W)` display matrix in ONE pass (`cwh_to_matrix`, reinterpret+permute) straight
+from the still-mapped `[C,W,H]` memory — no separate byte copy.  The mapping is
+released in a `finally` (a throw mid-build never leaks it); the returned `img` is
+owned and valid after unmap.  Top-left origin, no y-flip.
 """
 function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
     sr.r.alive || error("map_cpu: the StepResult's Renderer is already closed")
     outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
-
     h = _find_var(outs[], name)
-
     mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
     ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
-
-    # DLTensor: shape [H,W,C], dtype kDLUInt/8/1 (LdrColor)
-    t0  = unsafe_load(ro[].tensors, 1)          # ovrtx_render_var_tensor_t
-    dlt = unsafe_load(t0.dl)                    # DLTensor (Ptr{DLTensor} → value)
-    H   = Int(unsafe_load(dlt.shape, 1))
-    W   = Int(unsafe_load(dlt.shape, 2))
-    C   = Int(unsafe_load(dlt.shape, 3))
-
-    # non-owning [C,W,H] view; COPY before unmap (mapped mem dies on unmap)
-    raw    = unsafe_wrap(Array, Ptr{UInt8}(dlt.data), (C, W, H); own=false)
-    pixels = copy(raw)
-
-    # NOSYNC: CPU map.  Check the result — an unmap failure means the copy above may be
-    # invalid (mapped memory dies on unmap).
-    LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
-                   "unmap_render_var_output")
-
-    return (pixels, W, H)
+    return try
+        _check_var_output(ro[], "map_render_var_output($name)")
+        # DLTensor shape [H,W,C]; wrap the mapped bytes as a non-owning [C,W,H] view.
+        dlt = unsafe_load(unsafe_load(ro[].tensors, 1).dl)
+        H, W, C = Int(unsafe_load(dlt.shape, 1)), Int(unsafe_load(dlt.shape, 2)), Int(unsafe_load(dlt.shape, 3))
+        raw = unsafe_wrap(Array, Ptr{UInt8}(dlt.data), (C, W, H); own=false)
+        (cwh_to_matrix(raw), W, H)          # single pass → owned Matrix, safe post-unmap
+    finally
+        # NOSYNC: CPU map.  Checked — an unmap failure means the build above may be invalid.
+        LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
+                       "unmap_render_var_output")
+    end
 end
 
 # ------------------------------------------------------------------
-# map_cpu_f32 — like map_cpu but returns a Float32 [C,W,H] array.
-# HdrColor is kDLFloat/16 (verified: dtype.code=kDLFloat, dtype.bits=16);
-# we read via Ptr{Float16} and convert to Float32 for the tonemap path.
+# with_mapped_hdr — map an HDR render var, run `f` on the mapped view, unmap
+#
+# HdrColor is kDLFloat/16 (verified: dtype.code=kDLFloat, dtype.bits=16).  The
+# scoped/callback form owns the map lifetime (unmap in `finally`) so a throwing `f`
+# never leaks it; `map_cpu_f32` is the eager-copy convenience over it.  INT-2 tonemaps
+# the mapped view in place through this same signature.
 # ------------------------------------------------------------------
+
+"""
+    with_mapped_hdr(f, sr::StepResult, name="HdrColor") -> f's result
+
+Fetch results, find render var `name`, map it to CPU, and call `f(raw16, W, H)` where
+`raw16` is the still-mapped, non-owning `[C=4, W, H]` `Float16` view (channel-fastest).
+The mapping is released in a `finally` — even if `f` throws — so it never leaks; `f`'s
+return value is passed through.  `raw16` is INVALID once `f` returns (mapped memory
+dies on unmap): copy anything you keep.
+"""
+function with_mapped_hdr(f, sr::StepResult, name::AbstractString="HdrColor")
+    sr.r.alive || error("with_mapped_hdr on a closed Renderer")
+    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
+    h = _find_var(outs[], name)
+    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
+    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
+    return try
+        _check_var_output(ro[], "map_render_var_output($name)")
+        # DLTensor shape [H,W,C], dtype kDLFloat/16/1; wrap mapped bytes as [C,W,H] Float16.
+        dlt = unsafe_load(unsafe_load(ro[].tensors, 1).dl)
+        H, W, C = Int(unsafe_load(dlt.shape, 1)), Int(unsafe_load(dlt.shape, 2)), Int(unsafe_load(dlt.shape, 3))
+        raw16 = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
+        f(raw16, W, H)
+    finally
+        # NOSYNC: CPU map.  Checked — an unmap failure means the mapped read may be invalid.
+        LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
+                       "unmap_render_var_output")
+    end
+end
 
 """
     map_cpu_f32(sr::StepResult, name) -> (pixels::Array{Float32,3}, W, H)
 
-Like `map_cpu` but for the HDR path: `HdrColor` is kDLFloat/16 on the wire; read
-via `Ptr{Float16}` and convert to Float32 (copy before unmap).  `pixels` is
-`[C=4, W, H]` (channel-fastest).
+Eager HDR readback: `with_mapped_hdr` + a `Float16`→`Float32` copy of the mapped
+view.  `pixels` is an owned `[C=4, W, H]` (channel-fastest) array.
 """
-function map_cpu_f32(sr::StepResult, name::AbstractString)
-    sr.r.alive || error("map_cpu_f32 on a closed Renderer")
-    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
-
-    h = _find_var(outs[], name)
-
-    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
-    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
-
-    # DLTensor: shape [H,W,C], dtype kDLFloat/16/1 (HdrColor)
-    t0  = unsafe_load(ro[].tensors, 1)
-    dlt = unsafe_load(t0.dl)
-    H   = Int(unsafe_load(dlt.shape, 1))
-    W   = Int(unsafe_load(dlt.shape, 2))
-    C   = Int(unsafe_load(dlt.shape, 3))
-
-    # non-owning Float16 [C,W,H] view; Float16→Float32 + copy before unmap
-    raw16  = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
-    pixels = Float32.(raw16)
-
-    # NOSYNC: CPU map.  Check the result — an unmap failure means the copy above may be
-    # invalid (mapped memory dies on unmap).
-    LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
-                   "unmap_render_var_output")
-
-    return (pixels, W, H)
-end
+map_cpu_f32(sr::StepResult, name::AbstractString) =
+    with_mapped_hdr(sr, name) do raw16, W, H
+        (Float32.(raw16), W, H)
+    end
 
 # ------------------------------------------------------------------
 # map_cuda / unmap_cuda — map a render var as LINEAR CUDA device memory (M6.A)
@@ -350,6 +369,14 @@ function map_cuda(sr::StepResult, name::AbstractString="HdrColor")
     mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CUDA, Csize_t(0)))
     ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output(cuda)")
+
+    # This path returns the LIVE mapping (no finally), so on a FAILED output release the
+    # just-acquired mapping before surfacing the error (review: .status was never checked).
+    if ro[].status == LibOVRTX.OVRTX_EVENT_FAILURE
+        msg = String(ro[].error_message)
+        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)
+        throw(LibOVRTX.OVRTXError("map_render_var_output(cuda:$name)", msg))
+    end
 
     # DLTensor: shape [H,W,C], dtype kDLFloat/16/1 (HdrColor); CUdeviceptr in .data
     t0  = unsafe_load(ro[].tensors, 1)          # ovrtx_render_var_tensor_t
@@ -674,12 +701,12 @@ function render_to_matrix(r::Renderer, product::AbstractString;
         sr = step!(r, product; timeout_ns); close(sr)
     end
     sr = step!(r, product; timeout_ns)
-    pixels, W, H = try
-        map_cpu(sr, "LdrColor")
+    img, _W, _H = try
+        map_cpu(sr, "LdrColor")     # single-pass: already the (H, W) RGBA matrix
     finally
         close(sr)
     end
-    return cwh_to_matrix(pixels)
+    return img
 end
 
 # ------------------------------------------------------------------

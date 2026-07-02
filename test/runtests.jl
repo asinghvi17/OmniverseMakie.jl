@@ -174,3 +174,9 @@ include("volumes_live_test.jl")
 # which the enqueue/wait status hides); step!/reset! on a closed Renderer error cleanly before any
 # ccall now that the enqueue is a deferred thunk (subprocess).
 include("a1_op_error_test.jl")
+
+# Review Track A / Task A2 — leak-proof readback + with_mapped_hdr: the single-pass
+# OV.cwh_to_matrix equals the old two-pass loop (pure, synthetic [C,W,H]); with_mapped_hdr
+# passes f's result through and unmaps in `finally` when f throws (subsequent map succeeds)
+# (subprocess, CPU map — no CUDA/GL).
+include("a2_readback_test.jl")
