@@ -112,6 +112,31 @@ surface!(ax, -3:0.1:3, -3:0.1:3, (x, y) -> exp(-(x^2 + y^2)))
 interactive_display(fig)                   # live, orbit-able RTX viewport
 ```
 
+### Realtime-style recording (accumulate across frames)
+
+By default every frame reconverges the path tracer from scratch — correct, but slow for
+animations. Set `accumulate_across_frames = true` to instead carry RT2 accumulation across
+frames: its temporal reprojection + denoiser absorb the motion the way the interactive
+viewport does, so a `record` runs on the order of 10× faster with visually indistinguishable
+frames. Only a structural change (adding/removing a plot, a volume data reload) resets;
+camera, light, and attribute edits do not.
+
+```julia
+using OmniverseMakie
+OmniverseMakie.activate!(accumulate_across_frames = true, warmup = 4)
+
+fig = Figure(); ax = LScene(fig[1, 1]); p = scatter!(ax, rand(Point3f, 100))
+record(fig, "orbit.mp4", 1:120) do frame
+    # move the camera or the data here — no per-frame reconverge
+end
+```
+
+`warmup` is RTX steps per frame (4 is plenty when accumulating; the default 64 is for
+per-frame reconverge). `accumulation_preroll` (default 40) adds steps to the first frame only
+so it isn't cold. Best for slow object motion / static-ish cameras; a fast camera fly-through
+stresses the reprojection (the same trade-off the viewport makes). If a change ever ghosts,
+`OmniverseMakie.reset_accumulation!(screen)` forces one reset.
+
 ---
 
 ## Feature status

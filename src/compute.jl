@@ -781,11 +781,11 @@ function _register_robj_maps!(screen, plot, robj::OvrtxRObj)
     screen.plot2robj[objectid(plot)] = robj
     screen.path2plot[robj.prim_path] = objectid(plot)
     # A3: a (late-)built reference is a stage-composition change → drop the cached PathResolver
-    # (rebuilt lazily on the next pick).  Centralised HERE so every add site — register, the
-    # Surface no-diff-node branch, AND the B3 late (empty→fill) build, an add site Track A never
-    # saw — invalidates identically; remove-side invalidation lives in _teardown_usd_reference!
-    # and reload_volume_data!.
-    _invalidate_path_resolver!(screen)
+    # (rebuilt lazily on the next pick) AND flag structural_dirty for accumulate mode.  Centralised
+    # HERE so every add site — register, the Surface no-diff-node branch, AND the B3 late
+    # (empty→fill) build, an add site Track A never saw — notes it identically; the remove side
+    # lives in _teardown_usd_reference! and reload_volume_data!.
+    _note_composition_change!(screen)
     return robj
 end
 

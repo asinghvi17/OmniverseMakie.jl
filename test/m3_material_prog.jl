@@ -43,7 +43,7 @@ fvc = join([string(length(f)) for f in fcs], ", ")
 fvi = join([string(Int(GeometryBasics.raw(i))) for f in fcs for i in f], ", ")
 
 W, H = 600, 450
-cfg  = OM.ScreenConfig(:rt2, 512, 64, 4, false)
+cfg  = OM.ScreenConfig(:rt2, 512, 64, 4, false, false, 40)
 rtx  = OM.rtx_settings_usda(cfg)
 Mcam = OM.camera_to_world((3.6f0, 3.6f0, 3.6f0), (0.0f0, 0.0f0, 0.0f0), (0.0f0, 0.0f0, 1.0f0))
 xf   = OM._usda_row_vector_matrix(Mcam)

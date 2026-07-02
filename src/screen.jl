@@ -21,6 +21,8 @@ mutable struct Screen <: Makie.MakieScreen
     last_lights::Union{Nothing,LightSnapshot}  # per-light render-state last WRITTEN — change detect (_lights_snapshot)
     path_resolver::Union{Nothing,OV.PathResolver}  # M6.B: cached path resolver (lazy, once/renderer)
     _outline_styled::Bool                    # M6.B: true once default outline style installed (once/Screen)
+    structural_dirty::Bool                   # accumulate mode: a USD reference was added/removed → reset once
+    preroll_done::Bool                       # accumulate mode: first-frame warm-up already folded in
 end
 
 # ------------------------------------------------------------------
@@ -54,6 +56,8 @@ function Screen(scene::Makie.Scene, config::ScreenConfig)
         nothing,   # last_lights
         nothing,   # path_resolver (M6.B: built lazily on first pick)
         false,     # _outline_styled (M6.B: default style installed lazily on first select!)
+        false,     # structural_dirty (accumulate mode: no composition change yet)
+        false,     # preroll_done (accumulate mode: first-frame warm-up not yet folded in)
     )
 end
 
@@ -192,7 +196,7 @@ end
 function _teardown_usd_reference!(screen::Screen, robj::OvrtxRObj)
     if screen.renderer.alive && get(robj.meta, :usd_handle_valid, true)
         OV.remove_usd!(screen.renderer, robj.usd_handle)
-        _invalidate_path_resolver!(screen)          # stage composition changed → drop cached resolver
+        _note_composition_change!(screen)           # reference removed → drop resolver + flag reset
     end
     return nothing
 end
@@ -327,6 +331,12 @@ function _sync_and_needs_reset!(screen::Screen, cam_scene)::Bool
     pull_ovrtx_nodes!(screen, screen.scene)
     need_reset = cam_changed || light_changed || screen.requires_update || pending
     screen.requires_update = false
+    # Accumulate-across-frames: keep RT2 history across frames (realtime-style), so camera/light/
+    # attribute changes do NOT reset — only a STRUCTURAL change (a USD reference added/removed:
+    # plot insert/delete/empty→fill/volume reload, flagged via `_note_composition_change!`) does,
+    # because RT2 reprojection has no history for a prim that just appeared or vanished.
+    screen.config.accumulate_across_frames && (need_reset = screen.structural_dirty)
+    screen.structural_dirty = false
     return need_reset
 end
 
@@ -366,7 +376,14 @@ function Makie.colorbuffer(screen::Screen; kw...)
     need_reset = _sync_and_needs_reset!(screen, cam_scene)
     need_reset && OV.reset!(screen.renderer)
 
-    return OV.render_to_matrix(screen.renderer, screen.product; warmup = screen.config.warmup)
+    # Accumulate mode: fold the one-time pre-roll into the FIRST frame's warm-up so frame 1 lands
+    # converged (a cold RT2 = noisy) instead of paying a separate discarded readback.
+    warmup = screen.config.warmup
+    if screen.config.accumulate_across_frames && !screen.preroll_done
+        warmup += screen.config.accumulation_preroll
+        screen.preroll_done = true
+    end
+    return OV.render_to_matrix(screen.renderer, screen.product; warmup = warmup)
 end
 
 # PNG showability: `save(fig, "x.png")` / `show(io, MIME"image/png", fig)` and Jupyter
@@ -432,6 +449,25 @@ end
 # composition at build time, so any add_usd_reference!/remove_usd! (plot insert/delete, empty!,
 # volume reload) must invalidate it.  Rebuilt lazily on the next pick (path_resolver_for).
 _invalidate_path_resolver!(screen::Screen) = (screen.path_resolver = nothing; nothing)
+
+# Every stage-composition change (a USD reference added OR removed) calls THIS one helper, so the
+# two composition-triggered concerns can never drift: (1) drop the pick resolver cache, (2) flag
+# `structural_dirty` so accumulate-across-frames mode resets RT2 once (its reprojection has no
+# history for a prim that just appeared/disappeared).  Call sites: `_register_robj_maps!`
+# (compute.jl — insert / Surface / empty→fill late build), `_teardown_usd_reference!` (delete /
+# empty!), `reload_volume_data!` (volume.jl — remove+re-reference).
+_note_composition_change!(screen::Screen) =
+    (screen.path_resolver = nothing; screen.structural_dirty = true; nothing)
+
+"""
+    reset_accumulation!(screen::Screen) -> Nothing
+
+Force one RT2 accumulation reset (restart the path-tracer fresh).  Only useful with
+`accumulate_across_frames = true`, where per-frame resets are suppressed: call this if a change
+the composition funnel does not cover (or a fast camera move) leaves visible ghosting.  A no-op
+kind of insurance in the default per-frame-reconverge mode.  Not exported.
+"""
+reset_accumulation!(screen::Screen) = OV.reset!(screen.renderer)
 
 # Resolve a hit prim path to the owning plot's `objectid` by walking UP the path until a
 # `path2plot` entry matches.  A Mesh hit hits the plot prim exactly; a Scatter/MeshScatter hit

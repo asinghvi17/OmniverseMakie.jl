@@ -70,6 +70,8 @@ function __init__()
     Makie.CURRENT_DEFAULT_THEME[:OmniverseMakie] = Makie.Attributes(
         mode = :rt2, samples = 512, warmup = 64, max_bounces = 4,
         selection_outline = false,   # M6.B: outline feature off by default at every level
+        accumulate_across_frames = false,  # realtime-style recording; off = per-frame reconverge
+        accumulation_preroll = 40,   # first-frame warm-up steps when accumulate is on
     )
     # M3.5: make `material=` a backend-universal attribute so Lines/Scatter/LineSegments accept it
     # too (Makie validates undocumented keywords; only mesh-like recipes document it natively).

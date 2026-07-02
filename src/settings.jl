@@ -12,6 +12,15 @@ struct ScreenConfig
     warmup::Int         # RT2 warmup frames (default 64)
     max_bounces::Int    # max ray bounces (default 4)
     selection_outline::Bool  # M6.B: enable creation-time selection-outline feature (default false)
+    # Accumulate-across-frames (realtime-style recording): keep RT2 accumulation across frames
+    # instead of resetting on every camera/light/attribute change — RT2's temporal reprojection +
+    # denoiser handle motion like the interactive viewport, so recording runs ~10× faster.  Only a
+    # STRUCTURAL change (add/remove a USD reference) still resets.  Default false = byte-identical
+    # per-frame-reconverge behaviour.
+    accumulate_across_frames::Bool
+    # Extra RTX steps folded into the FIRST frame's warmup so frame 1 is converged, not cold
+    # (only meaningful when accumulate_across_frames is on).  Default 40.
+    accumulation_preroll::Int
 end
 
 """

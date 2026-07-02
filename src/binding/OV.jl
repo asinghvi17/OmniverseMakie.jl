@@ -730,10 +730,17 @@ end
 Enqueue + wait an RT2 accumulation reset.  Call after any geometry/camera change so
 the path-tracer restarts fresh.
 """
+# Diagnostic hook: fired (with no args) on every `reset!`.  `nothing` (default) → zero overhead;
+# a test sets it to a counter to assert accumulate-across-frames suppresses per-frame resets.
+# Mirrors compute.jl's `_PUSH_OBSERVER`.
+const _RESET_OBSERVER = Ref{Any}(nothing)
+
 function reset!(r::Renderer; time::Float64=0.0)
     enqueue_wait(r, "reset") do
         LibOVRTX.ovrtx_reset(r.ptr, time)
     end
+    ob = _RESET_OBSERVER[]
+    ob === nothing || ob()
     return nothing
 end
 

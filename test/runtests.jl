@@ -284,3 +284,10 @@ include("review_e_watchdog_test.jl")
 # until the marker appears, and the PROG_PIXEL_HELPERS prelude parses + its helpers behave.
 include("review_e2_retry_test.jl")
 include("review_e2_prelude_test.jl")
+
+# Accumulate-across-frames (realtime-style recording): ScreenConfig plumbing (pure) + the
+# behavioural render test — per-frame camera moves fire ZERO RT2 resets while the image still
+# updates (diffs applied), a structural insert! resets exactly once, the first-frame pre-roll
+# lands a converged frame, and default mode resets every frame (control).
+include("accumulate_config_test.jl")
+include("accumulate_render_test.jl")
