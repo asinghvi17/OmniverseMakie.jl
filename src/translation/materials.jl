@@ -237,19 +237,31 @@ end
 Resolve an image `color` or `*_texture` value to an on-disk asset PATH for an
 OmniPBR texture input, at open-time:
 - `AbstractString` → returned AS-IS (an existing path, no write; `plot`/`key` unused).
-- `Matrix{<:Colorant}` → written to a stable session-temp PNG (`PNGFiles.save`,
-  converted to `RGBA{N0f8}`), named `tex_<objectid(plot)>_<key>.png`; its ABSOLUTE
-  path is returned (USD needs it absolute — the in-memory root stage has no anchor
-  for a relative `@…@` path).
+- `Matrix{<:Colorant}` → written to a FRESH session-temp PNG (`PNGFiles.save`,
+  converted to `RGBA{N0f8}`), named `tex_<objectid(plot)>_<key>_<seq>.png` with a
+  monotonic `<seq>` so no write ever overwrites an earlier one (an overwrite made
+  ovrtx disable the texture as a "video texture" — see the writer below); its
+  ABSOLUTE path is returned (USD needs it absolute — the in-memory root stage has
+  no anchor for a relative `@…@` path).
 
 `key` (a Symbol/String naming the input, e.g. `:color`, `:base_color_texture`)
-makes the filename unique PER INPUT PER PLOT. Without it two image inputs on ONE
-plot — or, via the former `objectid(nothing)` process-constant, two DIFFERENT
+keeps the `<oid>_<key>` prefix readable/distinct PER INPUT PER PLOT. Without it two
+image inputs on ONE plot — or, via the former `objectid(nothing)` process-constant, two DIFFERENT
 plots — would collide on one shared temp file and silently overwrite each other (B6).
 """
+# Monotonic suffix so every image write lands at a FRESH path (below).
+const _TEX_WRITE_SEQ = Ref{UInt}(0)
+
 _texture_asset_for(path::AbstractString, plot, key) = String(path)
 function _texture_asset_for(img::AbstractMatrix{<:Colorant}, plot, key)
-    path = joinpath(_texture_dir(), "tex_$(objectid(plot))_$(key).png")
+    # FRESH unique filename on EVERY write — NEVER overwrite a path ovrtx may already have loaded.
+    # Re-writing the SAME stable path (a re-author / multi-still loop keyed on `objectid(plot)`)
+    # makes ovrtx flag the on-disk file a changed *video texture* and DISABLE it — and races its
+    # async PNG read ("Corrupt PNG").  A per-write path is read exactly once, so N re-renders of an
+    # image-`color` plot all keep their texture.  Files land in the session temp dir (process-exit
+    # reap); the `objectid`+`key` prefix stays for readability/debugging.
+    n = (_TEX_WRITE_SEQ[] += 1)
+    path = joinpath(_texture_dir(), "tex_$(objectid(plot))_$(key)_$(n).png")
     PNGFiles.save(path, convert.(RGBA{N0f8}, img))
     return path
 end

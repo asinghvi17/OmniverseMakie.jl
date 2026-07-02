@@ -207,9 +207,11 @@ end
     i4 = OM.material_inputs_from(p4)
     @test i4["diffuse_texture"] != i4["normalmap_texture"]
 
-    # Direct `_texture_asset_for`: same plot + same key → same file (idempotent
-    # per input); different key OR different plot → different file.
-    @test OM._texture_asset_for(img1, p1, :color) == OM._texture_asset_for(img1, p1, :color)
+    # Direct `_texture_asset_for`: EVERY call returns a FRESH unique path (the fresh-path fix —
+    # a stable per-(plot,key) name that a re-author overwrote made ovrtx disable the texture as a
+    # "video texture"; see texture_freshpath_test.jl). So even the same plot+key never collides;
+    # different key / different plot are trivially distinct too.
+    @test OM._texture_asset_for(img1, p1, :color) != OM._texture_asset_for(img1, p1, :color)
     @test OM._texture_asset_for(img1, p1, :color) != OM._texture_asset_for(img1, p1, :normal_texture)
     @test OM._texture_asset_for(img1, p1, :color) != OM._texture_asset_for(img1, p2, :color)
     # A String path is still returned AS-IS regardless of plot/key (no temp write).

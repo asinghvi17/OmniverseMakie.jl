@@ -647,6 +647,18 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, plot, name::Symbol, value)
     elseif name === :scaled_color
         if robj.material_shader === nothing
             _push_displaycolor!(r, prim, plot, value)            # USD-native displayColor
+        elseif _plot_color(plot) isa AbstractMatrix
+            # The materialized base is a TEXTURE (image `color`) → `inputs:diffuse_texture`, an
+            # asset input.  A live image edit CANNOT reload in place: ovrtx can't live-swap a
+            # texture asset (spike: the asset attribute is not writable via the FFI — PATH_STRING
+            # is array-only, TOKEN_STRING size-mismatches) and the OmniPBR material is baked into
+            # the ROOT layer (not a removable reference like a volume), so remove+re-reference does
+            # not apply either.  Writing `diffuse_color_constant` would be inert (the texture
+            # overrides it).  Warn + skip (routed=false → no reset burn); recreate the Screen to
+            # change the texture (the fresh author writes a fresh PNG — see `_texture_asset_for`).
+            @warn "OmniverseMakie: live update of an image `color` (texture) is not supported — \
+                   ovrtx can't live-swap a texture asset; recreate the Screen to change it. Skipped." maxlog=1
+            routed = false
         else
             # M3.4: materialized → re-write the base colour in place (constant only) on the correct
             # material KIND (OmniGlass `glass_color` vs OmniPBR `diffuse_color_constant`).

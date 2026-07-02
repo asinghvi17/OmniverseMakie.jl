@@ -297,3 +297,9 @@ include("accumulate_render_test.jl")
 # embedded region changes vs a pure-GL baseline while the 2D diagnostic region does not, the
 # ovrtx present buffer responds to orbiting, and close() leaves the host window open.
 include("replace_scene_test.jl")
+
+# Image-texture fresh-path fix: an image `color` writes a FRESH temp PNG per write (was a stable
+# objectid-keyed name that a re-author overwrote → ovrtx "video texture" disable + corrupt-PNG
+# race). Pure: repeat writes get distinct paths. Subprocess: the same plot rendered by two Screens
+# in one process keeps its texture on BOTH stills.
+include("texture_freshpath_test.jl")
