@@ -253,45 +253,56 @@ end
 
 function author_usd_prim!(screen, scene, plot::Makie.Lines, args)
     pts = args[:positions_transformed_f32c]
-    n   = length(pts)
-    n < 2 && return nothing
-    width = _curve_width(pts, plot.linewidth[])
+    # NaN-separated polyline (Makie's broken-line idiom): split into contiguous finite runs ≥2,
+    # each a BasisCurves curve.  No finite run (all-NaN / <2 finite pts) → empty plot (unchanged
+    # `nothing`).  `keep` filters the per-vertex colour by the SAME mask so colours stay aligned.
+    fpts, counts, keep = _split_nan_runs(pts)
+    isempty(counts) && return nothing
+    width = _curve_width(fpts, plot.linewidth[])
     path  = plot_prim_path(screen.scene2scope, scene, plot)
     if is_materialized(plot)
         # M3.5: bind the OmniPBR material and emit the curve WITHOUT `displayColor` (the
         # `nothing` sentinel).  `material_shader` wires the M3.4 live-edit path.
-        usda = _usda_basiscurves(pts, [n], width, nothing, "constant"; model = args[:model_f32c])
+        usda = _usda_basiscurves(fpts, counts, width, nothing, "constant"; model = args[:model_f32c])
         h = OV.add_usd_reference!(screen.renderer, usda, path)
         OV.bind_material!(screen.renderer, path, material_prim_path(plot))
         robj = OvrtxRObj(path, h)
         robj.material_shader = material_prim_path(plot) * "/Shader"
+        robj.meta[:curve_npoints] = length(fpts)          # live-push binding-vs-oneshot gate
         return robj
     end
-    values, interp = _scaled_to_display(plot, args[:scaled_color], n)
-    usda  = _usda_basiscurves(pts, [n], width, values, interp; model = args[:model_f32c])
+    values, interp = _scaled_to_display(plot, args[:scaled_color], length(fpts))
+    values = interp == "vertex" ? values[keep] : values   # colours filtered by the SAME mask
+    usda  = _usda_basiscurves(fpts, counts, width, values, interp; model = args[:model_f32c])
     h = OV.add_usd_reference!(screen.renderer, usda, path)
-    return OvrtxRObj(path, h)
+    robj = OvrtxRObj(path, h)
+    robj.meta[:curve_npoints] = length(fpts)
+    return robj
 end
 
 function author_usd_prim!(screen, scene, plot::Makie.LineSegments, args)
-    pts  = args[:positions_transformed_f32c]
-    nseg = length(pts) ÷ 2
-    nseg < 1 && return nothing
-    seg_pts = pts[1:2*nseg]
-    width = _curve_width(pts, plot.linewidth[])
+    pts = args[:positions_transformed_f32c]
+    # Drop any segment with a non-finite endpoint (NaN-safe); `keep` filters per-vertex colour.
+    seg_pts, counts, keep = _finite_segments(pts)
+    isempty(counts) && return nothing
+    width = _curve_width(seg_pts, plot.linewidth[])
     path  = plot_prim_path(screen.scene2scope, scene, plot)
     if is_materialized(plot)
-        usda = _usda_basiscurves(seg_pts, fill(2, nseg), width, nothing, "constant"; model = args[:model_f32c])
+        usda = _usda_basiscurves(seg_pts, counts, width, nothing, "constant"; model = args[:model_f32c])
         h = OV.add_usd_reference!(screen.renderer, usda, path)
         OV.bind_material!(screen.renderer, path, material_prim_path(plot))
         robj = OvrtxRObj(path, h)
         robj.material_shader = material_prim_path(plot) * "/Shader"
+        robj.meta[:curve_npoints] = length(seg_pts)
         return robj
     end
     values, interp = _scaled_to_display(plot, args[:scaled_color], length(seg_pts))
-    usda  = _usda_basiscurves(seg_pts, fill(2, nseg), width, values, interp; model = args[:model_f32c])
+    values = interp == "vertex" ? values[keep] : values
+    usda  = _usda_basiscurves(seg_pts, counts, width, values, interp; model = args[:model_f32c])
     h = OV.add_usd_reference!(screen.renderer, usda, path)
-    return OvrtxRObj(path, h)
+    robj = OvrtxRObj(path, h)
+    robj.meta[:curve_npoints] = length(seg_pts)
+    return robj
 end
 
 # Volumes M2: resolve a `Volume`'s transfer-function domain as Float64.  An explicit `(lo,hi)`
@@ -412,6 +423,45 @@ function _push_points_binding!(binding, pts::AbstractVector)
     return nothing
 end
 
+# NaN-aware re-split of a live positions edit, dispatched on the curve plot type (mirrors the
+# author): Lines → contiguous finite runs; LineSegments → per-segment endpoint filter.
+_curve_split(::Makie.Lines, pts)        = _split_nan_runs(pts)
+_curve_split(::Makie.LineSegments, pts) = _finite_segments(pts)
+
+# Live positions edit for a Lines/LineSegments BasisCurves prim.  A BasisCurves is multi-curve,
+# so a NaN edit (Makie's broken-line idiom) can change the TOPOLOGY on any frame — re-split and
+# re-write `curveVertexCounts` alongside `points`.
+#
+# SPIKE-VERIFIED (Task B2): a live `curveVertexCounts` write IS honored on an authored BasisCurves
+# prim.  Isolating it (points unchanged, [4]→[2,2]) dropped the middle segment — 1644→497 lit px,
+# 185→60 lit columns — so this rewrites IN PLACE; NO remove+re-reference fallback is needed.
+# curveVertexCounts is (re)written UNCONDITIONALLY: it is tiny, and writing it every positions edit
+# keeps the topology correct across BOTH a finite→NaN split AND the reverse NaN→finite merge (the
+# `:scaled_color` route can't be relied on to fire).
+#
+# The persistent `points` binding is sized at author time (`robj.meta[:curve_npoints]`).  A split
+# that CHANGES the point count takes the one-shot `write_array_attribute!` path — the zero-copy
+# binding is used ONLY at the bound length.  (SPIKE 2: a one-shot resize is reliably honored;
+# resize-UP through a binding sized at author time is NOT relied on.)
+#
+# NOTE: a PER-VERTEX-coloured line whose live positions edit CHANGES the finite topology does not
+# re-filter `displayColor` here (only the `:scaled_color` route rewrites colours, and it fires on a
+# colour change, not a positions move) — displayColor can transiently misalign until the next colour
+# edit.  The common broken-line case (CONSTANT colour, e.g. contour output) is unaffected, and a
+# per-vertex-coloured NaN line authored statically filters colours correctly (author path).
+function _push_curve_positions!(screen, robj, plot, binding, value)
+    r = screen.renderer; prim = robj.prim_path
+    fpts, counts, _ = _curve_split(plot, value)
+    OV.write_array_attribute!(r, prim, "curveVertexCounts", Int32.(counts))
+    if binding !== nothing && length(fpts) == get(robj.meta, :curve_npoints, -1)
+        _push_points_binding!(binding, fpts)
+    else
+        OV.write_array_attribute!(r, prim, "points", fpts)
+    end
+    robj.meta[:curve_npoints] = length(fpts)
+    return nothing
+end
+
 # Diagnostic hook: called with the attribute name on every `push_to_ovrtx!` write.
 # `nothing` (default) → no overhead.  test/m2_diffnode_test.jl asserts EXACTLY ONE write per edit.
 const _PUSH_OBSERVER = Ref{Any}(nothing)
@@ -507,8 +557,11 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, plot, name::Symbol, value)
             OV.write_mapped_xform!(binding, _model_to_usd_xform(value))
         end
     elseif name === :positions_transformed_f32c
-        # points — persistent `bind_array_attribute` + write when bound, else one-shot.
-        if binding === nothing
+        if plot isa Union{Makie.Lines,Makie.LineSegments}
+            # BasisCurves: NaN-aware re-split → points + curveVertexCounts (see _push_curve_positions!).
+            _push_curve_positions!(screen, robj, plot, binding, value)
+        elseif binding === nothing
+            # points — persistent `bind_array_attribute` + write when bound, else one-shot.
             OV.write_array_attribute!(r, prim, "points", value)
         else
             _push_points_binding!(binding, value)

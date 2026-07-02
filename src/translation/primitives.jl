@@ -69,19 +69,78 @@ function _orientations_for(rot, n)
     return all_identity ? nothing : out
 end
 
-# Axis-aligned bounding-box diagonal length of a point cloud (Float64).
+# Axis-aligned bounding-box diagonal length of a point cloud (Float64).  Non-finite points
+# (NaN separators — Makie's broken-line idiom) are SKIPPED, so `_curve_width` stays finite;
+# an empty cloud OR one with no finite point falls back to 1.0.  On all-finite input the
+# result is unchanged (byte-preserving for `_curve_width`/the golden USDA).
 function _bbox_diag(pts)
-    isempty(pts) && return 1.0
-    lo = [Float64(_point3f(first(pts))[i]) for i in 1:3]
-    hi = copy(lo)
+    lo = nothing; hi = nothing
     for p in pts
+        all(isfinite, p) || continue
         c = _point3f(p)
-        for i in 1:3
-            lo[i] = min(lo[i], Float64(c[i])); hi[i] = max(hi[i], Float64(c[i]))
+        if lo === nothing
+            lo = [Float64(c[i]) for i in 1:3]; hi = copy(lo)
+        else
+            for i in 1:3
+                lo[i] = min(lo[i], Float64(c[i])); hi[i] = max(hi[i], Float64(c[i]))
+            end
         end
     end
+    lo === nothing && return 1.0            # empty OR no finite point
     d = sqrt(sum((hi .- lo) .^ 2))
     return d < 1e-8 ? 1.0 : d
+end
+
+# Split a point sequence at NON-FINITE points into contiguous FINITE runs — Makie's standard
+# broken-line idiom (NaN separators, e.g. contour output).  Returns `(finite_pts, counts, keep)`:
+#   • `finite_pts` concatenates every run of length ≥ 2 (each becomes one BasisCurves curve — the
+#     schema is natively multi-curve),
+#   • `counts` is the per-run vertex count (the `curveVertexCounts` payload),
+#   • `keep` is the per-INPUT-vertex survivor mask so a PARALLEL per-vertex array (colours) is
+#     filtered IDENTICALLY via `colours[keep]` (stays index-aligned).
+# A run of length 1 (an isolated finite point between separators) is DROPPED; all-non-finite /
+# empty / a lone point → no runs (`counts` empty → the author returns `nothing`).  On ALL-finite
+# input the result is `(pts, [length(pts)], all-true)`, so the emit is byte-identical to the
+# pre-split code.
+function _split_nan_runs(pts)
+    n = length(pts)
+    counts = Int[]
+    keep = falses(n)
+    i = 1
+    while i <= n
+        if all(isfinite, pts[i])
+            j = i
+            while j <= n && all(isfinite, pts[j])
+                j += 1
+            end
+            if j - i >= 2                   # a run of ≥ 2 finite points → one curve
+                push!(counts, j - i)
+                keep[i:j-1] .= true
+            end
+            i = j
+        else
+            i += 1
+        end
+    end
+    return pts[keep], counts, keep
+end
+
+# LineSegments variant of `_split_nan_runs`: the points are independent PAIRS (1,2),(3,4),…, so
+# DROP any 2-point segment with a non-finite endpoint (a trailing odd point is ignored).  Returns
+# `(finite_pts, counts, keep)` in the same shape (`counts` is all 2s — one per surviving segment).
+# All-finite input reproduces the pre-change emit.
+function _finite_segments(pts)
+    n = length(pts)
+    counts = Int[]
+    keep = falses(n)
+    for s in 1:(n ÷ 2)
+        a = 2s - 1; b = 2s
+        if all(isfinite, pts[a]) && all(isfinite, pts[b])
+            keep[a] = true; keep[b] = true
+            push!(counts, 2)
+        end
+    end
+    return pts[keep], counts, keep
 end
 
 # ------------------------------------------------------------------

@@ -173,3 +173,10 @@ include("volumes_live_test.jl")
 # resolver (_resolve_colorrange), NaN-safe: golden USDA/scatter/volume regression anchors +
 # a NaN-masked surface colour path that yields finite RGB (nan_color) instead of throwing (pure).
 include("review_b1_colormap_test.jl")
+
+# Review Track B / Task B2 — NaN-separated lines (Makie's broken-line idiom, e.g. contour output):
+# `_split_nan_runs`/`_finite_segments` split a NaN-poisoned polyline into finite BasisCurves curves
+# (colours filtered by the same mask), `_bbox_diag` skips non-finite → `_curve_width` stays finite.
+# Pure: split unit cases + golden byte-identity on no-NaN.  Subprocess: a NaN-separated `lines!`
+# renders two clusters with a GAP + a live NaN move re-renders (spike-verified live curveVertexCounts).
+include("review_b2_nan_lines_test.jl")
