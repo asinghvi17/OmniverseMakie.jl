@@ -56,22 +56,50 @@ _light_intensity_scale(_)                        = 250.0
 # ------------------------------------------------------------------
 
 """
-    _direction_to_xform_matrix(dir) -> Matrix{Float64}
+    _xform_matrix(t::NTuple{16,Float64}) -> Matrix{Float64}
 
-4×4 USD orientation matrix (row-vector) for a light emitting along `dir`. USD
-DistantLights/RectLights emit along local −Z, so local +Z = −`dir`. Plain
-`Matrix{Float64}` so both the USDA emitter and live `write_xform!` consume it.
+Row-major 4×4 `Matrix{Float64}` from a flat 16-tuple in USD row-vector layout (row 1 =
+`t[1:4]`, …). The stack-tuple form (`_direction_to_xform_tuple`/`_translation_xform_tuple`)
+is what the per-frame light snapshot stores allocation-free; this rebuilds the `Matrix` the
+USDA emitter and `OV.write_xform!` consume — called only at author time and on an ACTUAL
+live xform change, never on an idle frame.
 """
-function _direction_to_xform_matrix(dir)
-    z = -normalize(Float64[dir[1], dir[2], dir[3]])   # local +Z = −emission direction
-    ref_axis = abs(z[3]) < 0.99 ? Float64[0, 0, 1] : Float64[1, 0, 0]
+function _xform_matrix(t::NTuple{16,Float64})
+    return Float64[t[1]  t[2]  t[3]  t[4]
+                   t[5]  t[6]  t[7]  t[8]
+                   t[9]  t[10] t[11] t[12]
+                   t[13] t[14] t[15] t[16]]
+end
+
+"""
+    _direction_to_xform_tuple(dir) -> NTuple{16,Float64}
+
+Flat 4×4 USD orientation matrix (row-vector, `_xform_matrix` layout) for a light emitting
+along `dir`. USD DistantLights/RectLights emit along local −Z, so local +Z = −`dir`.
+Computed on `Vec3d` (StaticArrays) math so it ALLOCATES NOTHING — the form the per-frame
+snapshot stores. Byte-identical to the pre-L2 `Matrix` build (pinned by the RectLight golden
+in `test/l1_lights_structural_test.jl`).
+"""
+function _direction_to_xform_tuple(dir)
+    z = -normalize(Vec3d(dir[1], dir[2], dir[3]))     # local +Z = −emission direction
+    ref_axis = abs(z[3]) < 0.99 ? Vec3d(0.0, 0.0, 1.0) : Vec3d(1.0, 0.0, 0.0)
     x = normalize(cross(ref_axis, z))
     y = cross(z, x)
-    return Float64[x[1] x[2] x[3] 0.0
-                   y[1] y[2] y[3] 0.0
-                   z[1] z[2] z[3] 0.0
-                   0.0  0.0  0.0  1.0]
+    return (x[1], x[2], x[3], 0.0,
+            y[1], y[2], y[3], 0.0,
+            z[1], z[2], z[3], 0.0,
+            0.0,  0.0,  0.0,  1.0)
 end
+
+"""
+    _direction_to_xform_matrix(dir) -> Matrix{Float64}
+
+4×4 USD orientation matrix (row-vector) for a light emitting along `dir`, as a plain
+`Matrix{Float64}` the USDA emitter (`_direction_to_xform`) and RectLight authoring consume.
+Thin `Matrix` wrapper over the allocation-free `_direction_to_xform_tuple` core, so the bake
+and live-sync share ONE direction→orientation computation.
+"""
+_direction_to_xform_matrix(dir) = _xform_matrix(_direction_to_xform_tuple(dir))
 
 """
     _direction_to_xform(dir) -> String
@@ -81,14 +109,16 @@ USDA `matrix4d` literal for a directional light's orientation
 """
 _direction_to_xform(dir) = _usda_row_vector_matrix(_direction_to_xform_matrix(dir))
 
-# 4×4 pure-translation matrix (USD row-vector: translation in the last ROW) for a
-# light at `p` (Sphere/Spot lights).
-function _translation_xform(p)
-    return Float64[1.0 0.0 0.0 0.0
-                   0.0 1.0 0.0 0.0
-                   0.0 0.0 1.0 0.0
-                   Float64(p[1]) Float64(p[2]) Float64(p[3]) 1.0]
+# Flat pure-translation matrix (USD row-vector: translation in the last ROW) for a light at
+# `p` (Sphere/Spot lights), as an allocation-free `NTuple{16,Float64}` — the form the snapshot
+# stores. `_translation_xform` is the `Matrix` wrapper the USDA emitter consumes.
+function _translation_xform_tuple(p)
+    return (1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            Float64(p[1]), Float64(p[2]), Float64(p[3]), 1.0)
 end
+_translation_xform(p) = _xform_matrix(_translation_xform_tuple(p))
 
 # ------------------------------------------------------------------
 # _intensity_and_color — factor magnitude out into intensity; normalize hue
@@ -163,22 +193,14 @@ function usda_light(l::Makie.AmbientLight, index::Int)
 end
 
 function usda_light(l::Makie.RectLight, index::Int)
-    # Best-effort: RectLight, width=norm(u1), height=norm(u2); orient from direction,
-    # translate from position.
+    # Best-effort: RectLight, width=norm(u1), height=norm(u2); orient from direction
+    # (shared with DistantLight), translate from position.
     intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
     w = norm(Float64[l.u1[1], l.u1[2], l.u1[3]])
     h = norm(Float64[l.u2[1], l.u2[2], l.u2[3]])
-    # Combined rotation + translation matrix.
-    dir = Float64[l.direction[1], l.direction[2], l.direction[3]]
-    z = -normalize(dir)
-    ref_axis = abs(z[3]) < 0.99 ? Float64[0, 0, 1] : Float64[1, 0, 0]
-    x_ax = normalize(cross(ref_axis, z))
-    y_ax = cross(z, x_ax)
-    p = l.position
-    xform_matrix = Float64[x_ax[1] x_ax[2] x_ax[3] 0.0
-                           y_ax[1] y_ax[2] y_ax[3] 0.0
-                           z[1]    z[2]    z[3]    0.0
-                           Float64(p[1]) Float64(p[2]) Float64(p[3]) 1.0]
+    # Orientation from the shared helper; drop the translation into the last row.
+    xform_matrix = copy(_direction_to_xform_matrix(l.direction))
+    xform_matrix[4, 1:3] .= l.position
     xform_str = _usda_row_vector_matrix(xform_matrix)
     return """    def RectLight "$(light_prim_name(l, index))"
     {
@@ -296,23 +318,42 @@ end
 # Live light sync (M2.1) — push minimal writes for changed lights
 # ------------------------------------------------------------------
 
-# Per-light live render-state for both the snapshot and the writes:
-#   (intensity, color::NTuple{3}, xform::Union{Nothing,Matrix{Float64}}).
-# Same scale/intensity/xform math as `usda_light`, so the author-time snapshot matches
-# the baked USDA. Only tested types sync; exotic types return `nothing` (stay baked).
+"""
+    LightState(intensity, color, xform)
+
+Immutable per-light render state the live-sync snapshot compares frame-to-frame. Stores the
+exact values `sync_lights!` writes — `Float32` intensity + colour (matching the attribute
+writes) and the xform as a stack `NTuple{16,Float64}` (`nothing` for a DomeLight), converted
+to the `Matrix` form (`_xform_matrix`) only AT WRITE TIME. Fields are compared individually in
+`sync_lights!`, so an idle frame recomputes state without a `Dict`, fresh strings, or `Matrix`
+temporaries.
+"""
+struct LightState
+    intensity::Float32
+    color::NTuple{3,Float32}
+    xform::Union{Nothing,NTuple{16,Float64}}
+end
+
+# The per-frame light snapshot: (authored prim path, render-state-or-`nothing`) per light, a
+# CONCRETE eltype so `sync_lights!`'s diff loop reads it without dynamic dispatch (vs the old
+# `Any[]`). Named so `Screen.last_lights` (screen.jl) can be typed `Union{Nothing,LightSnapshot}`.
+const LightSnapshot = Vector{Tuple{String,Union{LightState,Nothing}}}
+
+# Per-light live render-state for both the snapshot and the writes. Same scale/intensity/xform
+# math as `usda_light`, so the author-time snapshot matches the baked USDA (the `LightState`
+# constructor narrows the Float64 intensity/colour to the Float32 that gets written). Only
+# tested types sync; exotic types return `nothing` (stay baked).
 function _light_render_state(l::Makie.DirectionalLight)
     intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
-    return (intensity = intensity, color = (cr, cg, cb),
-            xform = _direction_to_xform_matrix(l.direction))
+    return LightState(intensity, (cr, cg, cb), _direction_to_xform_tuple(l.direction))
 end
 function _light_render_state(l::Makie.PointLight)
     intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
-    return (intensity = intensity, color = (cr, cg, cb),
-            xform = _translation_xform(l.position))
+    return LightState(intensity, (cr, cg, cb), _translation_xform_tuple(l.position))
 end
 function _light_render_state(l::Makie.AmbientLight)
     intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
-    return (intensity = intensity, color = (cr, cg, cb), xform = nothing)  # DomeLight: no xform
+    return LightState(intensity, (cr, cg, cb), nothing)   # DomeLight: no xform
 end
 _light_render_state(_) = nothing   # exotic type → no live sync (stays baked)
 
@@ -322,8 +363,53 @@ function _light_paths(lights)
     return [(l, light_prim_path(l, idx)) for (l, idx) in _enumerate_lights(lights)]
 end
 
-# Snapshot of every light's (path, render-state); render-state may be `nothing`.
-_lights_snapshot(lights) = Any[(path, _light_render_state(l)) for (l, path) in _light_paths(lights)]
+# Per-type authored-path PREFIX ("/World/<Type>_") cache. Lets the two-arg snapshot verify —
+# allocation-free after a one-time warmup per type — that a reused path still names the SAME
+# light type as the light now at that position. Keyed by concrete light type; the trailing "_"
+# makes the prefix an unambiguous type tag (no light type name is a prefix of another followed
+# by "_"). The `get(…, "")` + explicit store avoids the closure `get!` would allocate per call.
+const _LIGHT_PATH_PREFIX = Dict{DataType,String}()
+function _light_path_prefix(l)
+    T = typeof(l)
+    cached = get(_LIGHT_PATH_PREFIX, T, "")
+    isempty(cached) || return cached
+    prefix = "/World/$(nameof(T))_"
+    _LIGHT_PATH_PREFIX[T] = prefix
+    return prefix
+end
+
+# Snapshot of every light's (authored path, render-state); render-state may be `nothing`.
+# The single-arg form (author-time seed) computes paths fresh via `_light_paths`. The two-arg
+# form REUSES the previous snapshot's path strings only when the light count AND every position's
+# light TYPE are unchanged (paths encode <Type>_<idx>) — so an idle-frame rebuild allocates
+# neither the `_enumerate_lights` `Dict` nor fresh interpolated path strings. Any count OR
+# positional-type change falls back to a fresh build with correctly recomputed paths.
+function _lights_snapshot(lights)
+    snap = LightSnapshot(undef, length(lights))
+    for (i, (l, path)) in enumerate(_light_paths(lights))
+        snap[i] = (path, _light_render_state(l))
+    end
+    return snap
+end
+function _lights_snapshot(lights, old::LightSnapshot)
+    length(old) == length(lights) || return _lights_snapshot(lights)   # count changed → fresh
+    # Reuse the authored path strings ONLY if every position's light TYPE still matches its old
+    # path. Paths encode <Type>_<idx>, so a same-count type SWAP/permutation would otherwise
+    # graft a stale path onto a new light's state → that state gets written to the WRONG prim,
+    # silently corrupting both. On any positional-type mismatch, rebuild FRESH (recomputed paths
+    # = exact pre-L2 semantics: a permutation writes to the correctly-named authored prim; a
+    # same-count multiset change writes to a never-authored prim = silent no-op, as before L2).
+    # Positional-type equality ⟺ identical per-type enumeration ⟺ identical paths, so a passing
+    # check guarantees the reused paths EQUAL a fresh build's.
+    for i in eachindex(lights)
+        startswith(old[i][1], _light_path_prefix(lights[i])) || return _lights_snapshot(lights)
+    end
+    snap = LightSnapshot(undef, length(lights))
+    for i in eachindex(lights)
+        snap[i] = (old[i][1], _light_render_state(lights[i]))          # reuse the authored path
+    end
+    return snap
+end
 
 # Scalar Float32 attribute write (e.g. inputs:intensity) — lanes=1.
 function _write_light_intensity!(r, prim, val)
@@ -349,18 +435,32 @@ changed attribute (`inputs:intensity`, `inputs:color`, `omni:xform`). Updates
 `screen.last_lights`; returns `true` iff anything was written (so `colorbuffer` knows
 to `OV.reset!`).
 
-A structural change (light *count* differs) needs a stage re-open, not a live edit:
-this just refreshes the snapshot and returns `false`.
+A structural change (light *count* differs) can't be applied live — it would need a
+stage re-open. Such a change warns once (`maxlog=1`) and returns `false` WITHOUT
+advancing the snapshot, so the mismatch stays detectable every frame instead of
+silently corrupting the diff baseline (advancing it would diff the next edit against
+never-authored prims). The added/removed light does not render; create a new Screen.
 """
 function sync_lights!(screen, scene)
     lights   = scene.compute[:lights][]
-    new_snap = _lights_snapshot(lights)
     old_snap = screen.last_lights
 
-    # Structural mismatch (or first call, no baked snapshot): prims may not exist yet,
-    # so just record the snapshot.
-    if old_snap === nothing || length(old_snap) != length(new_snap)
-        screen.last_lights = new_snap
+    # First call (nothing baked yet): seed the snapshot so later diffs have a baseline.
+    if old_snap === nothing
+        screen.last_lights = _lights_snapshot(lights)
+        return false
+    end
+
+    # Reuse the baked path strings (invariant unless the count changes) so an idle frame's
+    # rebuild stays allocation-lean; a count change falls back to a fresh snapshot, caught next.
+    new_snap = _lights_snapshot(lights, old_snap)
+
+    # Structural change (light COUNT differs): a live edit can't add/remove prims (that
+    # needs a stage re-open). Do NOT advance the snapshot — advancing it would diff the
+    # next edit against never-authored prims. Leave it stale so the mismatch stays
+    # detectable every frame; warn once.
+    if length(old_snap) != length(new_snap)
+        @warn "OmniverseMakie: adding/removing lights on a live Screen is not supported — create a new Screen" maxlog=1
         return false
     end
 
@@ -377,7 +477,7 @@ function sync_lights!(screen, scene)
             _write_light_color!(r, path, new_state.color); changed = true
         end
         if new_state.xform !== nothing && (old_state === nothing || new_state.xform != old_state.xform)
-            OV.write_xform!(r, path, new_state.xform); changed = true
+            OV.write_xform!(r, path, _xform_matrix(new_state.xform)); changed = true   # NTuple → Matrix at write time
         end
     end
     screen.last_lights = new_snap

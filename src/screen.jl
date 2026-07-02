@@ -17,8 +17,8 @@ mutable struct Screen <: Makie.MakieScreen
     scene_listeners::Dict{UInt64,Vector}     # objectid(scene) => redraw listeners (M2.4 teardown)
     requires_update::Bool                    # M2.2 diff-node signal (unused in M2.1)
     authored::Bool                           # true once the root stage has been opened
-    last_camera::Any                         # snapshot (eye,target,up,fov) last WRITTEN — change detect
-    last_lights::Any                         # snapshot of per-light render-state last WRITTEN
+    last_camera::Union{Nothing,NamedTuple{(:eye,:target,:up,:fov),Tuple{Vec3d,Vec3d,Vec3d,Float64}}}  # camera pose+FOV last WRITTEN — change detect (_camera_snapshot)
+    last_lights::Union{Nothing,LightSnapshot}  # per-light render-state last WRITTEN — change detect (_lights_snapshot)
     path_resolver::Union{Nothing,OV.PathResolver}  # M6.B: cached path resolver (lazy, once/renderer)
     _outline_styled::Bool                    # M6.B: true once default outline style installed (once/Screen)
 end
