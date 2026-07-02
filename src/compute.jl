@@ -134,6 +134,38 @@ function _texcoords_for(plot, npoints::Int)
 end
 
 # ------------------------------------------------------------------
+# _add_materialized_reference! — shared epilogue for a MATERIALIZED plot
+# ------------------------------------------------------------------
+
+# The materialized-plot reference epilogue, factored out of the SIX build sites (the five
+# `author_usd_prim!` materialized branches + the `register_ovrtx_robj!` Surface branch): add the
+# USD reference (unless the caller already holds its handle), BIND the pre-authored OmniPBR
+# material to the geometry, wrap it in an `OvrtxRObj`, and record the shader prim so a live
+# `color`/`material` edit (M3.4) re-writes it in place instead of `displayColor`.
+#
+# `usda_or_handle` is dispatched by type: an `AbstractString` USDA layer is referenced at `path`
+# FIRST (the five author-time sites); an `Integer` `ovrtx_usd_handle_t` is an ALREADY-referenced
+# prim (the Surface site — its `to_ovrtx_object` referenced it) and is wrapped as-is.  Both forms
+# end at the same handle-taking method, so the OV call ORDER (reference → bind → wrap) is identical
+# to the six inlined originals.
+#
+# ★ This helper is now the SINGLE place the `"/Shader"` suffix lives; it MUST stay in sync with the
+#   shader prim NAME in `def Shader "Shader"` emitted by `_usda_mdl_material` (materials.jl) — the
+#   material binds that shader by name, so renaming it there without matching this suffix would
+#   silently break every materialized plot's live edit.
+function _add_materialized_reference!(screen, path, usda::AbstractString, plot)
+    h = OV.add_usd_reference!(screen.renderer, usda, path)
+    return _add_materialized_reference!(screen, path, h, plot)
+end
+
+function _add_materialized_reference!(screen, path, handle::Integer, plot)
+    OV.bind_material!(screen.renderer, path, material_prim_path(plot))
+    robj = OvrtxRObj(path, handle)
+    robj.material_shader = material_prim_path(plot) * "/Shader"
+    return robj
+end
+
+# ------------------------------------------------------------------
 # author_usd_prim! — BUILD branch: M1 emitters fed from resolved `args`
 # ------------------------------------------------------------------
 
@@ -166,12 +198,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
                          model                = args[:model_f32c],
                          normal_interpolation = "vertex",
                          texcoords            = texcoords)
-        h = OV.add_usd_reference!(screen.renderer, usda, path)
-        OV.bind_material!(screen.renderer, path, material_prim_path(plot))
-        robj = OvrtxRObj(path, h)
-        # M3.4: record the shader prim so a live `color`/`material` edit re-writes it in place.
-        robj.material_shader = material_prim_path(plot) * "/Shader"
-        return robj
+        return _add_materialized_reference!(screen, path, usda, plot)
     end
 
     # Non-materialized: the M1 USD-native `displayColor` path, byte-unchanged.
@@ -201,11 +228,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Scatter, args)
         sphere_faces   = [Int[Int(GeometryBasics.raw(i)) for i in f] for f in GeometryBasics.faces(sphere_mesh)]
         merged_pts, merged_faces, merged_normals = _merged_instances_mesh(sphere_pts, sphere_faces, sphere_normals, pos, scales, nothing)
         usda = usda_mesh(merged_pts, merged_faces, merged_normals, nothing; model = args[:model_f32c], normal_interpolation = "vertex")
-        h = OV.add_usd_reference!(screen.renderer, usda, path)
-        OV.bind_material!(screen.renderer, path, material_prim_path(plot))
-        robj = OvrtxRObj(path, h)
-        robj.material_shader = material_prim_path(plot) * "/Shader"
-        return robj
+        return _add_materialized_reference!(screen, path, usda, plot)
     end
     values, interp = _scaled_to_display(plot, args[:scaled_color], n)
     proto_color     = interp == "constant" ? values  : nothing
@@ -237,11 +260,7 @@ function author_usd_prim!(screen, scene, plot::Makie.MeshScatter, args)
         # `material_shader` wires the M3.4 live path.
         merged_pts, merged_faces, merged_normals = _merged_instances_mesh(marker_pts, marker_faces, marker_normals, pos, scales, orientations)
         usda = usda_mesh(merged_pts, merged_faces, merged_normals, nothing; model = args[:model_f32c], normal_interpolation = "vertex")
-        h = OV.add_usd_reference!(screen.renderer, usda, path)
-        OV.bind_material!(screen.renderer, path, material_prim_path(plot))
-        robj = OvrtxRObj(path, h)
-        robj.material_shader = material_prim_path(plot) * "/Shader"
-        return robj
+        return _add_materialized_reference!(screen, path, usda, plot)
     end
     values, interp = _scaled_to_display(plot, args[:scaled_color], n)
     proto_color     = interp == "constant" ? values  : nothing
@@ -268,10 +287,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Lines, args)
         # M3.5: bind the OmniPBR material and emit the curve WITHOUT `displayColor` (the
         # `nothing` sentinel).  `material_shader` wires the M3.4 live-edit path.
         usda = _usda_basiscurves(fpts, counts, width, nothing, "constant"; model = args[:model_f32c])
-        h = OV.add_usd_reference!(screen.renderer, usda, path)
-        OV.bind_material!(screen.renderer, path, material_prim_path(plot))
-        robj = OvrtxRObj(path, h)
-        robj.material_shader = material_prim_path(plot) * "/Shader"
+        robj = _add_materialized_reference!(screen, path, usda, plot)
         robj.meta[:curve_npoints] = length(fpts)          # FROZEN bound size for the live-push gate
         return robj
     end
@@ -293,10 +309,7 @@ function author_usd_prim!(screen, scene, plot::Makie.LineSegments, args)
     path  = plot_prim_path(screen.scene2scope, scene, plot)
     if is_materialized(plot)
         usda = _usda_basiscurves(seg_pts, counts, width, nothing, "constant"; model = args[:model_f32c])
-        h = OV.add_usd_reference!(screen.renderer, usda, path)
-        OV.bind_material!(screen.renderer, path, material_prim_path(plot))
-        robj = OvrtxRObj(path, h)
-        robj.material_shader = material_prim_path(plot) * "/Shader"
+        robj = _add_materialized_reference!(screen, path, usda, plot)
         robj.meta[:curve_npoints] = length(seg_pts)
         return robj
     end
@@ -784,14 +797,14 @@ function register_ovrtx_robj!(screen, scene, plot)
         h = to_ovrtx_object(screen, scene, plot)
         h === nothing && return nothing
         path = plot_prim_path(screen.scene2scope, scene, plot)
-        robj = OvrtxRObj(path, h)
-        if is_materialized(plot)
-            # M3.5: a materialized no-diff-node plot (Surface) gets its pre-authored OmniPBR
-            # material BOUND here (`to_ovrtx_object` already emitted geometry WITHOUT
-            # `displayColor`).  No diff node ⇒ STATIC material (no live edit) — fine for M3.5.
-            OV.bind_material!(screen.renderer, path, material_prim_path(plot))
-            robj.material_shader = material_prim_path(plot) * "/Shader"
-        end
+        # M3.5: a materialized no-diff-node plot (Surface) gets its pre-authored OmniPBR material
+        # BOUND via the shared epilogue (`to_ovrtx_object` already emitted geometry WITHOUT
+        # `displayColor` and returned the handle `h`, so we pass the handle, not a USDA string).
+        # No diff node ⇒ STATIC material (no live edit) — fine for M3.5.  A plain Surface just wraps
+        # the handle.  B3: `_register_robj_maps!` still runs LAST (both branches), unchanged.
+        robj = is_materialized(plot) ?
+            _add_materialized_reference!(screen, path, h, plot) :
+            OvrtxRObj(path, h)
         return _register_robj_maps!(screen, plot, robj)
     end
 
