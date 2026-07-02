@@ -6,3 +6,4 @@ Manifest.toml
 
 # subagent-driven-development scratch (briefs, reports, review packages, ledger)
 .superpowers/
+.worktrees/
