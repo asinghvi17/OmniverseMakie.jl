@@ -9,12 +9,22 @@ const _HELPER_USDA = get(ENV, "OM_USDA",
     "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda")
 
 """
-    run_ovrtx_subprocess(prog::String; timeout=300, env=()) -> (exitcode, output)
+    run_ovrtx_subprocess(prog::String; timeout=300, kill_grace=10, env=()) -> (exitcode, output)
 
 Write `prog` to a temp `.jl` file, run it as a child `julia --project=<repo>`
-process with the standard ovrtx environment, wait up to `timeout` seconds
-(watchdog kills on expiry), collect stdout, and return `(exitcode, stdout_text)`.
-The temp file is always removed in a `finally` block.
+process with the standard ovrtx environment, wait up to `timeout` seconds for a
+clean exit, collect stdout, and return `(exitcode, stdout_text)`.  The temp file
+is always removed in a `finally` block.
+
+On timeout the watchdog escalates SIGTERM → wait `kill_grace` s → SIGKILL (so even
+a GPU-wedged child that ignores SIGTERM is reaped), then ALWAYS `wait`s the child
+before reading its exit code and output.  The returned `exitcode` is therefore
+TRUTHFUL — callers can assert `exitcode == 0`:
+
+  * `0`       — the child exited 0 (real success);
+  * `-9`      — the watchdog timed out and killed it;
+  * `-N`      — the child died from uncaught signal `N` (e.g. a crash / segfault);
+  * otherwise — the child's own nonzero exit code.
 
 `env` forwards extra `name => value` pairs (a single `Pair` or an iterable of Pairs)
 into the child process — used for opt-in vars such as `OMNIVERSEMAKIE_INDEX_LIBS`
@@ -27,7 +37,7 @@ M6.A: The subprocess LOAD_PATH stacks the test project (which has GLMakie in
 subprocess programs do `using OmniverseMakie, GLMakie` — GLMakie is found via
 the test project — while `using OmniverseMakie` alone still doesn't load it.
 """
-function run_ovrtx_subprocess(prog::String; timeout::Int=300, env=())
+function run_ovrtx_subprocess(prog::String; timeout::Int=300, kill_grace::Real=10, env=())
     script = tempname() * ".jl"
     exitcode = -1
     output = ""
@@ -77,11 +87,22 @@ function run_ovrtx_subprocess(prog::String; timeout::Int=300, env=())
         out = IOBuffer()
         err = IOBuffer()
         p = run(pipeline(cmd; stdout=out, stderr=err); wait=false)
-        # Watchdog: timedwait returns :ok when the condition becomes true,
-        # :timed_out otherwise.  Kill the process if it exceeds timeout.
-        timedwait(() -> !process_running(p), float(timeout))
-        process_running(p) && kill(p)
-        exitcode = p.exitcode
+        # Watchdog: wait up to `timeout` s for a clean exit; timedwait returns
+        # :timed_out on expiry.  Then escalate SIGTERM → grace → SIGKILL so a
+        # wedged child that swallows SIGTERM is still reaped.
+        timed_out = timedwait(() -> !process_running(p), float(timeout)) === :timed_out
+        if timed_out && process_running(p)
+            kill(p)                                   # SIGTERM: ask it to stop
+            if timedwait(() -> !process_running(p), float(kill_grace)) === :timed_out
+                process_running(p) && kill(p, Base.SIGKILL)  # still alive: force it
+            end
+        end
+        wait(p)                                       # ALWAYS reap before reading exit state/output
+        # Truthful exit code (see docstring): 0 only on real success; a timed-out
+        # kill is -9; an uncaught signal (crash) is -signal; else the child's code.
+        exitcode = success(p) ? 0 :
+                   timed_out  ? -9 :
+                   p.termsignal != 0 ? -p.termsignal : p.exitcode
         output = String(take!(out))
         errtext = String(take!(err))
         isempty(errtext) || @info "subprocess stderr" text=errtext

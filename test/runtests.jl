@@ -168,3 +168,9 @@ include("volumes_color_test.jl")
 # files stay bounded (prior deleted each edit, last cleaned on close), and an all-zero volume! no-ops
 # cleanly (subprocess, env-gated, skip-if-absent).
 include("volumes_live_test.jl")
+
+# Review track E1 — truthful watchdog: run_ovrtx_subprocess reaps the child (SIGTERM →
+# grace → SIGKILL) and returns a TRUTHFUL exit code (0 only on real success; -9 on
+# timeout; -signal on crash), so `@test exitcode == 0` can no longer pass a killed or
+# crashed child.  Pure unit tests — cheap `julia` children, no ovrtx/GPU.
+include("review_e_watchdog_test.jl")
