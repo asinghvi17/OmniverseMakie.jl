@@ -34,12 +34,19 @@ _orient_for_display(frame) = reverse(permutedims(frame), dims = 2)
 # reverse(permutedims(tonemap_frame(hdr, exposure)), dims=2) exactly.  scale =
 # exp2(exposure) is hoisted out of the W×H loop (once per tick); the per-pixel
 # `tonemap` is the SHARED scalar (src/tonemap.jl), so host and CUDA kernel agree.
+# `hdr` is eltype-generic (`<:Real`) with a per-element `Float32(...)` promotion, EXACTLY
+# like the CUDA oriented kernel (C3, `_tonemap_orient_kernel!`): it accepts either the Float32
+# [C,W,H] from render_hdr_to_array (interactive_display / resize_viewport! warmups) OR — for the
+# INT-2 zero-copy present! — the still-mapped Float16 HdrColor view DIRECTLY (no Float32 transient).
+# The Float32 path stays byte-identical (`Float32(::Float32)` is identity, goldens/C2/C3 pin it);
+# Float16→Float32 widening is exact, so the zero-copy Float16 path matches the widen-first Float32
+# path pixel-for-pixel.
 function _tonemap_orient!(out::AbstractMatrix{RGBA{N0f8}},
-                          hdr::AbstractArray{Float32,3}, exposure::Float32)
+                          hdr::AbstractArray{<:Real,3}, exposure::Float32)
     C, W, H = size(hdr)
     scale = exp2(exposure)                          # once per tick, hoisted out of the W×H loop
     @inbounds for j in 1:W, i in 1:H
-        out[j, H + 1 - i] = tonemap((hdr[1, j, i], hdr[2, j, i], hdr[3, j, i]), scale)
+        out[j, H + 1 - i] = tonemap((Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
     end
     return out
 end
@@ -368,33 +375,57 @@ const _M5_STEP_TIMEOUT_NS = UInt64(10_000_000_000)
 """
     OmniverseMakie.present!(session::ViewportSession, ::Val{:cpu}) -> Nothing
 
-`:cpu` blit strategy: render `HdrColor` (float16) from the open ovrtx stage, then in ONE
-fused pass tonemap (ACES + sRGB + `session.exposure`) AND orient it straight into the
-session's cached `[W,H]` display buffer (`present_buf`) IN PLACE, and `notify` the image!
-plot's data Observable so GLMakie re-uploads the texture — no per-tick display allocation
-(the buffer is reused; `render_hdr_to_array`'s Float32 HDR is the one transient, dropped by
-INT-2).  A size guard reallocates + re-seats the buffer after a resize (Screen rebuilt).  The
-`:gpu` strategy (on-device tonemap + CUDA→GL copy, no host roundtrip) lives in the CUDA
-extension; both are selected via `present!(session, Val(session.blitter))`.
+`:cpu` blit strategy: step ovrtx `steps_per_tick` times (host twin of the CUDA ext's
+`_gpu_present!` step loop — drop each intermediate `StepResult`, keep the final `sr`), then map
+its `HdrColor` (float16) and in ONE fused pass tonemap (ACES + sRGB + `session.exposure`) AND
+orient it STRAIGHT from the still-mapped Float16 view into the session's cached `[W,H]` display
+buffer (`present_buf`) IN PLACE, then `notify` the image! plot's data Observable so GLMakie
+re-uploads the texture.  Steady state = ZERO full-frame allocations: the buffer is reused and
+(INT-2) the tonemap reads the mapped Float16 directly, so the Float32 `[C,W,H]` HDR transient that
+`render_hdr_to_array` used to materialize is gone.  Everything touching the mapped view stays
+INSIDE the `with_mapped_hdr` closure (the mapping dies on unmap at its return); the loop fully
+materializes into `present_buf` (owned — NOT a view over the mapping), so nothing lazy escapes.  A
+size guard reallocates + re-seats the buffer after a resize (Screen rebuilt).  The `:gpu` strategy
+(on-device tonemap + CUDA→GL copy, no host roundtrip) lives in the CUDA extension; both are selected
+via `present!(session, Val(session.blitter))`.
 """
 function OmniverseMakie.present!(session::ViewportSession, ::Val{:cpu})
-    hdr = OV.render_hdr_to_array(session.screen.renderer, session.screen.product;
-                                  warmup = session.steps_per_tick,
-                                  timeout_ns = _M5_STEP_TIMEOUT_NS)
-    _, W, H = size(hdr)
-    # Size guard: a resize rebuilds the Screen (+ image!) at a new size — reallocate the
-    # cached buffer and re-seat it AS the image Observable's data array when it no longer
-    # fits (interactive_display / resize_viewport! seed it; this is belt-and-suspenders).
-    buf = session.present_buf
-    if size(buf) != (W, H)
-        buf = Matrix{RGBA{N0f8}}(undef, W, H)
-        session.present_buf = buf
-        session.image_plot[3][] = buf
+    screen = session.screen
+    # Host twin of the CUDA ext's _gpu_present! step loop: run `steps_per_tick` bounded RT2 steps,
+    # closing each dropped StepResult; KEEP the final `sr` to map its HdrColor.  (Was
+    # OV.render_hdr_to_array, which ADDITIONALLY materialized a Float32 [C,W,H] HDR copy per tick —
+    # the transient INT-2 removes; render_hdr_to_array itself stays for colorbuffer/HDR callers.)
+    for _ in 1:(session.steps_per_tick - 1)
+        sr_drop = OV.step!(screen.renderer, screen.product; timeout_ns = _M5_STEP_TIMEOUT_NS)
+        close(sr_drop)
     end
-    # Fuse tonemap+orient straight into the cached buffer (in place), then notify so GLMakie
-    # re-uploads the texture from that SAME array — zero steady-state display garbage.
-    _tonemap_orient!(buf, hdr, session.exposure)
-    Makie.notify(session.image_plot[3])
+    sr = OV.step!(screen.renderer, screen.product; timeout_ns = _M5_STEP_TIMEOUT_NS)
+    try
+        # INT-2 zero-copy present: tonemap+orient STRAIGHT from the still-mapped Float16 HdrColor
+        # view into the cached buffer — no Float32 HDR transient.  CORRECTNESS: everything that
+        # touches `raw16` stays INSIDE this closure (the mapping dies on unmap at with_mapped_hdr's
+        # return); the loop fully materializes into `buf` (== session.present_buf, owned — NOT a
+        # view over raw16), so nothing lazy over the mapping escapes.  The closure captures only
+        # `session` (read + field-mutated, never rebound → not boxed); `buf` is closure-local.
+        OV.with_mapped_hdr(sr) do raw16, W, H
+            # Size guard: a resize rebuilds the Screen (+ image!) at a new size — reallocate the
+            # cached buffer and re-seat it AS the image Observable's data array when it no longer
+            # fits (interactive_display / resize_viewport! seed it; this is belt-and-suspenders).
+            buf = session.present_buf
+            if size(buf) != (W, H)
+                buf = Matrix{RGBA{N0f8}}(undef, W, H)
+                session.present_buf = buf
+                session.image_plot[3][] = buf
+            end
+            # Fuse tonemap+orient straight into the cached buffer (in place), then notify so GLMakie
+            # re-uploads the texture from that SAME array — zero steady-state display garbage.
+            _tonemap_orient!(buf, raw16, session.exposure)
+            Makie.notify(session.image_plot[3])
+            return nothing
+        end
+    finally
+        close(sr)
+    end
     return nothing
 end
 

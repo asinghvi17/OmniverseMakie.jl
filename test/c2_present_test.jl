@@ -5,9 +5,10 @@ using Test
 #      reverse(permutedims(tonemap_frame(hdr, ev)), dims=2) chain byte-for-byte.
 #   2. IN PLACE — the image! data array IS session.present_buf (written in place + notify),
 #      so a tick allocates no new display buffer.
-#   3. ALLOCATION — a warmed-up present! allocates ≈ ONE HDR transient (render_hdr_to_array's
-#      Float32, the permitted transient) and NOT the old 4-buffer chain: measured against a
-#      faithful reproduction of the old body, the fix removes ≥ 2 full display frames / tick.
+#   3. ALLOCATION — a warmed-up present! allocates only small per-step + map-handle bookkeeping
+#      (INT-2: it tonemaps STRAIGHT from the still-mapped Float16 HdrColor — no Float32 HDR
+#      transient, no display buffers) and NOT the old 4-buffer chain: measured against a faithful
+#      reproduction of the old body, the fix removes the HDR transient + ≥ 2 full display frames / tick.
 const _C2_PRESENT_PROG = """
 using OmniverseMakie, GLMakie, ColorTypes, FixedPointNumbers
 import OmniverseMakie as OM
@@ -106,11 +107,21 @@ include("helpers.jl")
         a_old = parse(Int, m_old.captures[1])
         frame_bytes = parse(Int, m_fb.captures[1])
         hdr_bytes   = parse(Int, m_hb.captures[1])
-        # New present! is down to ~ONE HDR transient (no display buffers): under HDR + 2 frames
-        # of slack.  This threshold FAILS the old 4-buffer chain (HDR + 3 display frames).
-        @test a_new < hdr_bytes + 2 * frame_bytes
-        # Same-session, same-step comparison (ovrtx-step overhead cancels): the OLD body
-        # allocates ≥ 2 extra full display frames per tick that the fused one does not.
+        @info "C2 alloc (INT-2)" a_new a_old frame_bytes hdr_bytes   # surface before/after numbers
+        # INT-2: the zero-copy CPU present tonemaps STRAIGHT from the still-mapped Float16
+        # HdrColor view, so the Float32 [C,W,H] HDR transient (render_hdr_to_array's copy,
+        # == hdr_bytes = 4·frame_bytes) is GONE from the steady tick.  What remains is small,
+        # RESOLUTION-INDEPENDENT per-step + map-handle bookkeeping (fixed ovx_string + Refs +
+        # closure + notify; measured ≈ 1 KB — the pre-INT-2 present! allocated hdr_bytes + only
+        # 824 B of the same bookkeeping), so the ceiling is an ABSOLUTE 32 KiB, not a frame
+        # fraction (the removed transient scaled as 4·W·H·4; this overhead does not).  32 KiB
+        # is ~32× over the measurement (robust vs GLMakie/ovrtx/notify drift) yet 58× below
+        # hdr_bytes — so it FAILS the pre-INT-2 present! (a_new ≈ 1.92 MB): the RED proving the
+        # transient is gone.
+        @test a_new < 32 * 1024
+        # Same-session, same-step comparison (ovrtx-step overhead cancels): the OLD 4-buffer body
+        # allocates the HDR transient + ≥ 2 extra full display frames per tick that the zero-copy
+        # present does not (the gap is now even larger — a_new lost the HDR transient too).
         @test a_old - a_new > 2 * frame_bytes
         @test a_old > a_new
     end

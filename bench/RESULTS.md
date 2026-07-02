@@ -94,3 +94,27 @@ now route to `positions` (zero-copy binding when the instance count is unchanged
 one-shot resize otherwise).  A MATERIALIZED scatter/meshscatter is a merged
 `UsdGeomMesh`; a live position edit there is warn+skipped (needs a re-author) rather
 than corrupting the merged `points`.
+
+---
+
+## Interactive CPU Present — Steady-State Allocations (review Task INT-2)
+
+The interactive `:cpu` blit (`present!(session, ::Val{:cpu})`, GLMakie ext) used to call
+`OV.render_hdr_to_array`, which materialized a full-frame Float32 `[C,W,H]` HDR copy every
+tick before tonemapping.  INT-2 runs the step loop inline (host twin of the CUDA-ext
+`_gpu_present!`) and tonemaps **straight from the still-mapped Float16 `HdrColor` view**
+(`OV.with_mapped_hdr`) into the cached, reused `present_buf` — the Float32 transient is gone.
+
+| Metric (400×300, warmed steady tick)   | Before (pre-INT-2) | After (INT-2) |
+|----------------------------------------|--------------------|---------------|
+| `@allocated present!(…, Val(:cpu))`    | **1,920,824 B**    | **736 B**     |
+| of which Float32 HDR transient         | 1,920,000 B        | 0 (removed)   |
+| Reduction                              | —                  | **99.96 %**   |
+
+The ~736 B that remains is small, resolution-INDEPENDENT per-step + map-handle bookkeeping
+(the HDR transient scaled as 4·W·H·4; this does not).  Pixel output is unchanged: the Float32
+path stays byte-identical and Float16→Float32 widening is exact, so the zero-copy Float16
+tonemap matches the old widen-first chain pixel-for-pixel (`c2_present_test.jl`
+`PIXEL_MISMATCH=0`).  Gated by the C2 pixel-equality + in-place + tightened-alloc testset
+(`a_new < 32 KiB`, was `hdr_bytes + 2·frame_bytes`) and the M5 viewport testsets — all green.
+`render_hdr_to_array` stays for its other callers (`colorbuffer` HDR path / tests).
