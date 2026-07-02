@@ -363,11 +363,27 @@ function _light_paths(lights)
     return [(l, light_prim_path(l, idx)) for (l, idx) in _enumerate_lights(lights)]
 end
 
+# Per-type authored-path PREFIX ("/World/<Type>_") cache. Lets the two-arg snapshot verify —
+# allocation-free after a one-time warmup per type — that a reused path still names the SAME
+# light type as the light now at that position. Keyed by concrete light type; the trailing "_"
+# makes the prefix an unambiguous type tag (no light type name is a prefix of another followed
+# by "_"). The `get(…, "")` + explicit store avoids the closure `get!` would allocate per call.
+const _LIGHT_PATH_PREFIX = Dict{DataType,String}()
+function _light_path_prefix(l)
+    T = typeof(l)
+    cached = get(_LIGHT_PATH_PREFIX, T, "")
+    isempty(cached) || return cached
+    prefix = "/World/$(nameof(T))_"
+    _LIGHT_PATH_PREFIX[T] = prefix
+    return prefix
+end
+
 # Snapshot of every light's (authored path, render-state); render-state may be `nothing`.
 # The single-arg form (author-time seed) computes paths fresh via `_light_paths`. The two-arg
-# form REUSES the previous snapshot's path strings when the light count is unchanged — paths are
-# invariant unless a light is added/removed, which L1 makes terminal — so the per-frame rebuild
-# allocates neither the `_enumerate_lights` `Dict` nor fresh interpolated path strings.
+# form REUSES the previous snapshot's path strings only when the light count AND every position's
+# light TYPE are unchanged (paths encode <Type>_<idx>) — so an idle-frame rebuild allocates
+# neither the `_enumerate_lights` `Dict` nor fresh interpolated path strings. Any count OR
+# positional-type change falls back to a fresh build with correctly recomputed paths.
 function _lights_snapshot(lights)
     snap = LightSnapshot(undef, length(lights))
     for (i, (l, path)) in enumerate(_light_paths(lights))
@@ -377,6 +393,17 @@ function _lights_snapshot(lights)
 end
 function _lights_snapshot(lights, old::LightSnapshot)
     length(old) == length(lights) || return _lights_snapshot(lights)   # count changed → fresh
+    # Reuse the authored path strings ONLY if every position's light TYPE still matches its old
+    # path. Paths encode <Type>_<idx>, so a same-count type SWAP/permutation would otherwise
+    # graft a stale path onto a new light's state → that state gets written to the WRONG prim,
+    # silently corrupting both. On any positional-type mismatch, rebuild FRESH (recomputed paths
+    # = exact pre-L2 semantics: a permutation writes to the correctly-named authored prim; a
+    # same-count multiset change writes to a never-authored prim = silent no-op, as before L2).
+    # Positional-type equality ⟺ identical per-type enumeration ⟺ identical paths, so a passing
+    # check guarantees the reused paths EQUAL a fresh build's.
+    for i in eachindex(lights)
+        startswith(old[i][1], _light_path_prefix(lights[i])) || return _lights_snapshot(lights)
+    end
     snap = LightSnapshot(undef, length(lights))
     for i in eachindex(lights)
         snap[i] = (old[i][1], _light_render_state(lights[i]))          # reuse the authored path

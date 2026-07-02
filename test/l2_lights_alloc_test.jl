@@ -62,6 +62,42 @@ end
     @test [p for (p, _) in snap2] == [p for (p, _) in _lights_snapshot(two)]
 end
 
+@testset "L2 same-count type swap rebuilds fresh paths (no stale index-wise reuse)" begin
+    # Prim paths encode <Type>_<idx>. A constant-count TYPE SWAP must NOT keep the old paths
+    # and pair them with the new states — that writes each state to the WRONG prim, silently
+    # corrupting both. Path reuse is valid ONLY when every position's type still matches its
+    # old path; a swap must fall back to the fresh (recomputed-path) build. (Regression guard
+    # for the L2 review finding: pre-L2 rebuilt paths fresh every frame, so this rendered
+    # correctly; blind index-wise reuse introduced the corruption.)
+    dp = AbstractLight[
+        DirectionalLight(RGBf(1f0, 1f0, 1f0), Vec3f(-1f0, -1f0, -1f0), false),
+        PointLight(RGBf(1f0, 0f0, 0f0), Vec3f(0f0, 0f0, 100f0), Vec2f(0f0, 0f0)),
+    ]
+    seed_dp = _lights_snapshot(dp)
+    @test [p for (p, _) in seed_dp] == ["/World/DirectionalLight_0", "/World/PointLight_0"]
+
+    pd      = AbstractLight[dp[2], dp[1]]            # [Point, Directional] — same count, swapped
+    swapped = _lights_snapshot(pd, seed_dp)          # two-arg reuse form (the code under test)
+    fresh   = _lights_snapshot(pd)                   # ground truth: recomputed paths
+
+    # The swap must produce the FRESH paths (PointLight_0 now at position 1), NOT the stale
+    # index-wise reuse (which would keep [DirectionalLight_0, PointLight_0]).
+    @test [p for (p, _) in swapped] == [p for (p, _) in fresh]
+    @test [p for (p, _) in swapped] == ["/World/PointLight_0", "/World/DirectionalLight_0"]
+    @test [p for (p, _) in swapped] != [p for (p, _) in seed_dp]
+
+    # Each state is paired with the CORRECTLY-named prim: the Point light's state at position 1
+    # is written to PointLight_0 (not the stale DirectionalLight_0), the Directional's to _0.
+    @test swapped[1] == ("/World/PointLight_0",      _light_render_state(pd[1]))
+    @test swapped[2] == ("/World/DirectionalLight_0", _light_render_state(pd[2]))
+
+    # Happy path (types unchanged): still reuses the exact String OBJECTS (===) — zero fresh
+    # path allocation, the steady-state win the type-swap guard must not regress.
+    reused = _lights_snapshot(dp, seed_dp)
+    @test [p for (p, _) in reused] == [p for (p, _) in seed_dp]
+    @test all(reused[i][1] === seed_dp[i][1] for i in eachindex(seed_dp))
+end
+
 @testset "L2 LightState comparison detects intensity/color/direction changes" begin
     base = DirectionalLight(RGBf(1f0, 1f0, 1f0), Vec3f(-1f0, -1f0, -1f0), false)
     dim  = DirectionalLight(RGBf(0.5f0, 0.5f0, 0.5f0), Vec3f(-1f0, -1f0, -1f0), false) # intensity
