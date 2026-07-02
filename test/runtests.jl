@@ -103,6 +103,17 @@ include("m6_ext_load_test.jl")
 # M6.A Task 2 — host tonemap unit tests (ACES + sRGB + exposure, pure math, no GPU).
 include("m6_tonemap_test.jl")
 
+# Track-C C2 — CPU present!(::Val{:cpu}) is ONE fused tonemap+orient pass writing the cached
+# session buffer in place (zero steady-state display garbage): pixel-equality vs the old
+# reverse(permutedims(tonemap_frame)) chain + a per-tick @allocated gate (subprocess, GL).
+include("c2_present_test.jl")
+
+# Track-C C3 — GPU present!(::Val{:gpu}) fuses tonemap+orient into ONE device kernel writing the
+# cached [W,H] oriented buffer (was kernel + permutedims + reverse = 3 kernels / 3 device allocs)
+# and caches the resolved GL Texture: the oriented kernel byte-equals the host orient chain / the
+# C2 twin, and a warmed GPU present! allocates ZERO device memory per tick (subprocess, CUDA+GL).
+include("c3_present_test.jl")
+
 # M6.A Task 3 — OV.map_cuda: map HdrColor as LINEAR CUDA device memory (mode 2),
 # returning RAW handles (CUdeviceptr + dims + map_handle + wait_event) with no
 # CUDA.jl dep in the main module (subprocess, CUDA).

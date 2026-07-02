@@ -31,8 +31,11 @@ OmniverseMakie._cuda_functional() = CUDA.functional()
 
 Per-session CUDA→GL interop state: the registered GL-texture CUDA resource, the
 texture id it was registered for (re-register on resize), a reusable `copy_done`
-event (gates ovrtx's `unmap_cuda` so the buffer is not reclaimed mid-copy), and
-the GL context (for `gl_switch_context!`).
+event (gates ovrtx's `unmap_cuda` so the buffer is not reclaimed mid-copy), the GL
+context (for `gl_switch_context!`), the cached `[W,H]` fused-tonemap+orient device
+buffer (`oriented`, reused every frame — allocated lazily / on size change, freed on
+resize + teardown), and the cached resolved GL `Texture` (`tex`, invalidated in
+`_unregister!` so the `tex_id != tex.id` re-register guard keeps working).
 """
 mutable struct GPUBlitState
     res::Base.RefValue{CC.CUgraphicsResource}   # registered GL texture resource
@@ -40,21 +43,23 @@ mutable struct GPUBlitState
     registered::Bool
     copy_done::CUDA.CuEvent                      # records copy completion → ovrtx unmap gate
     context                                      # GL context for gl_switch_context!
+    oriented                                     # cached [W,H] fused tonemap+orient CuArray{RGBA{N0f8}} (lazy) or nothing
+    tex                                          # cached resolved GL Texture (invalidated in _unregister!) or nothing
 end
 
 # ------------------------------------------------------------------
-# Device tonemap kernel — reuses the SHARED scalar `tonemap` (Task 2)
+# Device tonemap kernels — reuse the SHARED scalar `tonemap` (Task 2)
 # ------------------------------------------------------------------
 # One thread per output pixel (i,j) of the [H,W] matrix; reads channel-fastest
-# hdr[1:3, j, i] (float16/float32) → out[i,j] = tonemap((r,g,b), exposure).
+# hdr[1:3, j, i] (float16/float32) → out[i,j] = tonemap((r,g,b), scale).
 # Same indexing as host `tonemap_frame`, so host and device agree pixelwise.
-function _tonemap_kernel!(out, hdr, exposure::Float32, H::Int, W::Int)
+function _tonemap_kernel!(out, hdr, scale::Float32, H::Int, W::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= H * W
         i = (idx - 1) % H + 1
         j = (idx - 1) ÷ H + 1
         @inbounds out[i, j] = tonemap(
-            (Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), exposure)
+            (Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
     end
     return nothing
 end
@@ -65,14 +70,63 @@ function _tonemap_dev(hdr, exposure::Float32)
     out = CuArray{RGBA{N0f8}}(undef, H, W)
     n = H * W
     threads = 256
-    @cuda threads = threads blocks = cld(n, threads) _tonemap_kernel!(out, hdr, exposure, H, W)
+    scale = exp2(exposure)                          # once per launch (host-side), not per thread
+    @cuda threads = threads blocks = cld(n, threads) _tonemap_kernel!(out, hdr, scale, H, W)
     return out
 end
 
-# Device-tonemap + the SAME CPU-path orientation (_orient_for_display =
-# reverse(permutedims([H,W]), dims=2)) → [W,H] contiguous RGBA8, for cuMemcpy2D.
-function _tonemap_oriented(hdr, exposure::Float32)
-    reverse(permutedims(_tonemap_dev(hdr, exposure)), dims = 2)   # [W, H]
+# FUSED tonemap + display-orient kernel (C3): one thread per HDR pixel (i in 1:H, j in 1:W)
+# writes the y-flipped/transposed output out[j, H+1-i] straight into a [W,H] RGBA8 buffer —
+# ONE kernel replacing _tonemap_dev + permutedims + reverse (3 kernels / 3 device allocations).
+# Device twin of the host `_tonemap_orient!` (GLMakie ext), same out[j, H+1-i] indexing, so the
+# two agree pixel-for-pixel.  The @inbounds output write is guarded by an EXPLICIT size(out)
+# check (C2 review: do NOT derive the output bounds from `hdr` alone).
+function _tonemap_orient_kernel!(out, hdr, scale::Float32, H::Int, W::Int)
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if idx <= H * W
+        i  = (idx - 1) % H + 1        # 1:H  (hdr fastest spatial index)
+        j  = (idx - 1) ÷ H + 1        # 1:W
+        oj = H + 1 - i                # 1:H  (y-flip → output column)
+        if j <= size(out, 1) && oj <= size(out, 2)
+            @inbounds out[j, oj] = tonemap(
+                (Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
+        end
+    end
+    return nothing
+end
+
+# Launch the fused oriented kernel into a caller-owned [W,H] buffer `out` (no allocation here).
+function _tonemap_orient_dev!(out, hdr, exposure::Float32)
+    C, W, H = size(hdr)
+    n = H * W
+    threads = 256
+    scale = exp2(exposure)                          # once per launch (host-side), not per thread
+    @cuda threads = threads blocks = cld(n, threads) _tonemap_orient_kernel!(out, hdr, scale, H, W)
+    return out
+end
+
+# Free the cached oriented device buffer (deterministic GPU-memory release on resize / teardown;
+# the CuArray finalizer would eventually reclaim it — this frees eagerly).  Safe: every present!
+# ends with cuStreamSynchronize, so no copy still reads the buffer.  No-op if unset.
+function _free_oriented!(st::GPUBlitState)
+    st.oriented === nothing && return nothing
+    CUDA.unsafe_free!(st.oriented)
+    st.oriented = nothing
+    return nothing
+end
+
+# Fused tonemap+orient into the state's cached [W,H] buffer: lazily allocate (or free+realloc on
+# size change), then launch — so a steady frame does ZERO device allocations.  Replaces the old
+# _tonemap_oriented (_tonemap_dev + permutedims + reverse = 3 kernels / 3 device allocations).
+function _tonemap_orient_cached!(st::GPUBlitState, hdr, exposure::Float32)
+    C, W, H = size(hdr)
+    out = st.oriented
+    if out === nothing || size(out) != (W, H)
+        _free_oriented!(st)                         # drop any wrong-size buffer (no-op if nothing)
+        out = CuArray{RGBA{N0f8}}(undef, W, H)
+        st.oriented = out
+    end
+    return _tonemap_orient_dev!(out, hdr, exposure)
 end
 
 """
@@ -83,6 +137,20 @@ layout/indexing as `tonemap_frame`), proving the CUDA kernel matches the host to
 """
 tonemap_kernel_to_matrix(hdr::CuArray{<:Real,3}, exposure::Float32) =
     Array(_tonemap_dev(hdr, exposure))
+
+"""
+    tonemap_oriented_kernel_to_matrix(hdr::CuArray{<:Real,3}, exposure::Float32) -> Matrix{RGBA{N0f8}}
+
+Test-only: run the FUSED oriented device kernel over an `[C,W,H]` HDR CuArray into a fresh
+`[W,H]` buffer and copy to host — proving it byte-equals host
+`reverse(permutedims(tonemap_frame(hdr, exposure)), dims=2)` (== the `_tonemap_orient!` twin).
+"""
+function tonemap_oriented_kernel_to_matrix(hdr::CuArray{<:Real,3}, exposure::Float32)
+    C, W, H = size(hdr)
+    out = CuArray{RGBA{N0f8}}(undef, W, H)
+    _tonemap_orient_dev!(out, hdr, exposure)
+    return Array(out)
+end
 
 # ------------------------------------------------------------------
 # GL texture access + registration
@@ -100,6 +168,7 @@ function _register!(st::GPUBlitState, tex)
     CC.cuGraphicsGLRegisterImage(st.res, tex.id, tex.texturetype,
                                  CC.CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD)
     st.tex_id     = tex.id
+    st.tex        = tex                              # cache the resolved Texture (invalidated in _unregister!)
     st.registered = true
     return nothing
 end
@@ -113,6 +182,7 @@ function _unregister!(st::GPUBlitState)
         end
         st.registered = false
     end
+    st.tex = nothing                                 # invalidate the cached Texture (resize recreates it)
     return nothing
 end
 
@@ -123,6 +193,7 @@ function OmniverseMakie._gpu_teardown!(st::GPUBlitState)
     catch
     end
     _unregister!(st)
+    _free_oriented!(st)                              # release the cached oriented device buffer
     return nothing
 end
 
@@ -147,6 +218,7 @@ function OmniverseMakie.gpu_unregister!(session)
     catch
     end
     _unregister!(st)
+    _free_oriented!(st)                              # release the cached oriented device buffer (resize)
     return nothing
 end
 
@@ -185,15 +257,20 @@ function _gpu_present!(session)
     screen = session.screen
 
     # --- lazy setup / resize re-registration (GL context current first) ---
-    tex = _image_texture(session)
+    # Resolve the image! plot's GL texture ONCE and cache it on the state (st.tex); steady
+    # state reuses the cached Texture — no per-frame plot2robjs + uniforms Dict lookup.  The
+    # cache is invalidated in _unregister! (resize / teardown), so the next present re-resolves
+    # the freshly-created texture and the guard below re-registers it.
+    st  = session.gpu_state
+    tex = (st !== nothing && st.tex !== nothing) ? st.tex : _image_texture(session)
     GLMakie.GLAbstraction.gl_switch_context!(tex.context)
-    st = session.gpu_state
     if st === nothing
-        st = GPUBlitState(Ref{CC.CUgraphicsResource}(), tex.id, false, CUDA.CuEvent(), tex.context)
+        st = GPUBlitState(Ref{CC.CUgraphicsResource}(), tex.id, false, CUDA.CuEvent(),
+                          tex.context, nothing, nothing)
         _register!(st, tex)
         session.gpu_state = st
     elseif !st.registered || st.tex_id != tex.id   # explicit unregister (resize) OR recreated/recycled-id texture — re-register
-        _unregister!(st)                            # no-op if already unregistered (registered=false)
+        _unregister!(st)                            # no-op if already unregistered (registered=false); invalidates st.tex
         st.context = tex.context
         _register!(st, tex)
     end
@@ -217,7 +294,7 @@ function _gpu_present!(session)
         # Wrap the linear float16 CUdeviceptr as CuArray [C,W,H]; tonemap+orient
         # on-device.
         hdr = unsafe_wrap(CuArray, reinterpret(CUDA.CuPtr{Float16}, data), (C, W, H))
-        oriented = _tonemap_oriented(hdr, session.exposure)   # [W,H] RGBA8, contiguous
+        oriented = _tonemap_orient_cached!(st, hdr, session.exposure)  # [W,H] RGBA8, cached — one kernel
 
         GC.@preserve oriented begin
             CC.cuGraphicsMapResources(1, st.res, stream)
