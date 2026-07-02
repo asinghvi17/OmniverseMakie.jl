@@ -194,3 +194,11 @@ include("a3_resolver_test.jl")
 # plain String stays zero-copy.  Both testsets are PURE (no GPU): ovx_string round-trip + the
 # destroy! flag paths on a hand-built closed Renderer (ccall teardown stays on m2_binding/m2_delete).
 include("a4_binding_string_test.jl")
+
+# Review Track A / Task A5 — index-config synthesis robustness: _synth_index_config now
+# JSON-escapes the env libs path (OV._json_escape: backslash/quote/control chars) so a `"`
+# or `\` can't produce invalid JSON, and anchors the token merge to the TOP-LEVEL (line-start,
+# top-indent) `"app": {` via OV._find_top_level_app (skipping a nested/decoy "app" and erroring
+# when no top-level block exists).  PURE: JSON5 fixtures in a temp dir, golden byte-stability,
+# escaped-value round-trip, nested-before-top-level targeting, and no-top-level-app errors.
+include("a5_index_config_test.jl")
