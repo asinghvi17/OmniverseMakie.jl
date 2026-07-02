@@ -9,12 +9,13 @@
 @inline _u8(c::Float32)   = reinterpret(N0f8, round(UInt8, clamp(c, 0f0, 1f0) * 255f0))
 
 """
-    tonemap(rgb::NTuple{3,Float32}, exposure::Float32) -> RGBA{N0f8}
+    tonemap(rgb::NTuple{3,Float32}, scale::Float32) -> RGBA{N0f8}
 
-`sRGB( ACES( 2^exposure · rgb ) )`.  `exposure` is in stops (EV); 0 = no change.
+`sRGB( ACES( scale · rgb ) )`.  `scale` is a LINEAR exposure multiplier — callers convert
+from stops/EV once, `scale = exp2(exposure)` (see `tonemap_frame`), so this per-pixel path
+carries no transcendental.
 """
-@inline function tonemap(rgb::NTuple{3,Float32}, exposure::Float32)
-    scale = exp2(exposure)
+@inline function tonemap(rgb::NTuple{3,Float32}, scale::Float32)
     RGBA{N0f8}(_u8(_srgb(_aces(scale*rgb[1]))), _u8(_srgb(_aces(scale*rgb[2]))), _u8(_srgb(_aces(scale*rgb[3]))), N0f8(1))
 end
 
@@ -22,9 +23,10 @@ end
 # into an [H,W] RGBA{N0f8} display matrix, top-left origin (matches render_to_matrix).
 function tonemap_frame(hdr::AbstractArray{Float32,3}, exposure::Float32)
     C, W, H = size(hdr)
+    scale = exp2(exposure)                          # once per frame, hoisted out of the W×H loop
     out = Matrix{RGBA{N0f8}}(undef, H, W)
     @inbounds for j in 1:W, i in 1:H
-        out[i, j] = tonemap((hdr[1,j,i], hdr[2,j,i], hdr[3,j,i]), exposure)
+        out[i, j] = tonemap((hdr[1,j,i], hdr[2,j,i], hdr[3,j,i]), scale)
     end
     return out
 end

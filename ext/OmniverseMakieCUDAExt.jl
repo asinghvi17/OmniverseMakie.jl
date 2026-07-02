@@ -46,15 +46,15 @@ end
 # Device tonemap kernel — reuses the SHARED scalar `tonemap` (Task 2)
 # ------------------------------------------------------------------
 # One thread per output pixel (i,j) of the [H,W] matrix; reads channel-fastest
-# hdr[1:3, j, i] (float16/float32) → out[i,j] = tonemap((r,g,b), exposure).
+# hdr[1:3, j, i] (float16/float32) → out[i,j] = tonemap((r,g,b), scale).
 # Same indexing as host `tonemap_frame`, so host and device agree pixelwise.
-function _tonemap_kernel!(out, hdr, exposure::Float32, H::Int, W::Int)
+function _tonemap_kernel!(out, hdr, scale::Float32, H::Int, W::Int)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if idx <= H * W
         i = (idx - 1) % H + 1
         j = (idx - 1) ÷ H + 1
         @inbounds out[i, j] = tonemap(
-            (Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), exposure)
+            (Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
     end
     return nothing
 end
@@ -65,7 +65,8 @@ function _tonemap_dev(hdr, exposure::Float32)
     out = CuArray{RGBA{N0f8}}(undef, H, W)
     n = H * W
     threads = 256
-    @cuda threads = threads blocks = cld(n, threads) _tonemap_kernel!(out, hdr, exposure, H, W)
+    scale = exp2(exposure)                          # once per launch (host-side), not per thread
+    @cuda threads = threads blocks = cld(n, threads) _tonemap_kernel!(out, hdr, scale, H, W)
     return out
 end
 
