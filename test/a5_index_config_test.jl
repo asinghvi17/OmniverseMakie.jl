@@ -119,6 +119,30 @@ const _NESTED_FIXTURE = """
 }
 """
 
+# A JSON5 config whose SECOND line is a `//` line-comment mentioning a DECOY `"app": {`
+# BEFORE the genuine top-level `"app": {` block.  This is the MOST realistic hazard: the real
+# install ovrtx.config.json is JSON5 WITH comments.  The old first-substring merge
+# (`replace(base, "\"app\": {" => …; count=1)`) matched the `"app": {` INSIDE this comment (its
+# `occursin("\"app\": {", …)` guard also passed, so it did NOT even error), spliced the token
+# there — mangling the comment — and left the REAL block token-less.  `_find_top_level_app`'s
+# line-anchored regex skips the comment (its `"app"` is not at a line-start after the indent)
+# and targets the real block.  `_DECOY_COMMENT` is interpolated into the fixture so the
+# verbatim-preservation assertion and the fixture text cannot drift apart.
+const _DECOY_COMMENT = "// \"app\": { \"raytracing\": false }  (commented-out decoy, must stay ignored)"
+const _COMMENT_FIXTURE = """
+{
+    $(_DECOY_COMMENT)
+    "log": {
+        "level": "Info"
+    },
+    "app": {
+        "graphics": {
+            "raytracing": true
+        }
+    },
+}
+"""
+
 # Only a NESTED `"app"` (inside "log"), no top-level one → no top-level block to merge into.
 const _NESTED_ONLY_FIXTURE = """
 {
@@ -216,6 +240,25 @@ end
     @test count("\"tokens\": {", out) == 1                # exactly once -> not also in the decoy
     # the decoy block is left intact (its "note" key untouched, no token spliced into it)
     @test occursin("        \"app\": {\n            \"note\":", out)
+end
+
+@testset "A5 _synth_index_config: line-comment app decoy before top-level -> token in top-level (pure)" begin
+    # REGRESSION GUARD for the headline old-code hazard on a REALISTIC JSON5 config: a `//`
+    # line-comment mentioning `"app": {` precedes the genuine top-level block.  The old
+    # `replace(base, "\"app\": {" => …; count=1)` matched INSIDE the comment (verified against
+    # the old algorithm: it planted the token there — start 27, before the real block at 267 —
+    # and mangled the comment, leaving the real "app" token-less).  The fixtures elsewhere in
+    # this file have NO comments, so without this case the headline regression is unguarded.
+    out = read(OV._synth_index_config(_write_bin(_COMMENT_FIXTURE), _CLEAN_LIBS), String)
+
+    r_top = findfirst("\n    \"app\": {", out)      # 4-space genuine top-level app key
+    r_tok = findfirst("\"tokens\": {", out)         # the inserted block's unambiguous opener
+
+    @test r_top !== nothing                          # fixture sanity: real top-level present
+    @test r_tok !== nothing
+    @test count("\"tokens\": {", out) == 1           # inserted exactly once (the marker trick)
+    @test r_tok.start > r_top.start                  # token lands AFTER the REAL `"app": {` (old code: BEFORE it, inside the comment)
+    @test occursin("\n    " * _DECOY_COMMENT * "\n", out)   # the decoy comment line survives verbatim (old code spliced the token into it)
 end
 
 @testset "A5 _synth_index_config: no top-level app block errors clearly (pure)" begin
