@@ -168,3 +168,8 @@ include("volumes_color_test.jl")
 # files stay bounded (prior deleted each edit, last cleaned on close), and an all-zero volume! no-ops
 # cleanly (subprocess, env-gated, skip-if-absent).
 include("volumes_live_test.jl")
+
+# Review Track B / Task B1 — one colormap mapper (_map_through_colormap) + one colorrange
+# resolver (_resolve_colorrange), NaN-safe: golden USDA/scatter/volume regression anchors +
+# a NaN-masked surface colour path that yields finite RGB (nan_color) instead of throwing (pure).
+include("review_b1_colormap_test.jl")
