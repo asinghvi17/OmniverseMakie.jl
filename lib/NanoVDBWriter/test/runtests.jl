@@ -109,3 +109,21 @@ end
     @test offs[1] > offs[2] > offs[3] > offs[4]                    # leaf … root buffer order
     rm(path)
 end
+
+@testset "allocation regression (D2 memory refactor)" begin
+    # save_nanovdb runs on EVERY live volume edit, so its transient allocation is
+    # a hot path.  Pre-D2 it stored a copy(scratch) per active leaf until Phase 5
+    # AND duplicated the whole node buffer to prepend a 736-byte header → ~2.8×
+    # the output file size.  D2 drops both (re-read leaves from `data`; three
+    # sequential writes).  The returned node buffer (~= payload) is the only
+    # unavoidable large allocation; guard @allocated well under the old behavior
+    # (and under the brief's < 3× target).  Warm up first so the measured call
+    # excludes one-time compilation.
+    d = fixture_multi_lower()
+    path = tempname() * ".nvdb"
+    save_nanovdb(path, d, MULTI_LOWER_ORIGIN, MULTI_LOWER_EXTENT)   # warmup / compile
+    payload = filesize(path)
+    allocated = @allocated save_nanovdb(path, d, MULTI_LOWER_ORIGIN, MULTI_LOWER_EXTENT)
+    rm(path)
+    @test 2 * allocated < 3 * payload                             # < 1.5× payload (post-D2 ≈ 1.03×)
+end
