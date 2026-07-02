@@ -31,13 +31,10 @@ function _displaycolor(colors::AbstractVector{<:Colorant}, plot, npoints::Int)
     return ([_rgb(c) for c in colors], "vertex")
 end
 
-# Per-vertex numeric values → colours via the colormap. Mapped manually
-# (to_colormap + interpolated_getindex) because Makie's numbers_to_colors errors
-# when called outside the plot's compute pipeline.
+# Per-vertex numeric values → colours via `_map_through_colormap` (the shared,
+# NaN-safe colormap + colorrange mapper).
 function _displaycolor(values::AbstractVector{<:Real}, plot, npoints::Int)
-    cmap   = Makie.to_colormap(plot.colormap[])
-    crange = _colorrange(plot, values)
-    return ([_rgb(Makie.interpolated_getindex(cmap, Float32(v), crange)) for v in values], "vertex")
+    return (_map_through_colormap(plot, values), "vertex")
 end
 
 # Scalar / fallback → one constant colour.
@@ -45,13 +42,43 @@ function _displaycolor(color, plot, npoints::Int)
     return (_rgb(Makie.to_color(color)), "constant")
 end
 
-# Resolve a numeric colorrange, falling back to data extrema when `automatic`.
-function _colorrange(plot, values)
+"""
+    _map_through_colormap(plot, values) -> Vector{NTuple{3,Float32}}
+
+Map per-vertex numeric `values` through `plot.colormap` over
+`_resolve_colorrange(plot, values)`, done manually (`to_colormap` +
+`interpolated_getindex`) because Makie's `numbers_to_colors` errors outside the
+plot's compute pipeline. NaN-safe: a non-finite value maps to `plot.nan_color`
+(haskey-guarded, default transparent) instead of throwing in
+`interpolated_getindex`. RGB-only is fine — a non-finite surface vertex belongs
+to no emitted face. The sole numeric-colour mapper (scatter/lines/mesh + surface).
+"""
+function _map_through_colormap(plot, values)
+    cmap    = Makie.to_colormap(plot.colormap[])
+    crange  = _resolve_colorrange(plot, values)
+    nan_rgb = _rgb(Makie.to_color(haskey(plot, :nan_color) ? plot.nan_color[] : :transparent))
+    return NTuple{3,Float32}[
+        isfinite(v) ? _rgb(Makie.interpolated_getindex(cmap, Float32(v), crange)) : nan_rgb
+        for v in values]
+end
+
+"""
+    _resolve_colorrange(plot, values) -> NTuple{2,Float32}
+
+Resolve `plot.colorrange` to a concrete `(lo, hi)`: an explicit 2-element
+tuple/vector is honored verbatim; `automatic` derives extrema over the FINITE
+`values` only (raw `extrema` would give `(NaN, NaN)` on masked data); with no
+finite values it falls back to `(0f0, 1f0)`. Shared by every colour-mapped site
+(`_volume_colorrange` delegates here for its automatic branch).
+"""
+function _resolve_colorrange(plot, values)
     crange = plot.colorrange[]
     if (crange isa Tuple || crange isa AbstractVector) && length(crange) == 2
         return (Float32(crange[1]), Float32(crange[2]))
     end
-    lo, hi = extrema(values)
+    finite = filter(isfinite, values)
+    isempty(finite) && return (0.0f0, 1.0f0)
+    lo, hi = extrema(finite)
     return (Float32(lo), Float32(hi))
 end
 

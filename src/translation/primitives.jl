@@ -16,7 +16,7 @@
 #
 # Included in the OmniverseMakie module AFTER meshes.jl.  In scope: Makie,
 # GeometryBasics, OV, LinearAlgebra (cross/norm/normalize), usda_mesh,
-# usda_matrix4d, displaycolor_for, _rgb, _colorrange, _displaycolor_str.
+# usda_matrix4d, displaycolor_for, _rgb, _map_through_colormap, _displaycolor_str.
 
 # ------------------------------------------------------------------
 # small formatting / data helpers
@@ -299,15 +299,13 @@ function _surface_mesh(xs, ys, zs)
 end
 
 # Per-vertex surface colours, in the SAME i-major order as `_surface_mesh` points.
-# Surface defaults `plot.color[] === nothing` → colour by `zs` through the colormap.
+# Surface defaults `plot.color[] === nothing` → colour by `zs` through the colormap
+# (NaN-safe via `_map_through_colormap`; the mesh path drops non-finite cells).
 function _surface_colors(plot, zs)
     nx, ny = size(zs)
-    c = plot.color[]
-    if c === nothing
-        cmap = Makie.to_colormap(plot.colormap[])
+    if plot.color[] === nothing
         zvec = Float32[zs[i, j] for i in 1:nx for j in 1:ny]
-        rng  = _colorrange(plot, zvec)
-        return ([_rgb(Makie.interpolated_getindex(cmap, v, rng)) for v in zvec], "vertex")
+        return (_map_through_colormap(plot, zvec), "vertex")
     end
     return displaycolor_for(plot, nx * ny)
 end

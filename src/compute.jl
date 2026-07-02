@@ -107,14 +107,12 @@ _displaycolor_from_scaled(c, _n) = (_rgb(Makie.to_color(c)), "constant")
 
 # M4: a NUMERIC `scaled_color` vector (numbers + colormap) must be mapped THROUGH the plot's
 # colormap — the bare `_displaycolor_from_scaled` fallback `_rgb(to_color(::Vector{Float32}))`
-# can't (it `red()`s the whole vector → MethodError).  Resolve via `colormap` + `colorrange`
-# (`interpolated_getindex`); a Colorant or scalar `scaled_color` defers to
+# can't (it `red()`s the whole vector → MethodError).  Map via `_map_through_colormap` (the
+# shared NaN-safe colormap + colorrange mapper); a Colorant or scalar `scaled_color` defers to
 # `_displaycolor_from_scaled`.
 function _scaled_to_display(plot, sc, n)
     if sc isa AbstractVector{<:Real}
-        cmap   = Makie.to_colormap(plot.colormap[])
-        crange = _colorrange(plot, sc)
-        return ([_rgb(Makie.interpolated_getindex(cmap, Float32(v), crange)) for v in sc], "vertex")
+        return (_map_through_colormap(plot, sc), "vertex")
     end
     return _displaycolor_from_scaled(sc, n)
 end
@@ -296,14 +294,16 @@ function author_usd_prim!(screen, scene, plot::Makie.LineSegments, args)
     return OvrtxRObj(path, h)
 end
 
-# Volumes M2: resolve a `Volume`'s transfer-function domain.  `colorrange` defaults to
-# `Automatic()` → derive from the scalar-field extrema; an explicit `(lo,hi)` passes through.
+# Volumes M2: resolve a `Volume`'s transfer-function domain as Float64.  An explicit `(lo,hi)`
+# passes through verbatim; `Automatic()` delegates to `_resolve_colorrange` for the NaN-safe
+# finite extrema (a raw `minimum`/`maximum` over the field would give NaN on masked data).
 # Only cosmetic under IndeX Direct (default grayscale TF — M1 constraint #3); authored for M2's
 # composite-colour path (Task 3).
 function _volume_colorrange(plot, scalars)
     cr = Makie.to_value(plot.colorrange)
-    cr isa Makie.Automatic && return (Float64(minimum(scalars)), Float64(maximum(scalars)))
-    return (Float64(first(cr)), Float64(last(cr)))
+    cr isa Makie.Automatic || return (Float64(first(cr)), Float64(last(cr)))
+    lo, hi = _resolve_colorrange(plot, scalars)
+    return (Float64(lo), Float64(hi))
 end
 
 # Volumes M2 — `volume!(x,y,z,::Array{Float32,3})` build.  Reads the scalar field + axis ranges +
