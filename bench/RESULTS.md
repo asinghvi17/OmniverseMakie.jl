@@ -79,17 +79,18 @@ This is a planned M3 work item; the M2 hot path is sufficient for the gate.
 
 ---
 
-## Scatter / MeshScatter Gap — Decision (b): documented carry
+## Scatter / MeshScatter Gap — RESOLVED (review Task B4)
 
-`push_to_ovrtx!` routes `:positions_transformed_f32c` to the `"points"` attribute
-on all plot types.  A `UsdGeomPointInstancer` (used by `Scatter` / `MeshScatter`)
-stores per-instance positions in `"positions"`, **not** `"points"` — so
-per-instance position updates for Scatter/MeshScatter are currently a no-op
-(the whole-scatter `omni:xform` still works; only per-instance moves are silent).
+`push_to_ovrtx!` used to route `:positions_transformed_f32c` to the `"points"`
+attribute on all plot types.  A `UsdGeomPointInstancer` (used by `Scatter` /
+`MeshScatter`) stores per-instance positions in `"positions"`, **not** `"points"` —
+so per-instance position edits were a silent no-op (ovrtx drops writes to a
+nonexistent attr; only the whole-scatter `omni:xform` worked).
 
-**Decision:** benchmark the working paths (Mesh xform + Mesh points) which
-independently meet the gate.  The scatter per-instance route fix
-(`"positions"` attribute, UsdGeomPointInstancer path) is a **documented M3 carry**.
-
-No silent degradation: the gap is identified, the gate passes on the unaffected
-paths, and the fix is scoped.
+**Fixed in B4** (spike-verified with a pixel-centroid oracle — a one-shot AND a
+persistent-binding `positions` write each move an authored instancer ≫ 20 px, while
+the old `points` write on it moved it 0.02 px): non-materialized Scatter/MeshScatter
+now route to `positions` (zero-copy binding when the instance count is unchanged,
+one-shot resize otherwise).  A MATERIALIZED scatter/meshscatter is a merged
+`UsdGeomMesh`; a live position edit there is warn+skipped (needs a re-author) rather
+than corrupting the merged `points`.

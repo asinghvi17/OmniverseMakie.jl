@@ -213,7 +213,9 @@ function author_usd_prim!(screen, scene, plot::Makie.Scatter, args)
     usda = _usda_pointinstancer(pos, scales, nothing, instancer_color,
                                 _sphere_proto_body(proto_color); model = args[:model_f32c])
     h = OV.add_usd_reference!(screen.renderer, usda, path)
-    return OvrtxRObj(path, h)
+    robj = OvrtxRObj(path, h)
+    robj.meta[:instancer_npoints] = n          # FROZEN bound size for the B4 live-positions gate
+    return robj
 end
 
 function author_usd_prim!(screen, scene, plot::Makie.MeshScatter, args)
@@ -248,7 +250,9 @@ function author_usd_prim!(screen, scene, plot::Makie.MeshScatter, args)
     usda  = _usda_pointinstancer(pos, scales, orientations, instancer_color, proto;
                                  model = args[:model_f32c])
     h = OV.add_usd_reference!(screen.renderer, usda, path)
-    return OvrtxRObj(path, h)
+    robj = OvrtxRObj(path, h)
+    robj.meta[:instancer_npoints] = n          # FROZEN bound size for the B4 live-positions gate
+    return robj
 end
 
 function author_usd_prim!(screen, scene, plot::Makie.Lines, args)
@@ -468,6 +472,34 @@ function _push_curve_positions!(screen, robj, plot, binding, value)
     return nothing
 end
 
+# Live positions edit for a NON-materialized Scatter/MeshScatter UsdGeomPointInstancer prim.  The
+# per-instance attribute is `positions` — NOT `points` (a UsdGeomMesh attr).  The pre-fix route
+# wrote `points` here, which ovrtx SILENTLY DROPS (writes to a nonexistent attr → num_error_ops=0),
+# so a live per-instance move was an invisible no-op that still burned an accumulation reset.
+#
+# SPIKE-VERIFIED (Task B4, pixel-centroid oracle — absence of error proves nothing on this build):
+# a one-shot `write_array_attribute!(positions)` AND a persistent-binding `positions` write BOTH
+# move an authored instancer (centroid delta ≫ 20 px); the old `points` write on it moved the
+# centroid 0.02 px (silent).  So the binding path is adopted (zero-copy hot path), one-shot for a
+# count change.
+#
+# The `positions` binding is sized ONCE at author time; `robj.meta[:instancer_npoints]` records that
+# FROZEN instance count (set in author_usd_prim!, NEVER reassigned on a push).  The gate mirrors B2's
+# curve gate: the binding is written ONLY when the new count equals that author-time length; any
+# other count → the proven one-shot resize path.  A count change also leaves the instancer's
+# protoIndices/scales at the author-time length (markersize/protoIndices are not tracked diff
+# outputs), so a resized scatter renders min(count) instances — a full count-changing scatter re-spec
+# needs a re-author.  The common animation case, a FIXED-count position sweep, is exact.
+function _push_instancer_positions!(screen, robj, plot, binding, value)
+    r = screen.renderer; prim = robj.prim_path
+    if binding !== nothing && length(value) == get(robj.meta, :instancer_npoints, -1)
+        _push_points_binding!(binding, value)
+    else
+        OV.write_array_attribute!(r, prim, "positions", value)
+    end
+    return nothing
+end
+
 # Diagnostic hook: called with the attribute name on every `push_to_ovrtx!` write.
 # `nothing` (default) → no overhead.  test/m2_diffnode_test.jl asserts EXACTLY ONE write per edit.
 const _PUSH_OBSERVER = Ref{Any}(nothing)
@@ -538,7 +570,10 @@ Route ONE changed compute output to its minimal in-place USD write on `robj.prim
 (no re-author).  Returns `true` if a write was issued (an unrouted `name` → `false`):
 
 - `:model_f32c`                 → `OV.write_xform!` (`omni:xform`, composed world transform)
-- `:positions_transformed_f32c` → `points` array write
+- `:positions_transformed_f32c` → `points` array write (Mesh); `points`+`curveVertexCounts`
+                                  (Lines/LineSegments); `positions` array write (Scatter/MeshScatter
+                                  UsdGeomPointInstancer, B4); a MATERIALIZED scatter/meshscatter
+                                  (merged mesh) is warn+skipped (needs a re-author, `routed=false`)
 - `:normals`                    → `normals` array write
 - `:faces`                      → `faceVertexIndices` + `faceVertexCounts`
 - `:scaled_color`               → `primvars:displayColor`, OR (MATERIALIZED, M3.4) the OmniPBR
@@ -566,6 +601,18 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, plot, name::Symbol, value)
         if plot isa Union{Makie.Lines,Makie.LineSegments}
             # BasisCurves: NaN-aware re-split → points + curveVertexCounts (see _push_curve_positions!).
             _push_curve_positions!(screen, robj, plot, binding, value)
+        elseif plot isa Union{Makie.Scatter,Makie.MeshScatter}
+            # UsdGeomPointInstancer: per-instance attr is `positions`, NOT `points` (B4).  A
+            # MATERIALIZED scatter/meshscatter is instead a merged UsdGeomMesh (n×~150 verts) — a
+            # positions-sized `points` write there is size-mismatched corruption — so warn+skip
+            # (routed=false → NO reset burn, NO write); a live move needs a re-author.
+            if is_materialized(plot)
+                @warn "OmniverseMakie: live position edits on a materialized scatter need a \
+                       re-author — skipped." maxlog=1
+                routed = false
+            else
+                _push_instancer_positions!(screen, robj, plot, binding, value)
+            end
         elseif binding === nothing
             # points — persistent `bind_array_attribute` + write when bound, else one-shot.
             OV.write_array_attribute!(r, prim, "points", value)
@@ -622,13 +669,16 @@ end
 # bind_hot_attributes! — create the persistent hot-path bindings (M2.4)
 # ------------------------------------------------------------------
 
-# Plot types whose `:positions_transformed_f32c` route writes a real `points` array on a
-# UsdGeomMesh/UsdGeomBasisCurves prim → a persistent array binding is valid.  Scatter/MeshScatter
-# author a UsdGeomPointInstancer (per-instance `positions`, not `points`), which the push route
-# doesn't yet write in place → NO array binding, only the xform binding (behaviour = M2.3).
+# The array attribute a persistent `:positions_transformed_f32c` binding backs (`nothing` = none).
+# Mesh/BasisCurves store geometry in `points`; a NON-materialized Scatter/MeshScatter is a
+# UsdGeomPointInstancer whose per-instance attr is `positions` (B4 — spike-proven writable via both
+# a one-shot AND a binding).  A MATERIALIZED scatter/meshscatter is a merged UsdGeomMesh but its
+# live-positions route warn+skips (needs a re-author), so it takes NO positions binding — only the
+# universal xform binding.
 _points_binding_attr(::Makie.Mesh)         = "points"
 _points_binding_attr(::Makie.Lines)        = "points"
 _points_binding_attr(::Makie.LineSegments) = "points"
+_points_binding_attr(p::Union{Makie.Scatter,Makie.MeshScatter}) = is_materialized(p) ? nothing : "positions"
 _points_binding_attr(::Any)                = nothing
 
 """
@@ -640,8 +690,9 @@ routes a changed attribute through the binding instead of re-authoring:
 
 - `:model_f32c` → an `omni:xform` binding (`OVRTX_BINDING_FLAG_OPTIMIZE`) written ZERO-COPY
   via `map_attribute` (every plot type — the primary hot binding).
-- `:positions_transformed_f32c` → a `point3f[] points` array binding via `bind_array_attribute`
-  + `write` (mesh/curve only — see `_points_binding_attr`).
+- `:positions_transformed_f32c` → a `point3f[]` array binding via `bind_array_attribute` + `write`
+  on the geometry attr `_points_binding_attr` picks (`points` for mesh/curve, `positions` for a
+  non-materialized scatter/meshscatter instancer — B4; none for a materialized scatter).
 
 Both target `robj.prim_path`; the M2.4 spike VALIDATED that map/write through a persistent
 binding on a referenced prim honors the edit.  Released by `destroy_bindings!` on
@@ -655,7 +706,8 @@ function bind_hot_attributes!(screen, robj::OvrtxRObj, plot, args)
         r, prim, "omni:xform",
         LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(64), UInt16(16));
         array = false, semantic = LibOVRTX.OVRTX_SEMANTIC_XFORM_MAT4x4, optimize = true)
-    # Tier 2 (mesh / curve points): point3f[] array, bind + write.
+    # Tier 2 (mesh/curve `points` OR non-materialized scatter/meshscatter `positions`): point3f[]
+    # array, bind + write.  `_points_binding_attr` picks the attr (or `nothing` → skip).
     pname = _points_binding_attr(plot)
     if pname !== nothing
         robj.bindings[:positions_transformed_f32c] = OV.create_binding(
@@ -757,12 +809,14 @@ function register_ovrtx_robj!(screen, scene, plot)
         ComputePipeline.register_computation!(attr, node_inputs, [:ovrtx_renderobject]) do args, changed, last
             scr = args[:ovrtx_screen]
             local robj
+            dirty = false                                            # did this resolve CHANGE the stage?
             if isnothing(last) || changed[:ovrtx_screen]
                 # `scene` captured from the arg; on a rebuild for a NEW screen, scr.scene2scope
                 # (same objectids) yields the same nested path — reference re-nests identically.
                 robj = author_usd_prim!(scr, scene, plot, args)      # (RE)BUILD on the active screen
                 # M2.4: create the persistent hot-path bindings ONCE on the fresh reference.
                 robj === nothing || bind_hot_attributes!(scr, robj, plot, args)
+                dirty = true                                         # a (re)build authored geometry
             else
                 robj = last.ovrtx_renderobject
                 if robj === nothing
@@ -780,17 +834,25 @@ function register_ovrtx_robj!(screen, scene, plot)
                         if robj !== nothing
                             bind_hot_attributes!(scr, robj, plot, args)
                             _register_robj_maps!(scr, plot, robj)
+                            dirty = true                             # late (empty→fill) build authored geometry
                         end
                     end
                 else
                     for name in keys(args)
                         name === :ovrtx_screen && continue
                         changed[name] || continue                    # minimal-delta gate
-                        push_to_ovrtx!(scr, robj, plot, name, args[name])
+                        # A SKIPPED push (push_to_ovrtx! → false: a materialized-scatter live position
+                        # edit (B4), an unsupported material swap, a failed volume reload) writes NOTHING
+                        # to the stage, so it must NOT flip requires_update — resetting RT2 accumulation
+                        # for a no-op burns a frame with no visual change ("no reset burn on the skip").
+                        push_to_ovrtx!(scr, robj, plot, name, args[name]) && (dirty = true)
                     end
                 end
             end
-            scr === nothing || (scr.requires_update = true)
+            # Only a REAL stage change resets RT2.  Guarded on `dirty` (never on a bare `true`): a
+            # sibling plot's clean resolve shares screen.requires_update within one pull, so this only
+            # ever SETS the flag — the two-write clear discipline lives in `_sync_and_needs_reset!`.
+            scr === nothing || !dirty || (scr.requires_update = true)
             return (robj,)
         end
     end

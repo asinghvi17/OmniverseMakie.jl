@@ -188,3 +188,12 @@ include("review_b2_nan_lines_test.jl")
 # fill live → render (>LIT_PX_MIN) + become pickable (the volume empty→fill self-heal is in
 # volumes_live_test.jl's flipped testset).
 include("review_b3_empty_fill_test.jl")
+
+# Review Track B / Task B4 — Scatter/MeshScatter live positions: a UsdGeomPointInstancer's per-instance
+# attr is `positions`, not `points`, so the old `points` route was a SILENT no-op (ovrtx drops writes
+# to a nonexistent attr) that still burned an accumulation reset.  Non-materialized scatter/meshscatter
+# now route to `positions` (spike-verified: one-shot AND binding both move an instancer; binding adopted
+# with the B2 frozen-size gate); a MATERIALIZED scatter (merged UsdGeomMesh) warn+skips (no write, no
+# reset burn).  Subprocess: a live position edit MOVES a non-materialized scatter+meshscatter centroid;
+# a materialized edit leaves the image UNCHANGED + warns once + is NOT routed.
+include("review_b4_scatter_positions_test.jl")
