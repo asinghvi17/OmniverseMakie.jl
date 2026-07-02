@@ -71,3 +71,41 @@ end
     @test h1 == GOLDEN_SINGLE_LEAF
     @test h2 == GOLDEN_MULTI_LOWER
 end
+
+@testset "input validation" begin
+    good = fixture_single_leaf()
+    o, e = Point3f(0, 0, 0), Vec3f(1, 1, 1)
+    # NaN voxel → rejected (would otherwise count as active and poison min/max).
+    nan_data = copy(good); nan_data[1, 1, 1] = NaN32
+    @test_throws ArgumentError save_nanovdb(tempname() * ".nvdb", nan_data, o, e)
+    # Inf voxel → rejected (same non-finite guard).
+    inf_data = copy(good); inf_data[2, 2, 2] = Inf32
+    @test_throws ArgumentError save_nanovdb(tempname() * ".nvdb", inf_data, o, e)
+    # zero extent → rejected (would silently write an Inf voxel size).
+    @test_throws ArgumentError save_nanovdb(tempname() * ".nvdb", good, o, Vec3f(0, 0, 0))
+    # zero-dim array → rejected with a clear error (not the misleading one).
+    @test_throws ArgumentError save_nanovdb(tempname() * ".nvdb", zeros(Float32, 0, 0, 0), o, e)
+    # all-background input → still the existing clear ErrorException.
+    @test_throws ErrorException save_nanovdb(tempname() * ".nvdb", zeros(Float32, 8, 8, 8), o, e)
+end
+
+@testset "multi-node header invariants + node-offset bias" begin
+    d = fixture_multi_lower()
+    path = tempname() * ".nvdb"
+    save_nanovdb(path, d, MULTI_LOWER_ORIGIN, MULTI_LOWER_EXTENT)
+    h = NanoVDBWriter.parse_nanovdb_header(path)
+    @test h.magic == "NanoVDB0"
+    @test h.version_major == 32
+    @test h.voxel_count == count(!=(0f0), d)
+
+    # Node-offset sanity via the named bias.  TreeData holds mNodeOffset[4] =
+    # (leaf, lower, upper, root) Int64s at its start; the root node is first in
+    # the node buffer (position 1), so its offset from TreeData = 1 + BIAS.
+    io_header_size = 200                       # 16B FileHeader + 176B FileMetaData + 8B name
+    td = io_header_size + NanoVDBWriter.NANOVDB_GRIDDATA_SIZE   # 0-indexed TreeData start
+    bytes = read(path)
+    offs = [only(reinterpret(Int64, bytes[td + (i - 1) * 8 + 1 : td + i * 8])) for i in 1:4]
+    @test offs[4] == NanoVDBWriter.TREEDATA_NODE_OFFSET_BIAS + 1   # root offset (== 64)
+    @test offs[1] > offs[2] > offs[3] > offs[4]                    # leaf … root buffer order
+    rm(path)
+end

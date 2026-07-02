@@ -25,9 +25,15 @@
 module NanoVDBWriter
 
 using GeometryBasics: Point3f, Vec3f
+using Base: ENDIAN_BOM
 import Zlib_jll
 
 export save_nanovdb
+
+# NanoVDB is a little-endian on-disk format, and `write_buf!` stores host-endian
+# bytes via `unsafe_store!`; this writer is correct only on a little-endian host.
+# Fail loudly at load time on a big-endian one rather than emit swapped bytes.
+@assert ENDIAN_BOM == 0x04030201 "NanoVDBWriter requires a little-endian host"
 
 # ============================================================================
 # NanoVDB format constants (pinned to file-format MAJOR version 32 — IndeX's
@@ -56,6 +62,10 @@ const TREEDATA_SIZE               = 64
 const TREEDATA_NODE_OFFSET_START  = NANOVDB_GRIDDATA_SIZE + 1        # 673 (1-indexed)
 const TREEDATA_NODE_COUNT_START   = NANOVDB_GRIDDATA_SIZE + 32 + 1   # 705
 const TREEDATA_VOXELCOUNT_OFFSET  = NANOVDB_GRIDDATA_SIZE + 56 + 1   # 729
+# mNodeOffset[i] is measured (0-indexed) from the start of TreeData; a metadata
+# node position is 1-indexed into the node buffer, which begins TREEDATA_SIZE
+# bytes after TreeData. So offset = (pos - 1) + TREEDATA_SIZE = pos + this bias.
+const TREEDATA_NODE_OFFSET_BIAS   = TREEDATA_SIZE - 1                # 63
 
 # Map (264B, at GridData byte 296).  NanoVDB.h Map layout:
 #   mMatF[9] 36B | mInvMatF[9] 36B | mVecF[3] 12B | mTaperF 4B
@@ -232,6 +242,18 @@ function build_nanovdb_from_dense(
     extent::Vec3f;
     background::Float32 = 0f0,
 )
+    # Up-front guards: a non-finite voxel would count as active (`!= background`)
+    # and poison min/max; a zero extent would silently write an Inf voxel size;
+    # a zero-length axis would otherwise fall through to the all-background error.
+    all(isfinite, data) || throw(ArgumentError(
+        "build_nanovdb_from_dense: `data` has non-finite (NaN/Inf) voxels — a " *
+        "non-finite value would count as active and poison the value range."))
+    all(>(0), size(data)) || throw(ArgumentError(
+        "build_nanovdb_from_dense: every axis of `data` must be > 0, got size $(size(data))."))
+    all(>(0), extent) || throw(ArgumentError(
+        "build_nanovdb_from_dense: `extent` must be > 0 on every axis " *
+        "(voxel size = extent ./ size(data)), got $extent."))
+
     nx, ny, nz = size(data)
     dx, dy, dz = extent[1] / nx, extent[2] / ny, extent[3] / nz
 
@@ -507,8 +529,10 @@ function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata:
     end
 
     # ---- TreeData: node offsets, counts, voxel count ----
-    for (i, off) in enumerate((metadata.leaf_offset + 63, metadata.lower_offset + 63,
-                                metadata.upper_offset + 63, metadata.root_offset + 63))
+    for (i, off) in enumerate((metadata.leaf_offset  + TREEDATA_NODE_OFFSET_BIAS,
+                                metadata.lower_offset + TREEDATA_NODE_OFFSET_BIAS,
+                                metadata.upper_offset + TREEDATA_NODE_OFFSET_BIAS,
+                                metadata.root_offset  + TREEDATA_NODE_OFFSET_BIAS))
         write_buf!(full_buffer, TREEDATA_NODE_OFFSET_START + (i-1)*8, UInt64(off))
     end
     for (i, n) in enumerate((metadata.leaf_count, metadata.lower_count, metadata.upper_count))
