@@ -391,6 +391,11 @@ end
 # ROW — the form `OV.write_xform!` expects (matches `usda_matrix4d`'s transpose).
 _model_to_usd_xform(m) = Float64.(collect(m'))
 
+# Hook for a plot-type-specific tweak to the `:model_f32c` matrix before it becomes `omni:xform`.
+# Identity passthrough for every plot; `usdplot.jl` specializes it for `::USDPlot` to fold the
+# `up = :y` +90° X rotation in (so the author-time and live-transform writes agree).
+_usdplot_model(plot, model) = model
+
 # Constant or per-vertex displayColor → a 3-lane color3f[] write on the referenced prim
 # (spike-proven honored).  One element per colour, `shape = [ncolors]`.
 function _push_displaycolor!(r, prim, plot, scaled_color)
@@ -612,11 +617,13 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, plot, name::Symbol, value)
     routed  = true
     if name === :model_f32c
         # omni:xform — write zero-copy through the mapped binding when one exists (created once
-        # by bind_hot_attributes!), else the M0 one-shot `write_attribute` path.
+        # by bind_hot_attributes!), else the M0 one-shot `write_attribute` path.  `_usdplot_model`
+        # folds a USDPlot `up = :y` correction in (identity for every other plot type).
+        m = _usdplot_model(plot, value)
         if binding === nothing
-            OV.write_xform!(r, prim, _model_to_usd_xform(value))
+            OV.write_xform!(r, prim, _model_to_usd_xform(m))
         else
-            OV.write_mapped_xform!(binding, _model_to_usd_xform(value))
+            OV.write_mapped_xform!(binding, _model_to_usd_xform(m))
         end
     elseif name === :positions_transformed_f32c
         if plot isa Union{Makie.Lines,Makie.LineSegments}
@@ -775,6 +782,15 @@ function destroy_bindings!(robj::OvrtxRObj)
     if tmp isa AbstractString
         rm(tmp; force = true)
         delete!(robj.meta, :vdb_tmp)
+    end
+    # usdplot: detach any bind_usd! observable listeners this robj owns (same lifetime as the
+    # hot-path bindings above) so a deleted/closed plot leaves no dangling Observable references.
+    ofs = get(robj.meta, :usd_binding_obsfuncs, nothing)
+    if ofs isa AbstractDict
+        for of in values(ofs)
+            Makie.Observables.off(of)
+        end
+        delete!(robj.meta, :usd_binding_obsfuncs)
     end
     return robj
 end

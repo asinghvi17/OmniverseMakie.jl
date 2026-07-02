@@ -23,6 +23,10 @@ mutable struct Screen <: Makie.MakieScreen
     _outline_styled::Bool                    # M6.B: true once default outline style installed (once/Screen)
     structural_dirty::Bool                   # accumulate mode: a USD reference was added/removed → reset once
     preroll_done::Bool                       # accumulate mode: first-frame warm-up already folded in
+    # usdplot bind_usd! writes, coalesced per target (key = (full_prim_path, attr|nothing)); flushed
+    # once per frame in `_sync_and_needs_reset!`.  Value is `(USDBinding, value)` — typed `Any` because
+    # `USDBinding` (usdplot.jl) is defined AFTER this struct.
+    pending_usd_writes::Dict{Tuple{String,Union{Nothing,String}},Any}
 end
 
 # ------------------------------------------------------------------
@@ -60,6 +64,7 @@ function Screen(scene::Makie.Scene, config::ScreenConfig;
         false,     # _outline_styled (M6.B: default style installed lazily on first select!)
         false,     # structural_dirty (accumulate mode: no composition change yet)
         false,     # preroll_done (accumulate mode: first-frame warm-up not yet folded in)
+        Dict{Tuple{String,Union{Nothing,String}},Any}(),  # pending_usd_writes (usdplot bind_usd!)
     )
 end
 
@@ -331,7 +336,12 @@ function _sync_and_needs_reset!(screen::Screen, cam_scene)::Bool
     pending = screen.requires_update
     screen.requires_update = false
     pull_ovrtx_nodes!(screen, screen.scene)
-    need_reset = cam_changed || light_changed || screen.requires_update || pending
+    # usdplot bind_usd! writes (coalesced per target) flush here, BEFORE the accumulate gate: the
+    # OR into need_reset makes default mode reconverge (like a camera/light edit), while the gate
+    # below drops it in accumulate mode (bound writes are non-structural — RT2 reprojection keeps
+    # the history).
+    usd_wrote = _flush_pending_usd_writes!(screen)
+    need_reset = cam_changed || light_changed || screen.requires_update || pending || usd_wrote
     screen.requires_update = false
     # Accumulate-across-frames: keep RT2 history across frames (realtime-style), so camera/light/
     # attribute changes do NOT reset — only a STRUCTURAL change (a USD reference added/removed:

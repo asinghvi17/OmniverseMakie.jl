@@ -163,6 +163,49 @@ so it isn't cold. Best for slow object motion / static-ish cameras; a fast camer
 stresses the reprojection (the same trade-off the viewport makes). If a change ever ghosts,
 `OmniverseMakie.reset_accumulation!(screen)` forces one reset.
 
+### Placing USD assets: `usdplot` + `bind_usd!`
+
+`usdplot!` composes an **external USD file** (a DCC export, a vendor asset, a Kit-authored
+scene — `.usda` or `.usdc`) into a Makie scene as a first-class atomic plot, rendered through
+the path tracer alongside ordinary plots. The file is referenced, not parsed: it brings its
+own geometry, payloads, relative textures, and self-contained materials (OmniPBR/MDL and
+UsdPreviewSurface both render). `bind_usd!` then ties Julia `Observable`s to prims/attributes
+*inside* that file, so an observable update live-updates the render.
+
+```julia
+using OmniverseMakie
+p = usdplot!(ax, "assets/car.usdc"; bbox = Rect3f(Point3f(-260, -105, 0), Vec3f(520, 210, 150)),
+             up = :z)
+
+translate!(p, 0, 0, 100)        # ordinary Makie transforms drive the asset's ROOT transform
+p.visible[] = false             # ordinary visibility
+
+wheel = Observable(Makie.rotationmatrix_z(0f0))
+bind_usd!(p, "/Chassis/WheelFL", wheel)                    # a prim → its omni:xform (a 4×4 matrix)
+bind_usd!(p, "/Body.primvars:displayColor", color_obs)     # an attribute → a typed write
+wheel[] = Makie.rotationmatrix_z(0.6f0)                     # live update, no re-author
+```
+
+Three rules worth knowing:
+
+- **Bind paths are relative to the file's `defaultPrim`.** A reference pulls in the file's
+  `defaultPrim` subtree, so `bind_usd!(p, "/Arm/Geo.primvars:displayColor", …)` addresses
+  `Arm/Geo` *under* that prim. Targets split at the first `.` into a prim path (no dot → a
+  4×4-matrix transform binding) and an attribute name (`Real` → float, a 3-vector / RGB
+  `Colorant` → color3f, a `Vector` of those → the array form). `xformOp:*` targets are
+  refused — those are baked at load; bind the **prim** with a matrix instead. A bad target on
+  a displayed plot throws immediately (fail-fast); before display it warns and skips.
+- **Makie owns the asset's root transform.** `translate!`/`scale!`/`rotate!` on the plot write
+  the referenced root's `omni:xform`, *replacing* the file's own root transform. Interior prim
+  transforms are untouched. Author units differ per asset — a centimetre `metersPerUnit = 0.01`
+  export is your `Makie.scale!`. Pass `up = :y` for a Y-up DCC export (folds a +90° X rotation
+  in so it stands upright in the Z-up scene).
+- **Needs the ovrtx backend.** `usdplot` renders through `Screen` / `colorbuffer` /
+  `interactive_display` / `replace_scene!`. In a plain GLMakie window it renders nothing.
+
+A runnable showcase — the NVIDIA Kit "Zeus ZS300" sedan with all four wheels spun live and
+recorded to an `.mp4` — is [`examples/usdplot_zeus_wheels.jl`](examples/usdplot_zeus_wheels.jl).
+
 ---
 
 ## Feature status
@@ -182,6 +225,7 @@ surface is exercised by [`test/runtests.jl`](test/runtests.jl).
 | **M6.B** | Native ray-query picking + offscreen `select!` selection outline | shipped (live in-viewport outline deferred) |
 | **Volumes M1** | NVIDIA IndeX enablement (carb-token) + `author_vdb_volume!` (UsdVol / OpenVDB) | shipped |
 | **Volumes M2** | Dense-array `volume!(x, y, z, array)` + live data edits — **grayscale**¹ | shipped |
+| **usdplot** | `usdplot!` external USD files (`.usda`/`.usdc`, payloads, textures, materials) as atomic plots + `bind_usd!` observable→prim/attribute bindings | shipped |
 
 ¹ **Volume colormaps render grayscale**, by design, not as a bug. In standalone `ovrtx`
 the only bundled volume path is **NVIDIA IndeX Direct**, which renders scalar density as
@@ -194,8 +238,10 @@ extension that ships no library here. See the explanation and tripwire test in
 
 ## API surface
 
-- **Exported:** `interactive_display`, `replace_scene!`. (Every exported Makie name is
-  re-exported too, so `using OmniverseMakie` gives you `Figure`, `mesh!`, `save`, etc.)
+- **Exported:** `interactive_display`, `replace_scene!`, `usdplot` / `usdplot!` (place an
+  external USD file), `bind_usd!` / `unbind_usd!` (tie observables to prims/attributes inside
+  it). (Every exported Makie name is re-exported too, so `using OmniverseMakie` gives you
+  `Figure`, `mesh!`, `save`, etc.)
 - **Documented but unexported** (qualify with `OmniverseMakie.`): `Screen`,
   `Makie.colorbuffer`, `select!` (selection outline, offscreen), `author_vdb_volume!`
   (low-level VDB authoring), `reset_accumulation!` (force an RT2 reset in accumulate mode).

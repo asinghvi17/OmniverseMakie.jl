@@ -19,7 +19,11 @@ include("translation/primitives.jl") # to_ovrtx_object (scatter/meshscatter/line
 include("translation/volume.jl")     # Volumes M1: _vdb_volume_usda / author_vdb_volume! (UsdVol)
 include("compute.jl")            # OvrtxRObj (Screen.plot2robj references it) — before screen.jl
 include("screen.jl")             # Screen, open-stage colorbuffer, insert!/insertplots!, activate!
+include("translation/usdplot.jl")  # USDPlot recipe + bind_usd! (needs compute.jl + screen.jl); @recipe exports usdplot/usdplot!
 include("tonemap.jl")            # shared HDR tonemap math (Task 2)
+
+# usdplot bindings API (the recipe itself auto-exports USDPlot / usdplot / usdplot!).
+export bind_usd!, unbind_usd!
 
 # M5/M6 interactive viewport lives in package extensions (GLMakie / CUDA). The main
 # module only DECLARES the generics; the GLMakie ext adds the methods.

@@ -751,9 +751,18 @@ end
 # Write one attribute (fixed-size or array) to `prim` via a DLTensor over `data`.
 # `data` must be a contiguous OWNED Vector backing the DLTensor; the caller
 # preprocesses (transpose/flatten for xform, dtype inference for arrays).
+#
+# `prim_mode` selects ovrtx's prim-resolution policy for this write:
+#   - `EXISTING_ONLY` (default, byte-identical to every pre-existing caller): a write to a
+#     missing prim/attr is a SILENT no-op (ovrtx's known silent-ignore hazard).
+#   - `MUST_EXIST`: a write to a missing prim OR attr THROWS `OVRTXError` naming the target
+#     ("path or attribute not found in stage: <prim>.<attr>") — the ONLY proven up-front
+#     validator (spike B4-4).  `bind_usd!` uses this as a fail-fast probe of the observable's
+#     current value at wire time; the per-frame flush stays on `EXISTING_ONLY`.
 function _write_attribute!(r::Renderer, prim::AbstractString, attr_name::AbstractString,
                            dtype::LibOVRTX.DLDataType, is_array::Bool, semantic,
-                           data::AbstractVector, shape::Vector{Int64})
+                           data::AbstractVector, shape::Vector{Int64};
+                           prim_mode = LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY)
     strides = Int64[1]
     prim_s   = String(prim)
     prim_ovx = LibOVRTX.ovx_string(prim_s)
@@ -769,7 +778,7 @@ function _write_attribute!(r::Renderer, prim::AbstractString, attr_name::Abstrac
             LibOVRTX.ovx_primpath_list_t(0),
             attr_lookup,
             attr_type,
-            LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
+            prim_mode,
             LibOVRTX.OVRTX_BINDING_FLAG_NONE,
         )
         bdoh  = Ref(LibOVRTX.ovrtx_binding_desc_or_handle_t(bdesc, LibOVRTX.ovrtx_attribute_binding_handle_t(0)))
@@ -805,13 +814,15 @@ end
 # ------------------------------------------------------------------
 
 """
-    write_xform!(r::Renderer, prim, mat::AbstractMatrix{Float64})
+    write_xform!(r::Renderer, prim, mat::AbstractMatrix{Float64}; prim_mode=EXISTING_ONLY)
 
 Write a 4×4 row-major transform to `prim`'s `omni:xform` (translation in the last
 row).  Reimplements the `ovrtx_set_xform_mat` inline; `mat` + `prim` GC.@preserve'd
-across the write + wait.
+across the write + wait.  `prim_mode` forwards to `_write_attribute!` — pass `MUST_EXIST`
+to fail-fast when `prim` does not exist (the `bind_usd!` prim-binding probe).
 """
-function write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Float64})
+function write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Float64};
+                      prim_mode = LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY)
     @assert size(mat) == (4, 4) "write_xform! requires a 4×4 matrix, got $(size(mat))"
 
     # Julia is column-major; transpose to row-major (16 flat Float64) for ovrtx.
@@ -820,7 +831,7 @@ function write_xform!(r::Renderer, prim::AbstractString, mat::AbstractMatrix{Flo
     # dtype kDLFloat/64/lanes=16 → the 4×4 as a single element
     dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(64), UInt16(16))
 
-    _write_attribute!(r, prim, "omni:xform", dtype, false, LibOVRTX.OVRTX_SEMANTIC_XFORM_MAT4x4, mat_rowmajor, Int64[1])
+    _write_attribute!(r, prim, "omni:xform", dtype, false, LibOVRTX.OVRTX_SEMANTIC_XFORM_MAT4x4, mat_rowmajor, Int64[1]; prim_mode)
     return nothing
 end
 
@@ -969,9 +980,35 @@ function add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::Abstra
 end
 
 """
+    add_usd_reference_from_file!(r::Renderer, layer_file, prim_path) -> ovrtx_usd_handle_t
+
+Add an on-disk USD file (`.usda`/`.usdc`) to the running stage as a reference under `prim_path`;
+return an opaque handle for `remove_usd!`.  Mirrors `add_usd_reference!` but composes FROM FILE
+(`ovrtx_add_usd_reference_from_file`) so the referenced file's own directory anchors any RELATIVE
+sub-assets — nested references, payloads, and texture `@./…@` paths (spike A: an in-memory string
+has no anchor and dangles those; a file ref resolves them).  The file's `defaultPrim` subtree
+composes onto `prim_path`.  Both strings are converted to owned `String`s and GC.@preserve'd
+across the enqueue + wait.  A non-zero handle does NOT prove the load succeeded (async); an
+execution error surfaces on the next `wait`/op.
+"""
+function add_usd_reference_from_file!(r::Renderer, layer_file::AbstractString, prim_path::AbstractString)
+    r.alive || error("add_usd_reference_from_file! on a closed Renderer")
+    file_s = String(layer_file)
+    path_s = String(prim_path)
+    h = Ref{LibOVRTX.ovrtx_usd_handle_t}(0)
+    GC.@preserve file_s path_s begin
+        enqueue_wait(r, "add_usd_reference_from_file") do
+            LibOVRTX.ovrtx_add_usd_reference_from_file(
+                r.ptr, LibOVRTX.ovx_string(file_s), LibOVRTX.ovx_string(path_s), h)
+        end
+    end
+    return h[]
+end
+
+"""
     remove_usd!(r::Renderer, handle::ovrtx_usd_handle_t) -> Nothing
 
-Remove the USD layer previously added via `add_usd_reference!`.
+Remove the USD layer previously added via `add_usd_reference!` / `add_usd_reference_from_file!`.
 """
 function remove_usd!(r::Renderer, handle::LibOVRTX.ovrtx_usd_handle_t)
     enqueue_wait(r, "remove_usd") do

@@ -303,3 +303,8 @@ include("replace_scene_test.jl")
 # race). Pure: repeat writes get distinct paths. Subprocess: the same plot rendered by two Screens
 # in one process keeps its texture on BOTH stills.
 include("texture_freshpath_test.jl")
+
+# usdplot recipe + bind_usd!: compose an external USD file as an atomic plot and tie Observables to
+# prims/attributes inside it. Pure: recipe/parsing/registry/dispatch. Subprocess: compose + render,
+# displayColor flip, prim-transform move, fail-fast bind, delete, accumulate reset suppression, up=:y.
+include("usdplot_test.jl")
