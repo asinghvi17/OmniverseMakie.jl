@@ -84,11 +84,88 @@ function usda_matrix4d(model)
 end
 
 # ------------------------------------------------------------------
+# Face flattening + non-allocating number streaming (B7 authoring-path allocations)
+# ------------------------------------------------------------------
+
+"""
+    _flat_faces(faces) -> (counts::Vector{Int}, indices::Vector{Int})
+
+Flatten an iterable of faces (each an iterable of vertex indices) ONCE into USD's
+`(faceVertexCounts, faceVertexIndices)` pair. `indices` are 0-based: `GeometryBasics.raw`
+yields the 0-based index from an `OffsetInteger` face vertex (Makie/GeometryBasics faces)
+and is identity on a plain `Integer` (a surface re-mesh / merged-marker index is already
+0-based). Replaces three identical per-face `Int[Int(GeometryBasics.raw(i)) for i in f]`
+comprehensions that allocated one `Int[]` per face only for the emitter to re-flatten.
+"""
+function _flat_faces(faces)
+    counts = Vector{Int}(undef, length(faces))
+    total  = 0
+    for (k, f) in enumerate(faces)
+        c = length(f); counts[k] = c; total += c
+    end
+    indices = Vector{Int}(undef, total)
+    t = 0
+    for f in faces, i in f
+        indices[t += 1] = Int(GeometryBasics.raw(i))
+    end
+    return counts, indices
+end
+
+# Julia 1.12's `print(io, ::Float32/::Int)` allocates a StringVector PER call (via `Ryu.show`
+# / `string`), which alone caps the streaming win near ~1.6×. `_emit_f32!`/`_emit_int!` write
+# the SAME bytes as `string(x)` into a REUSED `scratch` buffer instead — Ryu shortest for
+# Float32 (verified byte-identical incl. Inf/NaN), plain decimal for Int — so a whole number
+# list streams with no per-element allocation. `scratch` (64 B) exceeds the longest Float32/
+# Int64 token.
+@inline function _emit_f32!(io::IO, scratch::Vector{UInt8}, x::Float32)
+    pos = Base.Ryu.writeshortest(scratch, 1, x)          # x's shortest form at scratch[1:pos-1]
+    GC.@preserve scratch unsafe_write(io, pointer(scratch), pos - 1)
+    return
+end
+@inline function _emit_int!(io::IO, scratch::Vector{UInt8}, n::Integer)
+    x = Int(n)
+    x < 0 && (write(io, 0x2d); x = -x)                   # '-'
+    x == 0 && (write(io, 0x30); return)                  # '0'
+    ndig = 0; t = x
+    while t > 0; ndig += 1; t ÷= 10; end
+    t = x
+    @inbounds for j in ndig:-1:1
+        scratch[j] = 0x30 + (t % 10) % UInt8; t ÷= 10
+    end
+    GC.@preserve scratch unsafe_write(io, pointer(scratch), ndig)
+    return
+end
+
+# Stream `(x, y, z), (x, y, z), …` (each component emitted Float32) into `io` — byte-identical
+# to `join(["($(Float32(p[1])), …)" for p in items], ", ")` without the per-element String.
+function _emit_vec3_list!(io::IO, scratch::Vector{UInt8}, items)
+    first = true
+    for p in items
+        first ? (first = false) : print(io, ", ")
+        print(io, "(")
+        _emit_f32!(io, scratch, Float32(p[1])); print(io, ", ")
+        _emit_f32!(io, scratch, Float32(p[2])); print(io, ", ")
+        _emit_f32!(io, scratch, Float32(p[3])); print(io, ")")
+    end
+    return
+end
+
+# Stream `a, b, c, …` (decimal Ints) into `io` — byte-identical to `join(string.(xs), ", ")`.
+function _emit_int_list!(io::IO, scratch::Vector{UInt8}, xs)
+    first = true
+    for x in xs
+        first ? (first = false) : print(io, ", ")
+        _emit_int!(io, scratch, x)
+    end
+    return
+end
+
+# ------------------------------------------------------------------
 # usda_mesh — emit a standalone UsdGeomMesh USDA layer (M1.5 uses)
 # ------------------------------------------------------------------
 
 """
-    usda_mesh(points, faces, normals, displaycolor; model=I₄,
+    usda_mesh(points, face_counts, face_indices, normals, displaycolor; model=I₄,
               normal_interpolation="faceVarying", color_interpolation="constant",
               texcoords=nothing, texcoord_interpolation="vertex") -> String
 
@@ -96,7 +173,8 @@ Self-contained USDA layer with one `UsdGeomMesh` at `defaultPrim="mesh"` (for
 `OV.add_usd_reference!`). Returns the layer string.
 
 - `points`: 3-element positions (emitted Float32).
-- `faces`: index iterables, any arity; indices must be 0-based (USD convention).
+- `face_counts` / `face_indices`: flat `faceVertexCounts` + 0-based `faceVertexIndices`
+  (built ONCE by `_flat_faces`; the emitter no longer re-flattens per-face `Int[]`s).
 - `normals`: one per face-vertex ("faceVarying") or per vertex ("vertex").
 - `displaycolor`: one `(r,g,b)` (constant) OR a `Vector` of `(r,g,b)` (per-vertex);
   `nothing` OMITS `primvars:displayColor` so a bound OmniPBR material governs
@@ -105,26 +183,21 @@ Self-contained USDA layer with one `UsdGeomMesh` at `defaultPrim="mesh"` (for
 - `texcoords`: per-vertex `(u,v)` UVs → `primvars:st` for an OmniPBR `*_texture`
   input (M3.3); `nothing` OMITS `st`. Interpolation kwargs match the payload.
 
-The `nothing`/no-texcoords emit is byte-for-byte the earlier output (regression guard).
+Every number list streams through one reused `IOBuffer` (no per-element String/join); the
+`nothing`/no-texcoords emit is byte-for-byte the earlier output (regression guard).
 """
-function usda_mesh(points, faces, normals, displaycolor;
+function usda_mesh(points, face_counts, face_indices, normals, displaycolor;
                    model = Matrix{Float64}(LinearAlgebra.I, 4, 4),
                    normal_interpolation::AbstractString = "faceVarying",
                    color_interpolation::AbstractString  = "constant",
                    texcoords = nothing,
                    texcoord_interpolation::AbstractString = "vertex")
-    pts_str = join(
-        ["($(Float32(p[1])), $(Float32(p[2])), $(Float32(p[3])))" for p in points], ", ")
-
-    # Face vertex counts + flattened 0-based indices.
-    face_counts  = [length(f) for f in faces]
-    face_indices = [idx for f in faces for idx in f]
-    face_counts_str  = join(string.(face_counts), ", ")
-    face_indices_str = join(string.(face_indices), ", ")
-
-    # Normals: per face-vertex (faceVarying) or per vertex.
-    nrm_str = join(
-        ["($(Float32(n[1])), $(Float32(n[2])), $(Float32(n[3])))" for n in normals], ", ")
+    # One IOBuffer + one scratch buffer, reused across every number list (take! resets the buffer).
+    io = IOBuffer(); scratch = Vector{UInt8}(undef, 64)
+    _emit_vec3_list!(io, scratch, points);      pts_str          = String(take!(io))
+    _emit_vec3_list!(io, scratch, normals);     nrm_str          = String(take!(io))
+    _emit_int_list!(io, scratch, face_counts);  face_counts_str  = String(take!(io))
+    _emit_int_list!(io, scratch, face_indices); face_indices_str = String(take!(io))
 
     # displayColor block: single constant or per-vertex vector. `nothing` (a
     # MATERIALIZED plot, M3.2) OMITS it so the bound OmniPBR material governs shading.

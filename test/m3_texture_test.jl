@@ -74,8 +74,8 @@ const GeometryBasics = OmniverseMakie.GeometryBasics
     fcs = [[0, 1, 2]]
     nrm = [(0f0, 0f0, 1f0) for _ in 1:3]
     tc  = [Vec2f(0, 0), Vec2f(1, 0), Vec2f(1, 1)]
-    @test !occursin("primvars:st", OmniverseMakie.usda_mesh(pts, fcs, nrm, nothing))
-    with_st = OmniverseMakie.usda_mesh(pts, fcs, nrm, nothing; texcoords = tc)
+    @test !occursin("primvars:st", OmniverseMakie.usda_mesh(pts, OmniverseMakie._flat_faces(fcs)..., nrm, nothing))
+    with_st = OmniverseMakie.usda_mesh(pts, OmniverseMakie._flat_faces(fcs)..., nrm, nothing; texcoords = tc)
     @test occursin("texCoord2f[] primvars:st", with_st)
     @test occursin("interpolation = \"vertex\"", with_st)
 end

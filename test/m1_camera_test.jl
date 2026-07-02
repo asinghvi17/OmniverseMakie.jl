@@ -51,7 +51,7 @@ cube_nrm = vcat(
     fill(( -1f0,  0f0,  0f0), 4),   # left   (-X)
     fill((  1f0,  0f0,  0f0), 4),   # right  (+X)
 )
-cube_usda = OmniverseMakie.usda_mesh(cube_pts, cube_faces, cube_nrm, (1f0, 0.5f0, 0f0))
+cube_usda = OmniverseMakie.usda_mesh(cube_pts, OmniverseMakie._flat_faces(cube_faces)..., cube_nrm, (1f0, 0.5f0, 0f0))
 
 # ---------------------------------------------------------------------------
 # Screen

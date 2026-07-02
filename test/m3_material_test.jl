@@ -107,9 +107,9 @@ end
     # the M1 emitters); the materialized path (nothing sentinel) OMITS it.
     pts = [(0f0, 0f0, 0f0)]; fcs = [[0]]; nrm = [(0f0, 0f0, 1f0)]
     @test occursin("primvars:displayColor",
-                   OmniverseMakie.usda_mesh(pts, fcs, nrm, (1f0, 0f0, 0f0)))
+                   OmniverseMakie.usda_mesh(pts, OmniverseMakie._flat_faces(fcs)..., nrm, (1f0, 0f0, 0f0)))
     @test !occursin("primvars:displayColor",
-                    OmniverseMakie.usda_mesh(pts, fcs, nrm, nothing))
+                    OmniverseMakie.usda_mesh(pts, OmniverseMakie._flat_faces(fcs)..., nrm, nothing))
 end
 
 const _M32_COMPOSE_PROG = read(joinpath(@__DIR__, "m3_material_compose_prog.jl"), String)
@@ -187,9 +187,9 @@ end
     @test occursin("primvars:displayColor", OmniverseMakie._sphere_proto_body((1f0, 0f0, 0f0)))
     @test !occursin("primvars:displayColor", OmniverseMakie._sphere_proto_body(nothing))
     @test occursin("primvars:displayColor",
-                   OmniverseMakie._mesh_proto_body(cpts, [[0, 1]], [(0f0,0f0,1f0),(0f0,0f0,1f0)], (1f0,0f0,0f0)))
+                   OmniverseMakie._mesh_proto_body(cpts, OmniverseMakie._flat_faces([[0, 1]])..., [(0f0,0f0,1f0),(0f0,0f0,1f0)], (1f0,0f0,0f0)))
     @test !occursin("primvars:displayColor",
-                    OmniverseMakie._mesh_proto_body(cpts, [[0, 1]], [(0f0,0f0,1f0),(0f0,0f0,1f0)], nothing))
+                    OmniverseMakie._mesh_proto_body(cpts, OmniverseMakie._flat_faces([[0, 1]])..., [(0f0,0f0,1f0),(0f0,0f0,1f0)], nothing))
 end
 
 @testset "M3.5 emissive/opacity BOOL enable gates + emissive_intensity (unit)" begin

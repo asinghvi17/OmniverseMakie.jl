@@ -93,7 +93,7 @@ cube_nrm = vcat(
     fill((  1f0,  0f0,  0f0), 4),
 )
 # Grey cube so colour doesn't interfere with luminance comparison.
-cube_usda = OmniverseMakie.usda_mesh(cube_pts, cube_faces, cube_nrm, (0.8f0, 0.8f0, 0.8f0))
+cube_usda = OmniverseMakie.usda_mesh(cube_pts, OmniverseMakie._flat_faces(cube_faces)..., cube_nrm, (0.8f0, 0.8f0, 0.8f0))
 
 # ---- Luminance helper: mean over non-background pixels ----
 function mean_lum_nonblack(img)

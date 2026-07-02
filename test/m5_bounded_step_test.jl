@@ -9,7 +9,7 @@ mesh!(scene, Rect3f(Point3f(0), Vec3f(1)); color = :red)
 screen = OM.Screen(scene)
 OM.author_root_from_scene!(screen, scene; resolution = screen.fb_size)
 OM.OV.add_usd_reference!(screen.renderer, OM.usda_mesh(
-    [(0f0,0f0,0f0),(1f0,0f0,0f0),(1f0,1f0,0f0)], [[0,1,2]],
+    [(0f0,0f0,0f0),(1f0,0f0,0f0),(1f0,1f0,0f0)], OM._flat_faces([[0,1,2]])...,
     [(0f0,0f0,1f0) for _ in 1:3], (1f0,0f0,0f0)), "/World/m")
 # A generous bounded step completes normally and returns a closeable StepResult.
 sr = OV.step!(screen.renderer, screen.product; timeout_ns = UInt64(60_000_000_000))

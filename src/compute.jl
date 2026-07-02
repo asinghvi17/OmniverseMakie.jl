@@ -27,14 +27,14 @@ stage.  Fields:
 mutable struct OvrtxRObj
     prim_path::String
     usd_handle::UInt64
-    bindings::Dict{Symbol,Any}
+    bindings::Dict{Symbol,OV.Binding}   # values are ALWAYS OV.create_binding results (B7: kills a dispatch/live write)
     material_shader::Union{String,Nothing}
     plot::Union{Nothing,Makie.AbstractPlot}
     meta::Dict{Symbol,Any}
 end
 
 OvrtxRObj(prim_path::AbstractString, usd_handle::Integer) =
-    OvrtxRObj(String(prim_path), UInt64(usd_handle), Dict{Symbol,Any}(), nothing, nothing,
+    OvrtxRObj(String(prim_path), UInt64(usd_handle), Dict{Symbol,OV.Binding}(), nothing, nothing,
               Dict{Symbol,Any}())
 
 # ==================================================================
@@ -185,7 +185,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
     points  = args[:positions_transformed_f32c]
     isempty(points) && return nothing
     normals = args[:normals]
-    face_indices = [Int[Int(GeometryBasics.raw(i)) for i in f] for f in args[:faces]]
+    face_counts, face_indices = _flat_faces(args[:faces])   # flatten ONCE (B7; was a per-face Int[])
     path    = plot_prim_path(screen.scene2scope, scene, plot)
 
     if is_materialized(plot)
@@ -194,7 +194,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
         # takes).  M3.3: a textured material samples the mesh's `st` UV primvar → author it from
         # the plot's per-vertex `:texturecoordinates` (read directly; NOT a tracked diff output).
         texcoords = _texcoords_for(plot, length(points))
-        usda = usda_mesh(points, face_indices, normals, nothing;
+        usda = usda_mesh(points, face_counts, face_indices, normals, nothing;
                          model                = args[:model_f32c],
                          normal_interpolation = "vertex",
                          texcoords            = texcoords)
@@ -203,7 +203,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Mesh, args)
 
     # Non-materialized: the M1 USD-native `displayColor` path, byte-unchanged.
     values, interp = _scaled_to_display(plot, args[:scaled_color], length(points))
-    usda = usda_mesh(points, face_indices, normals, values;
+    usda = usda_mesh(points, face_counts, face_indices, normals, values;
                      model                = args[:model_f32c],
                      normal_interpolation = "vertex",
                      color_interpolation  = interp)
@@ -225,9 +225,9 @@ function author_usd_prim!(screen, scene, plot::Makie.Scatter, args)
         sphere_mesh    = GeometryBasics.normal_mesh(GeometryBasics.Tesselation(GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 16))
         sphere_pts     = GeometryBasics.coordinates(sphere_mesh)
         sphere_normals = GeometryBasics.normals(sphere_mesh)
-        sphere_faces   = [Int[Int(GeometryBasics.raw(i)) for i in f] for f in GeometryBasics.faces(sphere_mesh)]
-        merged_pts, merged_faces, merged_normals = _merged_instances_mesh(sphere_pts, sphere_faces, sphere_normals, pos, scales, nothing)
-        usda = usda_mesh(merged_pts, merged_faces, merged_normals, nothing; model = args[:model_f32c], normal_interpolation = "vertex")
+        sphere_counts, sphere_indices = _flat_faces(GeometryBasics.faces(sphere_mesh))
+        merged_pts, merged_counts, merged_indices, merged_normals = _merged_instances_mesh(sphere_pts, sphere_counts, sphere_indices, sphere_normals, pos, scales, nothing)
+        usda = usda_mesh(merged_pts, merged_counts, merged_indices, merged_normals, nothing; model = args[:model_f32c], normal_interpolation = "vertex")
         return _add_materialized_reference!(screen, path, usda, plot)
     end
     values, interp = _scaled_to_display(plot, args[:scaled_color], n)
@@ -249,7 +249,7 @@ function author_usd_prim!(screen, scene, plot::Makie.MeshScatter, args)
     marker_mesh    = marker isa GeometryBasics.Mesh ? marker : GeometryBasics.mesh(marker)
     marker_pts     = GeometryBasics.coordinates(marker_mesh)
     marker_normals = GeometryBasics.normals(marker_mesh)
-    marker_faces   = [Int[Int(GeometryBasics.raw(i)) for i in f] for f in GeometryBasics.faces(marker_mesh)]
+    marker_counts, marker_indices = _flat_faces(GeometryBasics.faces(marker_mesh))
     scales       = _scales_for(plot.markersize[], n)
     orientations = _orientations_for(plot.rotation[], n)
     path         = plot_prim_path(screen.scene2scope, scene, plot)
@@ -258,14 +258,14 @@ function author_usd_prim!(screen, scene, plot::Makie.MeshScatter, args)
         # meshscatter renders as ONE merged `UsdGeomMesh` of the marker copies (documented
         # fallback) — WITHOUT `displayColor`, BOUND to the pre-authored material.
         # `material_shader` wires the M3.4 live path.
-        merged_pts, merged_faces, merged_normals = _merged_instances_mesh(marker_pts, marker_faces, marker_normals, pos, scales, orientations)
-        usda = usda_mesh(merged_pts, merged_faces, merged_normals, nothing; model = args[:model_f32c], normal_interpolation = "vertex")
+        merged_pts, merged_counts, merged_indices, merged_normals = _merged_instances_mesh(marker_pts, marker_counts, marker_indices, marker_normals, pos, scales, orientations)
+        usda = usda_mesh(merged_pts, merged_counts, merged_indices, merged_normals, nothing; model = args[:model_f32c], normal_interpolation = "vertex")
         return _add_materialized_reference!(screen, path, usda, plot)
     end
     values, interp = _scaled_to_display(plot, args[:scaled_color], n)
     proto_color     = interp == "constant" ? values  : nothing
     instancer_color = interp == "constant" ? nothing : values
-    proto = _mesh_proto_body(marker_pts, marker_faces, marker_normals, proto_color)
+    proto = _mesh_proto_body(marker_pts, marker_counts, marker_indices, marker_normals, proto_color)
     usda  = _usda_pointinstancer(pos, scales, orientations, instancer_color, proto;
                                  model = args[:model_f32c])
     h = OV.add_usd_reference!(screen.renderer, usda, path)
@@ -430,12 +430,15 @@ function _push_faces!(r, prim, faces)
     return nothing
 end
 
-# M2.4 hot path: flatten a resolved positions output into an owned Float32 buffer and write it
-# through the persistent `point3f[]` array binding (one element per point; `shape = [npoints]`).
-# Mirrors `write_array_attribute!`'s `reinterpret(Float32, …)` so lanes/shape match the bound type.
+# M2.4 hot path: write a resolved positions output through the persistent `point3f[]` array
+# binding (one element per point; `shape = [npoints]`, 3 lanes per the bound dtype).  B7: write
+# the reinterpreted Float32 VIEW directly — no full-buffer `collect` copy.  `write_binding!` takes
+# `pointer(data)` under `GC.@preserve data`, and `pointer()` on a `ReinterpretArray` over a
+# `Vector` returns the parent buffer's pointer (VERIFIED equal to the parent's), while preserving
+# the view keeps its parent `src` rooted across the ccall.
 function _push_points_binding!(binding, pts::AbstractVector)
     src  = pts isa Vector ? pts : collect(pts)
-    data = collect(reinterpret(Float32, src))
+    data = reinterpret(Float32, src)
     OV.write_binding!(binding, data, Int64[length(src)])
     return nothing
 end

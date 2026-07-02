@@ -25,8 +25,21 @@
 # (x, y, z) Float32 tuple from any 2- or 3-element point (Point2 → z = 0).
 _point3f(p) = (Float32(p[1]), Float32(p[2]), Float32(length(p) >= 3 ? p[3] : 0.0f0))
 
-# Join a sequence of points as USD `point3f[]` body text: "(x, y, z), (x, y, z), ...".
-_point3f_list(pts) = join(["($(c[1]), $(c[2]), $(c[3]))" for c in (_point3f(p) for p in pts)], ", ")
+# USD `point3f[]` body text `(x, y, z), (x, y, z), …` for a sequence of points (2-D → z=0),
+# streamed through one reused IOBuffer (no per-element String/join; B7).  Byte-identical to the
+# prior `join([...])`.
+function _point3f_list(pts)
+    io = IOBuffer(); scratch = Vector{UInt8}(undef, 64); first = true
+    for p in pts
+        c = _point3f(p)
+        first ? (first = false) : print(io, ", ")
+        print(io, "(")
+        _emit_f32!(io, scratch, c[1]); print(io, ", ")
+        _emit_f32!(io, scratch, c[2]); print(io, ", ")
+        _emit_f32!(io, scratch, c[3]); print(io, ")")
+    end
+    return String(take!(io))
+end
 
 # Per-instance (sx, sy, sz) scale from one markersize element (a scalar or a Vec).
 _scale_tuple(s::Real) = (Float32(s), Float32(s), Float32(s))
@@ -162,12 +175,14 @@ function _sphere_proto_body(color_const)
 $(col)    }"""
 end
 
-# `def Mesh "proto" { ... }` body from an explicit mesh (4-space indented).
-# `color_const === nothing` (a materialized instancer) OMITS displayColor.
-function _mesh_proto_body(points, faces0, normals, color_const)
-    counts_str  = join(string.([length(f) for f in faces0]), ", ")
-    indices_str = join(string.([i for f in faces0 for i in f]), ", ")
-    normals_str = join(["($(Float32(n[1])), $(Float32(n[2])), $(Float32(n[3])))" for n in normals], ", ")
+# `def Mesh "proto" { ... }` body from an explicit mesh (4-space indented).  `face_counts`/
+# `face_indices` are flat (from `_flat_faces`); `color_const === nothing` (a materialized
+# instancer) OMITS displayColor.  Number lists stream through one reused IOBuffer (B7).
+function _mesh_proto_body(points, face_counts, face_indices, normals, color_const)
+    io = IOBuffer(); scratch = Vector{UInt8}(undef, 64)
+    _emit_int_list!(io, scratch, face_counts);  counts_str  = String(take!(io))
+    _emit_int_list!(io, scratch, face_indices); indices_str = String(take!(io))
+    _emit_vec3_list!(io, scratch, normals);     normals_str = String(take!(io))
     col = color_const === nothing ? "" : """
         color3f[] primvars:displayColor = [($(Float32(color_const[1])), $(Float32(color_const[2])), $(Float32(color_const[3])))] (
             interpolation = "constant"
@@ -203,12 +218,16 @@ function _quat_rotate(q, v)
             vz + w * tz + (x * ty - y * tx))
 end
 
-# Concatenate the marker mesh (`mpts`/`mfaces` 0-based/`mnrm`) transformed to each
-# instance (per-instance `scales`, optional `orientations` quaternions, `positions`)
-# into ONE (points, 0-based faces, normals) mesh.
-function _merged_instances_mesh(mpts, mfaces, mnrm, positions, scales, orientations)
-    P = Point3f[]; N = Vec3f[]; F = Vector{Int}[]
-    nmark = length(mpts)
+# Concatenate the marker mesh (`mpts`/`mnrm` + flat `mcounts`/`mindices` 0-based) transformed to
+# each instance (per-instance `scales`, optional `orientations` quaternions, `positions`) into ONE
+# mesh, returned as flat `(points, face_counts, face_indices, normals)` for `usda_mesh`.  Every
+# instance has the SAME topology, so `counts` repeats `mcounts` and `indices` is `mindices` shifted
+# by that instance's base vertex.  `sizehint!` pre-sizes all four accumulators (B7).
+function _merged_instances_mesh(mpts, mcounts, mindices, mnrm, positions, scales, orientations)
+    nmark = length(mpts); ninst = length(positions)
+    P = Point3f[]; N = Vec3f[]; counts = Int[]; indices = Int[]
+    sizehint!(P, nmark * ninst);            sizehint!(N, nmark * ninst)
+    sizehint!(counts, length(mcounts) * ninst); sizehint!(indices, length(mindices) * ninst)
     for i in eachindex(positions)
         s = scales[i]; pos = positions[i]
         q = orientations === nothing ? nothing : orientations[i]
@@ -222,11 +241,12 @@ function _merged_instances_mesh(mpts, mfaces, mnrm, positions, scales, orientati
             rotated_nrm = q === nothing ? (Float32(marker_nrm[1]), Float32(marker_nrm[2]), Float32(marker_nrm[3])) : _quat_rotate(q, marker_nrm)
             push!(N, Vec3f(rotated_nrm[1], rotated_nrm[2], rotated_nrm[3]))
         end
-        for f in mfaces
-            push!(F, Int[off + idx for idx in f])
+        append!(counts, mcounts)
+        for idx in mindices
+            push!(indices, off + idx)
         end
     end
-    return P, F, N
+    return P, counts, indices, N
 end
 
 # Author a complete PointInstancer reference layer around `proto_body`.
@@ -401,6 +421,7 @@ function to_ovrtx_object(screen, scene, plot::Makie.Surface)
 
     points, faces0, normals = _surface_mesh(xs, ys, zs)
     isempty(faces0) && return nothing
+    face_counts, face_indices = _flat_faces(faces0)   # flatten ONCE for usda_mesh
     path = plot_prim_path(screen.scene2scope, scene, plot)
 
     if is_materialized(plot)
@@ -409,7 +430,7 @@ function to_ovrtx_object(screen, scene, plot::Makie.Surface)
         # register_ovrtx_robj!) governs shading.  A TEXTURED surface needs the
         # grid's st UVs, else the diffuse_texture samples nothing -> white.
         texcoords = _needs_texcoords(plot) ? _surface_texcoords(size(zs)...) : nothing
-        usda = usda_mesh(points, faces0, normals, nothing;
+        usda = usda_mesh(points, face_counts, face_indices, normals, nothing;
                          model                = plot.model[],
                          normal_interpolation = "vertex",
                          texcoords            = texcoords)
@@ -417,7 +438,7 @@ function to_ovrtx_object(screen, scene, plot::Makie.Surface)
     end
 
     values, interp = _surface_colors(plot, zs)
-    usda = usda_mesh(points, faces0, normals, values;
+    usda = usda_mesh(points, face_counts, face_indices, normals, values;
                      model                = plot.model[],
                      normal_interpolation = "vertex",
                      color_interpolation  = interp)

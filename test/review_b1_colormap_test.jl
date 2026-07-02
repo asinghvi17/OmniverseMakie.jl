@@ -59,7 +59,7 @@ const _GOLDEN_SCATTER_VALS = NTuple{3,Float32}[
     p = surface!(ls, xs, ys, zs; colormap = :viridis, colorrange = (0.0, 1.0))
     pts, faces0, nrms = OM._surface_mesh(xs, ys, zs)
     vals, interp = OM._surface_colors(p, zs)
-    usda = OM.usda_mesh(pts, faces0, nrms, vals;
+    usda = OM.usda_mesh(pts, OM._flat_faces(faces0)..., nrms, vals;
                         model = p.model[], normal_interpolation = "vertex",
                         color_interpolation = interp)
     @test interp == "vertex"
