@@ -1,6 +1,9 @@
 # NanoVDBWriter.jl — dense `Array{Float32,3}` → uncompressed (`Codec::NONE`),
 # major-version-32 NanoVDB (`.nvdb`) file that NVIDIA IndeX (via ovrtx) renders.
 #
+# The optional ZIP-codec path (Hikari's `compress_zlib` zlib FFI) was removed as
+# dead code — this writer emits `Codec::NONE` only; it lives in git history.
+#
 # ── ATTRIBUTION (license requirement — keep) ─────────────────────────────────
 # The byte-level tree serialisation (`build_nanovdb_from_dense`, `save_nanovdb`
 # grid authoring, the coord hashers, `write_buf!`/`bitmask_set!`) is LIFTED from
@@ -26,7 +29,6 @@ module NanoVDBWriter
 
 using GeometryBasics: Point3f, Vec3f
 using Base: ENDIAN_BOM
-import Zlib_jll
 
 export save_nanovdb
 
@@ -615,36 +617,6 @@ background `0f0`.  `origin`/`extent` accept `Point3f`/`Vec3f` (voxel size =
 function save_nanovdb(path::AbstractString, data::Array{Float32,3}, origin, extent)
     buffer, metadata = build_nanovdb_from_dense(data, Point3f(origin...), Vec3f(extent...))
     return save_nanovdb(path, buffer, metadata)
-end
-
-# ============================================================================
-# zlib FFI — LIFTED from Hikari (kept available for a future ZIP-codec path; the
-# default `save_nanovdb` above writes Codec::NONE and does NOT call this).
-# ============================================================================
-
-mutable struct ZStream
-    next_in::Ptr{UInt8};  avail_in::Cuint;  total_in::Culong
-    next_out::Ptr{UInt8}; avail_out::Cuint; total_out::Culong
-    msg::Ptr{Cchar};      state::Ptr{Cvoid}
-    zalloc::Ptr{Cvoid};   zfree::Ptr{Cvoid}; opaque::Ptr{Cvoid}
-    data_type::Cint;      adler::Culong;     reserved::Culong
-end
-ZStream() = ZStream(C_NULL, 0, 0, C_NULL, 0, 0, C_NULL, C_NULL, C_NULL, C_NULL, C_NULL, 0, 0, 0)
-
-function compress_zlib(data::Vector{UInt8})
-    out_buf = Vector{UInt8}(undef, length(data) + div(length(data), 100) + 1024)
-    z = Ref(ZStream())
-    z[].next_in = pointer(data);     z[].avail_in = length(data)
-    z[].next_out = pointer(out_buf); z[].avail_out = length(out_buf)
-    ret = ccall((:deflateInit_, Zlib_jll.libz), Cint,
-        (Ref{ZStream}, Cint, Cstring, Cint), z, 6, "1.2.11", sizeof(ZStream))
-    ret != 0 && error("deflateInit failed: $ret")
-    GC.@preserve data out_buf begin
-        ccall((:deflate, Zlib_jll.libz), Cint, (Ref{ZStream}, Cint), z, 4)  # Z_FINISH
-    end
-    compressed_size = z[].total_out
-    ccall((:deflateEnd, Zlib_jll.libz), Cint, (Ref{ZStream},), z)
-    return out_buf[1:compressed_size]
 end
 
 # ============================================================================

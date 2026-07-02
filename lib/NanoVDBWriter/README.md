@@ -46,5 +46,6 @@ compatibility.
 
 ## Dependencies
 
-`GeometryBasics` (for `Point3f`/`Vec3f`) and `Zlib_jll` (the `compress_zlib` helper is lifted and
-kept available for a future ZIP-codec path; the default writer is `Codec::NONE` and does not use it).
+`GeometryBasics` (for `Point3f`/`Vec3f`) is the only runtime dependency. (A lifted `compress_zlib`
+zlib FFI for an optional ZIP-codec path was removed as dead code — the writer is `Codec::NONE` only;
+it lives in git history.)
