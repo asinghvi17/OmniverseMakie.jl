@@ -1052,7 +1052,7 @@ function create_binding(r::Renderer, prim::AbstractString, name::AbstractString,
     end
     b = Binding(r, handle[], prim_s, name_s, dtype, array, semantic,
                 LibOVRTX.ovrtx_map_handle_t(0), true)
-    finalizer(destroy!, b)
+    finalizer(b -> destroy!(b; from_finalizer=true), b)
     return b
 end
 
@@ -1076,16 +1076,39 @@ function map_binding(b::Binding; device=LibOVRTX.kDLCPU, device_id::Integer=0)
     return Ptr{Cvoid}(m.dl.data)
 end
 
-"""
-    unmap!(b::Binding)
+# Finalizer-path teardown must not wedge GC and must never let an error escape (a throw would
+# abort the finalizer before we clear `alive`, and finalizers must not throw).  So the
+# finalizer path (from_finalizer=true) waits under this FINITE bound instead of INFINITE and
+# swallows any failure — 5 s is generous for a normal unmap/destroy yet keeps GC bounded.
+const _FINALIZER_TIMEOUT_NS = UInt64(5_000_000_000)
 
-Commit + release a `map_binding` mapping (async unmap + wait).  No-op when not mapped
-or the Renderer is closed.
+# Bindings whose finalizer-path teardown swallowed an error (a leaked GPU handle — the
+# renderer close frees the whole pool regardless).  A bare counter, NOT a @warn: logging from
+# a finalizer would build a String and do I/O, both of which task-switch (illegal there).
+const _BINDING_FINALIZER_LEAKS = Ref{Int}(0)
+
 """
-function unmap!(b::Binding)
+    binding_finalizer_leak_count() -> Int
+
+How many `Binding`s had their GC-finalizer teardown swallow an ovrtx error (handle leaked,
+reclaimed at renderer close).  Observability for the otherwise-silent finalizer path.
+"""
+binding_finalizer_leak_count() = _BINDING_FINALIZER_LEAKS[]
+
+"""
+    unmap!(b::Binding; from_finalizer::Bool=false)
+
+Commit + release a `map_binding` mapping (async unmap + wait).  No-op when not mapped or the
+Renderer is closed.  `from_finalizer=true` bounds the wait (`_FINALIZER_TIMEOUT_NS`) for the
+GC-finalizer teardown path, where the caller (`destroy!`) swallows any resulting error.
+"""
+function unmap!(b::Binding; from_finalizer::Bool=false)
     b.map_handle == 0 && return nothing
-    b.r.alive && enqueue_wait(b.r, "unmap_attribute") do
-        LibOVRTX.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, LibOVRTX.NOSYNC)
+    if b.r.alive
+        timeout_ns = from_finalizer ? _FINALIZER_TIMEOUT_NS : _TIMEOUT_INFINITE_NS
+        enqueue_wait(b.r, "unmap_attribute"; timeout_ns) do
+            LibOVRTX.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, LibOVRTX.NOSYNC)
+        end
     end
     b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
     return nothing
@@ -1141,22 +1164,46 @@ function write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
     return nothing
 end
 
-"""
-    destroy!(b::Binding)
-
-Release the persistent binding (`ovrtx_destroy_attribute_binding`).  Idempotent;
-unmaps first if mapped; no-op once the Renderer is closed (GPU pool already freed).
-"""
-function destroy!(b::Binding)
-    b.alive || return nothing
-    if b.r.alive
-        b.map_handle == 0 || unmap!(b)
-        enqueue_wait(b.r, "destroy_attribute_binding") do
-            LibOVRTX.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle)
-        end
+# The ovrtx side of teardown: unmap-if-mapped, then destroy the handle, waiting under
+# `timeout_ns`.  NO flag-clearing here — `destroy!` owns `alive`/`map_handle`, so its throwing
+# and swallowing paths share this.  No-op once the Renderer is closed (GPU pool already freed).
+function _destroy_binding_ovrtx!(b::Binding, timeout_ns::UInt64, from_finalizer::Bool)
+    b.r.alive || return nothing
+    b.map_handle == 0 || unmap!(b; from_finalizer)
+    enqueue_wait(b.r, "destroy_attribute_binding"; timeout_ns) do
+        LibOVRTX.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle)
     end
-    b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
-    b.alive = false
+    return nothing
+end
+
+"""
+    destroy!(b::Binding; from_finalizer::Bool=false)
+
+Release the persistent binding (`ovrtx_destroy_attribute_binding`).  Idempotent; unmaps
+first if mapped; no-op once the Renderer is closed.
+
+Explicit calls wait INFINITE and propagate ovrtx errors.  The GC finalizer registers
+`from_finalizer=true`: that path waits under `_FINALIZER_TIMEOUT_NS` and swallows any error
+AFTER marking the binding dead (`alive=false`, `map_handle=0`) — leaking one handle beats
+wedging GC on a stuck queue or throwing out of a finalizer, and renderer close frees the
+pool.  Each swallowed error bumps `binding_finalizer_leak_count()`.
+"""
+function destroy!(b::Binding; from_finalizer::Bool=false)
+    b.alive || return nothing
+    if from_finalizer
+        try
+            _destroy_binding_ovrtx!(b, _FINALIZER_TIMEOUT_NS, true)
+        catch
+            _BINDING_FINALIZER_LEAKS[] += 1
+        finally
+            b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
+            b.alive = false
+        end
+    else
+        _destroy_binding_ovrtx!(b, _TIMEOUT_INFINITE_NS, false)
+        b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
+        b.alive = false
+    end
     return nothing
 end
 

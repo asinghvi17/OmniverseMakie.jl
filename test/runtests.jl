@@ -186,3 +186,11 @@ include("a2_readback_test.jl")
 # remove_usd! (plot delete/insert, empty!, volume reload) and rebuilt lazily on the next pick;
 # a pick after delete+re-add resolves the NEW plot, not a stale dictionary (subprocess).
 include("a3_resolver_test.jl")
+
+# Review Track A / Task A4 — GC-safe Binding finalizer + ovx_string SubString fix: the
+# finalizer registers destroy!(; from_finalizer=true), which bounds its wait + swallows errors
+# after force-marking the binding dead (leak-count observability); ovx_string routes non-String
+# AbstractStrings through String(s) (the SubString branch was a guaranteed MethodError) while a
+# plain String stays zero-copy.  Both testsets are PURE (no GPU): ovx_string round-trip + the
+# destroy! flag paths on a hand-built closed Renderer (ccall teardown stays on m2_binding/m2_delete).
+include("a4_binding_string_test.jl")
