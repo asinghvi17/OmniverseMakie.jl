@@ -8,9 +8,10 @@
 
 using Test
 
+include("helpers.jl")
+
 const _VDB  = "/home/juliahub/.local/share/ov/data/exts/v2/omni.rtx.index_composite-718bb6a388c21baf/data/tests/volumes/torus.vdb"
-const _LIBS = get(ENV, "OMNIVERSEMAKIE_INDEX_LIBS",
-                  "/home/juliahub/.local/share/ov/data/exts/v2/omni.index.libs-1287db94366cf6fe")
+const _LIBS = _HELPER_INDEX_LIBS
 
 const _VOL_RENDER_PROG = """
 using OmniverseMakie
@@ -31,13 +32,15 @@ close(screen)
 println("OK_VOL_RENDER")
 """
 
-include("helpers.jl")
-
 @testset "Volumes: end-to-end render (subprocess)" begin
     if !isdir(_LIBS) || !isfile(_VDB)
         @test_skip "IndeX libs ($_LIBS) or sample VDB ($_VDB) absent — volume render test skipped"
     else
+        # retries=4: absorbs the known intermittent ovrtx startup crash
+        # (GeometryGroup::attachToContext), same as the other volumes render tests (E3 pattern;
+        # this file was the one render test left unconverted — it flaked the integration gate).
         ec, out = run_ovrtx_subprocess(_VOL_RENDER_PROG; timeout = 600,
+            retries = 4, ready_marker = "VOL_NONBLACK=",
             env = ("OMNIVERSEMAKIE_INDEX_LIBS" => _LIBS))
         # Dump the full subprocess log only on failure (it is thousands of ovrtx lines).
         contains(out, "OK_VOL_RENDER") || @info "Volume render output (failure)" out
