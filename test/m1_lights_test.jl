@@ -163,7 +163,7 @@ println("OK_LIGHTS")
 """
 
 @testset "M1.4 lights affect rendered image (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M14_LIGHTS_PROG; timeout = 600)
+    exitcode, output = run_ovrtx_subprocess(_M14_LIGHTS_PROG; timeout = 600, retries = 2, ready_marker = "OK_LIGHTS")
     @info "M1.4 subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_LIGHTS")

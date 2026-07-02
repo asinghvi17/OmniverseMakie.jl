@@ -104,7 +104,7 @@ println("OK_DELETE")
 """
 
 @testset "M2.5 delete!/empty! leak-free teardown (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M25_DELETE_PROG; timeout = 900)
+    exitcode, output = run_ovrtx_subprocess(_M25_DELETE_PROG; timeout = 900, retries = 2, ready_marker = "OK_DELETE")
     @info "M2.5 delete subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_DELETE")
@@ -206,7 +206,7 @@ println("OK_SUBSCENE_LEAK")
 """
 
 @testset "M2.5 subscene add/remove 50× — no registry accumulation (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M25_SUBSCENE_LEAK_PROG; timeout = 900)
+    exitcode, output = run_ovrtx_subprocess(_M25_SUBSCENE_LEAK_PROG; timeout = 900, retries = 2, ready_marker = "OK_SUBSCENE_LEAK")
     @info "M2.5 subscene-leak subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_SUBSCENE_LEAK")

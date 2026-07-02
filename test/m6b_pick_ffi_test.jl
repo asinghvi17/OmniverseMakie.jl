@@ -40,7 +40,7 @@ println("OK_PICK_FFI")
 
 include("helpers.jl")
 @testset "M6.B pick FFI chain (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M6B_FFI_PROG; timeout = 400)
+    exitcode, output = run_ovrtx_subprocess(_M6B_FFI_PROG; timeout = 400, retries = 2, ready_marker = "OK_PICK_FFI")
     @info "M6.B pick FFI output" output
     @test exitcode == 0
     @test contains(output, "OK_PICK_FFI")

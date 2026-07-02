@@ -13,13 +13,15 @@ end
 
 include("libovrtx_struct_test.jl")
 include("libovrtx_load_test.jl")
+# Shared subprocess runner — the m0 render/renderer/update tests below and all M1+ tests
+# drive their GPU work through run_ovrtx_subprocess.
+include("helpers.jl")
+
 include("m0_signals_test.jl")
 include("m0_renderer_test.jl")
 include("m0_render_test.jl")
 include("m0_update_test.jl")
 
-# Shared subprocess runner (M1+)
-include("helpers.jl")
 include("m1_screen_test.jl")
 include("m1_usd_test.jl")
 include("m1_camera_test.jl")
@@ -270,3 +272,15 @@ include("a4_binding_string_test.jl")
 # when no top-level block exists).  PURE: JSON5 fixtures in a temp dir, golden byte-stability,
 # escaped-value round-trip, nested-before-top-level targeting, and no-top-level-app errors.
 include("a5_index_config_test.jl")
+
+# Review track E1 — truthful watchdog: run_ovrtx_subprocess reaps the child (SIGTERM →
+# grace → SIGKILL) and returns a TRUTHFUL exit code (0 only on real success; -9 on
+# timeout; -signal on crash), so `@test exitcode == 0` can no longer pass a killed or
+# crashed child.  Pure unit tests — cheap `julia` children, no ovrtx/GPU.
+include("review_e_watchdog_test.jl")
+
+# Review track E2 — shared harness capabilities.  PURE unit tests (cheap `julia` children,
+# no ovrtx/GPU): run_ovrtx_subprocess's ready_marker/retries loop re-runs a flag-file child
+# until the marker appears, and the PROG_PIXEL_HELPERS prelude parses + its helpers behave.
+include("review_e2_retry_test.jl")
+include("review_e2_prelude_test.jl")

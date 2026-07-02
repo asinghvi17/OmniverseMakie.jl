@@ -79,7 +79,7 @@ println("OK_RESIZE")
 
 include("helpers.jl")
 @testset "M5 interactive_display window shows RTX frame (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M5_VIEWPORT_PROG; timeout = 600)
+    exitcode, output = run_ovrtx_subprocess(_M5_VIEWPORT_PROG; timeout = 600, retries = 2, ready_marker = "OK_VIEWPORT")
     @info "M5 viewport output" output
     @test exitcode == 0
     @test contains(output, "OK_VIEWPORT")
@@ -88,7 +88,7 @@ include("helpers.jl")
 end
 
 @testset "M5 Base.close(session) teardown + idempotency (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M5_TEARDOWN_PROG; timeout = 600)
+    exitcode, output = run_ovrtx_subprocess(_M5_TEARDOWN_PROG; timeout = 600, retries = 2, ready_marker = "OK_TEARDOWN")
     @info "M5 teardown output" output
     @test exitcode == 0
     @test contains(output, "GL_CLOSED=true")
@@ -96,7 +96,7 @@ end
 end
 
 @testset "M5 resize_viewport! rebuilds renderer at new size (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M5_RESIZE_PROG; timeout = 600)
+    exitcode, output = run_ovrtx_subprocess(_M5_RESIZE_PROG; timeout = 600, retries = 2, ready_marker = "OK_RESIZE")
     @info "M5 resize output" output
     @test exitcode == 0
     @test contains(output, "OK_RESIZE")

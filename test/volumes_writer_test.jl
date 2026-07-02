@@ -9,7 +9,6 @@
 # Skips cleanly when the Kit IndeX libs dir is absent (CI without them stays green).
 
 using Test
-const _LIBS = get(ENV, "OMNIVERSEMAKIE_INDEX_LIBS", "/home/juliahub/.local/share/ov/data/exts/v2/omni.index.libs-1287db94366cf6fe")
 const _WRITER_PROG = """
 using OmniverseMakie
 import OmniverseMakie as OM
@@ -32,17 +31,14 @@ println("INDEX_ENABLED=", OV._index_enabled()); println("WRITER_NONBLACK=", nb);
 """
 include("helpers.jl")
 @testset "Volumes: written .nvdb renders (subprocess)" begin
-    if !isdir(_LIBS)
+    if !isdir(_HELPER_INDEX_LIBS)
         @test_skip "IndeX libs absent — writer render spike skipped"
     else
         # ovrtx has a known INTERMITTENT startup assertion crash (GeometryGroup::attachToContext,
-        # seen on unrelated runs too) that can kill the child before it renders.  Retry a few times
-        # until the child reports a render result, so this hard @test is not flaky on that crash.
-        out = ""
-        for _ in 1:4
-            _, out = run_ovrtx_subprocess(_WRITER_PROG; timeout=600, env=("OMNIVERSEMAKIE_INDEX_LIBS"=>_LIBS))
-            contains(out, "WRITER_NONBLACK=") && break
-        end
+        # seen on unrelated runs too) that can kill the child before it renders.  `retries`/`ready_marker`
+        # re-run until the child reports a render result, so this hard @test is not flaky on that crash.
+        _, out = run_ovrtx_subprocess(_WRITER_PROG; timeout=600,
+            env=("OMNIVERSEMAKIE_INDEX_LIBS"=>_HELPER_INDEX_LIBS), retries=4, ready_marker="WRITER_NONBLACK=")
         contains(out, "OK_WRITER_RENDER") || @info "writer render output" out
         @test contains(out, "INDEX_ENABLED=true")          # IndeX enables + the render completes
         m = match(r"WRITER_NONBLACK=(\d+)", out)
