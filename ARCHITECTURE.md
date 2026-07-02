@@ -7,8 +7,10 @@ OpenUSD stage, render it with RTX, stream **minimal** per-frame edits through Ma
 camera controllers work, and display the result in an interactive window with a
 GPU-direct (no-CPU-roundtrip) blit.
 
-> Status: **design / pre-implementation.** This document is the agreed architecture.
-> The implementation plan (milestones M0–M6) follows in a separate plan doc.
+> Status: **accurate as of 2026-07 (post-M6 / volumes-M2).** This is the agreed
+> architecture; milestones M0–M6 and volumes M1–M2 have shipped. For the current shipped
+> feature/status table see [`README.md`](README.md); the per-milestone implementation plans
+> are archived under [`docs/plans-history/`](docs/plans-history/).
 
 ---
 
@@ -210,8 +212,12 @@ subtree at a **stable path keyed by `objectid(plot)`** (e.g. `/World/Plot_<id>`)
 | `Scatter` | `PointInstancer` + **`UsdGeomSphere` prototype** (the **sphere fast path**); `UsdVol.ParticleField` for huge N | `positions`, `scales`, colors | array bindings; splat field for N≫ |
 | `Surface` | `UsdGeomMesh` (grid re-meshed) | grid → verts/faces; colormap → `displayColor`/texture | points/displayColor bindings |
 | `Lines`/`LineSegments` | `UsdGeomBasisCurves` | `points`, `widths` (= linewidth), `type=linear` | points binding |
-| `Volume` | `UsdVol` volume (`VoxelGrid` + volume material) | density/field grid | field attribute writes |
+| `Volume` | `UsdVol` `Volume` + `OpenVDBAsset` (`.nvdb`) + IndeX volume material | dense scalar grid → `.nvdb` (`NanoVDBWriter`) | live edit = remove + re-reference a fresh `.nvdb` temp (an in-place asset-path write is a no-op — IndeX holds the grid resident) |
 
+- **Volume** renders through **NVIDIA IndeX Direct**, which shows scalar density as
+  **grayscale by design** and ignores the authored colormap (color compositing needs a Kit
+  extension absent from standalone `ovrtx`); uniform density renders fully transparent, so
+  volume data must be spatially graded.
 - **Camera** → `UsdGeomCamera` from `scene.camera` (view/projection → camera `omni:xform`
   + focal length/aperture; perspective and orthographic). Updated as `omni:xform` (cheap).
 - **Lights** → `UsdLux`: `PointLight`→`SphereLight`, `DirectionalLight`→`DistantLight`,
@@ -383,8 +389,12 @@ code**; camera change → update camera `omni:xform` + `reset()`.
   full OmniPBR materials available from M3.
 - **M5 — interactive viewport.** GLMakie display (CPU blit) + event injection; `cam3d!`
   orbit/zoom; on-demand loop + progressive refinement; dynamic add/delete end-to-end.
-- **M6 — GPU-direct + picking + hardening.** GPU-direct CUDA-GL blit (no CPU roundtrip);
-  AOVs (Depth/Normal/ID) → picking (`scene.events`); subscene-leak fixes.
+- **M6 — GPU-direct + picking.** *(M6.A)* GPU-direct CUDA-GL blit — HDR viewport with an
+  on-device tonemap, no CPU roundtrip. *(M6.B)* Picking via **native ray-query** (the ovrtx
+  pick-query API: `enqueue_pick_query` → `read_pick_hit` → resolve the hit's prim path back
+  to the plot), with the element index at **plot level** (a `PointInstancer` collapses
+  per-instance ids). Selection is an opt-in **offscreen** `select!` outline (LdrColor-only;
+  a **live in-viewport outline is deferred**). Subscene-leak hardening remains open.
 
 (Deferred: 2D/text/axes parity; remote streaming — WGLMakie-style websocket then GStreamer
 `webrtcsink` sidecar — see `references/notes/wire-protocol-and-webrtc.md`.)
