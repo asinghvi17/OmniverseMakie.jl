@@ -44,6 +44,12 @@ _orient_for_display(frame) = reverse(permutedims(frame), dims = 2)
 function _tonemap_orient!(out::AbstractMatrix{RGBA{N0f8}},
                           hdr::AbstractArray{<:Real,3}, exposure::Float32)
     C, W, H = size(hdr)
+    # The loop bounds come from `hdr` and the writes are `@inbounds`, so `out` MUST be the
+    # oriented [W,H] — guard it explicitly (the CUDA twin `_tonemap_orient_kernel!` carries the
+    # same guard per-thread).  Callers that only @warn on a size mismatch (resize_viewport!)
+    # would otherwise turn a mismatch into an out-of-bounds write instead of a clean error.
+    size(out) == (W, H) ||
+        throw(DimensionMismatch("_tonemap_orient!: out is $(size(out)), need ($W, $H) for the [C=$C,W,H] hdr"))
     scale = exp2(exposure)                          # once per tick, hoisted out of the W×H loop
     @inbounds for j in 1:W, i in 1:H
         out[j, H + 1 - i] = tonemap((Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
