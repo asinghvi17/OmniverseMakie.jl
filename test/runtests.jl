@@ -24,6 +24,11 @@ include("m1_screen_test.jl")
 include("m1_usd_test.jl")
 include("m1_camera_test.jl")
 include("m1_lights_test.jl")
+
+# Review-fix Track L1 — structural light change fails loud (warn + preserve snapshot,
+# no corrupt diff baseline) + de-duplicated RectLight transform (pure, no GPU).
+include("l1_lights_structural_test.jl")
+
 include("m1_mesh_render_test.jl")
 include("m1_orientation_test.jl")
 include("m1_save_record_test.jl")

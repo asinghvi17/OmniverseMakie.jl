@@ -163,22 +163,14 @@ function usda_light(l::Makie.AmbientLight, index::Int)
 end
 
 function usda_light(l::Makie.RectLight, index::Int)
-    # Best-effort: RectLight, width=norm(u1), height=norm(u2); orient from direction,
-    # translate from position.
+    # Best-effort: RectLight, width=norm(u1), height=norm(u2); orient from direction
+    # (shared with DistantLight), translate from position.
     intensity, cr, cg, cb = _intensity_and_color(l.color, _light_intensity_scale(l))
     w = norm(Float64[l.u1[1], l.u1[2], l.u1[3]])
     h = norm(Float64[l.u2[1], l.u2[2], l.u2[3]])
-    # Combined rotation + translation matrix.
-    dir = Float64[l.direction[1], l.direction[2], l.direction[3]]
-    z = -normalize(dir)
-    ref_axis = abs(z[3]) < 0.99 ? Float64[0, 0, 1] : Float64[1, 0, 0]
-    x_ax = normalize(cross(ref_axis, z))
-    y_ax = cross(z, x_ax)
-    p = l.position
-    xform_matrix = Float64[x_ax[1] x_ax[2] x_ax[3] 0.0
-                           y_ax[1] y_ax[2] y_ax[3] 0.0
-                           z[1]    z[2]    z[3]    0.0
-                           Float64(p[1]) Float64(p[2]) Float64(p[3]) 1.0]
+    # Orientation from the shared helper; drop the translation into the last row.
+    xform_matrix = copy(_direction_to_xform_matrix(l.direction))
+    xform_matrix[4, 1:3] .= l.position
     xform_str = _usda_row_vector_matrix(xform_matrix)
     return """    def RectLight "$(light_prim_name(l, index))"
     {
@@ -349,18 +341,29 @@ changed attribute (`inputs:intensity`, `inputs:color`, `omni:xform`). Updates
 `screen.last_lights`; returns `true` iff anything was written (so `colorbuffer` knows
 to `OV.reset!`).
 
-A structural change (light *count* differs) needs a stage re-open, not a live edit:
-this just refreshes the snapshot and returns `false`.
+A structural change (light *count* differs) can't be applied live — it would need a
+stage re-open. Such a change warns once (`maxlog=1`) and returns `false` WITHOUT
+advancing the snapshot, so the mismatch stays detectable every frame instead of
+silently corrupting the diff baseline (advancing it would diff the next edit against
+never-authored prims). The added/removed light does not render; create a new Screen.
 """
 function sync_lights!(screen, scene)
     lights   = scene.compute[:lights][]
     new_snap = _lights_snapshot(lights)
     old_snap = screen.last_lights
 
-    # Structural mismatch (or first call, no baked snapshot): prims may not exist yet,
-    # so just record the snapshot.
-    if old_snap === nothing || length(old_snap) != length(new_snap)
+    # First call (nothing baked yet): seed the snapshot so later diffs have a baseline.
+    if old_snap === nothing
         screen.last_lights = new_snap
+        return false
+    end
+
+    # Structural change (light COUNT differs): a live edit can't add/remove prims (that
+    # needs a stage re-open). Do NOT advance the snapshot — advancing it would diff the
+    # next edit against never-authored prims. Leave it stale so the mismatch stays
+    # detectable every frame; warn once.
+    if length(old_snap) != length(new_snap)
+        @warn "OmniverseMakie: adding/removing lights on a live Screen is not supported — create a new Screen" maxlog=1
         return false
     end
 
