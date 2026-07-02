@@ -6,7 +6,7 @@ using OmniverseMakie: Makie, RGBA, N0f8, ColorTypes
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
     _scene_for_camera, interactive_display, present!, on_render_tick!, cpu_blit!,
     attach_picking!, detach_picking!, _pick_at!   # M6.B Task 5: picking
-using OmniverseMakie: tonemap, tonemap_frame
+using OmniverseMakie: tonemap
 using Makie: Consume, MouseButtonEvent  # event types for the input forwarders
 
 # ===== moved verbatim from src/interactive/blit.jl =====
@@ -19,9 +19,30 @@ using Makie: Consume, MouseButtonEvent  # event types for the input forwarders
 # (data[col,H]=frame[1,col] at TOP, data[col,1]=frame[H,col] at BOTTOM).
 # image! data is Observable [3] (x=[1], y=[2]) — REPL-verified.
 
-# The one host-frame→Makie orientation; cpu_blit!, interactive_display, and
-# resize_viewport! must all use it.
+# The one host-HDR→display orientation is the fused tonemap+orient loop
+# `_tonemap_orient!` below: present!, interactive_display, and resize_viewport! all
+# fill their session-owned [W,H] display buffer through it — reproducing
+# reverse(permutedims(tonemap_frame([C,W,H] hdr, exposure)), dims=2) via out[j, H+1-i]
+# (the SAME fused indexing the CUDA ext's oriented copy uses).  `_orient_for_display`
+# / `cpu_blit!` are the equivalent orientation for an ALREADY-tonemapped [H,W] frame
+# (the standalone M5 blit helper + its test); keep them pixel-consistent with the loop.
 _orient_for_display(frame) = reverse(permutedims(frame), dims = 2)
+
+# Fused host tonemap + display-orient: write the [C,W,H] linear-HDR `hdr` INTO the
+# pre-oriented [W,H] RGBA{N0f8} buffer `out` in place — one pass, no intermediate
+# frame / permutedims / reverse.  out[j, H+1-i] reproduces
+# reverse(permutedims(tonemap_frame(hdr, exposure)), dims=2) exactly.  scale =
+# exp2(exposure) is hoisted out of the W×H loop (once per tick); the per-pixel
+# `tonemap` is the SHARED scalar (src/tonemap.jl), so host and CUDA kernel agree.
+function _tonemap_orient!(out::AbstractMatrix{RGBA{N0f8}},
+                          hdr::AbstractArray{Float32,3}, exposure::Float32)
+    C, W, H = size(hdr)
+    scale = exp2(exposure)                          # once per tick, hoisted out of the W×H loop
+    @inbounds for j in 1:W, i in 1:H
+        out[j, H + 1 - i] = tonemap((hdr[1, j, i], hdr[2, j, i], hdr[3, j, i]), scale)
+    end
+    return out
+end
 
 """
     cpu_blit!(image_plot, frame::AbstractMatrix{RGBA{N0f8}}) -> Nothing
@@ -41,7 +62,7 @@ end
 # Display (M5): one bare `campixel!` Scene holding a full-viewport `image!` (the
 # blit target).  No Axis (its 2-D zoom/pan/limits are meaningless for a raw
 # framebuffer).  The path tracer renders OFFSCREEN; each tick uploads its frame
-# into the image texture (`cpu_blit!`).
+# into the image texture (`present!`).
 #
 # Interaction (M5): campixel! has no 3-D camera, so FORWARD window input (mouse
 # button/position/scroll/keyboard) into `cam_scene.events`.  cam_scene owns the
@@ -56,7 +77,9 @@ Fields:
   - `screen::Screen`        — open-stage ovrtx Screen (stage, renderer, plots)
   - `glscreen`              — GLMakie.Screen (the host window)
   - `glscene::Makie.Scene`  — the campixel! display Scene (image + input source)
-  - `image_plot`            — full-viewport image! plot (cpu_blit! target)
+  - `image_plot`            — full-viewport image! plot (present! target)
+  - `present_buf`           — `[W,H]` pre-oriented `RGBA{N0f8}` display buffer; IS the
+                              image! data array (CPU `present!` writes it in place + notify)
   - `cam_scene::Makie.Scene`— scene whose Camera3D drives the ovrtx view
   - `steps_per_tick::Int`   — ovrtx accumulation steps per render tick
   - `samples::Int`          — RT2 accumulation counter (0 on reset, += steps_per_tick)
@@ -74,6 +97,7 @@ mutable struct ViewportSession
     glscreen                        # GLMakie.Screen (the window)
     glscene::Makie.Scene            # the campixel! display Scene
     image_plot                      # full-viewport image! plot (blit target)
+    present_buf::Matrix{RGBA{N0f8}} # [W,H] pre-oriented display buffer = image_plot's data array
     cam_scene::Makie.Scene          # the scene whose Camera3D drives the view
     steps_per_tick::Int
     samples::Int
@@ -155,20 +179,23 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
     _author_screen!(screen, cam_scene, scene)
 
     # 3. First ovrtx frame (full warmup for a clean initial image) via HDR path.
-    frame = tonemap_frame(OV.render_hdr_to_array(screen.renderer, screen.product;
-                          warmup = screen.config.warmup), exposure)
+    warmup_hdr = OV.render_hdr_to_array(screen.renderer, screen.product;
+                                        warmup = screen.config.warmup)
     # The eager insertplots! flipped requires_update; the warmup already drew
     # that geometry, so consume the flag (as colorbuffer does) — else the first
     # on_render_tick! would redundantly OV.reset! and discard this clean frame.
     screen.requires_update = false
 
-    # 4. Display: one campixel! Scene with a full-viewport image! of the frame;
-    #    orient matches cpu_blit! (reverse(permutedims) → frame row 1 = top).
+    # 4. Display: one campixel! Scene with a full-viewport image! whose data array IS the
+    #    session-owned present buffer, filled by the fused tonemap+orient loop (the one
+    #    orientation → frame row 1 = top).  present! writes this buffer in place each tick.
     GLMakie.activate!()
     W, H = size
     glscene = Makie.Scene(size = size)
     Makie.campixel!(glscene)
-    img = image!(glscene, 0 .. W, 0 .. H, _orient_for_display(frame); interpolate = false)
+    present_buf = Matrix{RGBA{N0f8}}(undef, W, H)
+    _tonemap_orient!(present_buf, warmup_hdr, exposure)
+    img = image!(glscene, 0 .. W, 0 .. H, present_buf; interpolate = false)
     glscr = GLMakie.Screen()
     display(glscr, glscene)
 
@@ -185,7 +212,7 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
     # Only literal `true` is forced; :auto/false allow graceful CPU fallback.
     gpu_forced = (gpu_direct === true)
 
-    session = ViewportSession(screen, glscr, glscene, img, cam_scene,
+    session = ViewportSession(screen, glscr, glscene, img, present_buf, cam_scene,
                               steps_per_tick, screen.config.warmup,
                               nothing, input_listeners, nothing, exposure,
                               blitter, nothing, gpu_forced)
@@ -288,8 +315,8 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     _author_screen!(new_screen, cam_scene, root_scene)
 
     # 3. Render a warmup frame at the new size via HDR path.
-    frame = tonemap_frame(OV.render_hdr_to_array(new_screen.renderer, new_screen.product;
-                          warmup = new_screen.config.warmup), session.exposure)
+    warmup_hdr = OV.render_hdr_to_array(new_screen.renderer, new_screen.product;
+                                        warmup = new_screen.config.warmup)
 
     # 4. Swap in the new Screen FIRST (session stays self-consistent), then
     #    free the OLD ovrtx renderer (avoid a GPU leak).  Reset the counter.
@@ -301,17 +328,21 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     new_screen.requires_update = false
     Base.close(old_screen)
 
-    # 5. Replace the image!: delete the wrong-size one, add one spanning
-    #    0..W,0..H (the campixel! coords already cover that after resize).
+    # 5. Replace the image!: delete the wrong-size one, allocate a fresh [W,H] present
+    #    buffer filled by the fused tonemap+orient loop (the one orientation), and add an
+    #    image! backed by it spanning 0..W,0..H (campixel! coords cover that after resize)
+    #    — so the next present! writes it in place (its size guard passes).
     # M6.A: unregister the OLD CUDA-GL resource BEFORE delete! (texture still
     # alive → no leak).  GL may RECYCLE the freed texture id, so explicit
     # unregister + the present! `!st.registered` re-register guard make resize
     # id-recycle-proof (A-2).  No-op for CPU / no-CUDA (gpu_state === nothing).
     session.gpu_state === nothing || Base.invokelatest(OmniverseMakie.gpu_unregister!, session)
     delete!(session.glscene, session.image_plot)
-    new_img = image!(session.glscene, 0 .. W, 0 .. H,
-                     _orient_for_display(frame); interpolate = false)
-    session.image_plot = new_img
+    new_buf = Matrix{RGBA{N0f8}}(undef, W, H)
+    _tonemap_orient!(new_buf, warmup_hdr, session.exposure)
+    new_img = image!(session.glscene, 0 .. W, 0 .. H, new_buf; interpolate = false)
+    session.image_plot  = new_img
+    session.present_buf = new_buf
 
     return nothing
 end
@@ -337,18 +368,33 @@ const _M5_STEP_TIMEOUT_NS = UInt64(10_000_000_000)
 """
     OmniverseMakie.present!(session::ViewportSession, ::Val{:cpu}) -> Nothing
 
-`:cpu` blit strategy: render `HdrColor` (float16) from the open ovrtx stage, tonemap
-to `RGBA{N0f8}` (ACES + sRGB + `session.exposure`) on the host, and update the image!
-plot's data Observable.  The `:gpu` strategy (on-device tonemap + CUDA→GL copy, no
-host roundtrip) lives in the CUDA extension; both are selected via
-`present!(session, Val(session.blitter))`.
+`:cpu` blit strategy: render `HdrColor` (float16) from the open ovrtx stage, then in ONE
+fused pass tonemap (ACES + sRGB + `session.exposure`) AND orient it straight into the
+session's cached `[W,H]` display buffer (`present_buf`) IN PLACE, and `notify` the image!
+plot's data Observable so GLMakie re-uploads the texture — no per-tick display allocation
+(the buffer is reused; `render_hdr_to_array`'s Float32 HDR is the one transient, dropped by
+INT-2).  A size guard reallocates + re-seats the buffer after a resize (Screen rebuilt).  The
+`:gpu` strategy (on-device tonemap + CUDA→GL copy, no host roundtrip) lives in the CUDA
+extension; both are selected via `present!(session, Val(session.blitter))`.
 """
 function OmniverseMakie.present!(session::ViewportSession, ::Val{:cpu})
     hdr = OV.render_hdr_to_array(session.screen.renderer, session.screen.product;
                                   warmup = session.steps_per_tick,
                                   timeout_ns = _M5_STEP_TIMEOUT_NS)
-    frame = tonemap_frame(hdr, session.exposure)   # [H, W] RGBA{N0f8}
-    cpu_blit!(session.image_plot, frame)
+    _, W, H = size(hdr)
+    # Size guard: a resize rebuilds the Screen (+ image!) at a new size — reallocate the
+    # cached buffer and re-seat it AS the image Observable's data array when it no longer
+    # fits (interactive_display / resize_viewport! seed it; this is belt-and-suspenders).
+    buf = session.present_buf
+    if size(buf) != (W, H)
+        buf = Matrix{RGBA{N0f8}}(undef, W, H)
+        session.present_buf = buf
+        session.image_plot[3][] = buf
+    end
+    # Fuse tonemap+orient straight into the cached buffer (in place), then notify so GLMakie
+    # re-uploads the texture from that SAME array — zero steady-state display garbage.
+    _tonemap_orient!(buf, hdr, session.exposure)
+    Makie.notify(session.image_plot[3])
     return nothing
 end
 
