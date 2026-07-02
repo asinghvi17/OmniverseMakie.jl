@@ -118,3 +118,27 @@ tonemap matches the old widen-first chain pixel-for-pixel (`c2_present_test.jl`
 `PIXEL_MISMATCH=0`).  Gated by the C2 pixel-equality + in-place + tightened-alloc testset
 (`a_new < 32 KiB`, was `hdr_bytes + 2·frame_bytes`) and the M5 viewport testsets — all green.
 `render_hdr_to_array` stays for its other callers (`colorbuffer` HDR path / tests).
+
+---
+
+## Post-Review-Fixes Re-Run (2026-07-02, integration final gate)
+
+`bench/hot_path.jl` on the fully-merged `fix/review-integration` tree (all review tracks
+A-F + INT-2), same box/settings as the M2.6 baseline:
+
+| Path | Baseline (M2.6) | Post-review-fixes | Gate (≥30 Hz) |
+|------|-----------------|-------------------|----------------|
+| A — `write_mapped_xform!` × 10⁴/frame | 24.55 Hz | **29.65 Hz (+21 %)** | BELOW (was BELOW) |
+| B — `write_binding!` 10⁵ points/frame | 8,744 Hz* | **6,682 Hz** | PASS |
+
+`GATE_PASS=true` (either-path rule, unchanged).  Path A's +21 % comes from the review
+perf work on the push path (typed `Dict{Symbol,OV.Binding}` kills a per-write dynamic
+dispatch; `_push_points_binding!` no longer copies the point buffer — B7); it remains
+just under the aspirational 30 Hz, same scoped escalation as the M2.6 note above.
+*Path B run-to-run variance is large (single-digit ms frames); both runs clear the gate
+by two orders of magnitude.
+
+Note: `hot_path.jl` still prints the historical `SCATTER_ROUTE_DECISION=b_documented_carry`
+narrative from M2.6; the underlying gap is FIXED (see the B4 section above) — the printed
+comment is a stale echo in the bench script, kept because the m2_bench testset keys on the
+surrounding output tokens.
