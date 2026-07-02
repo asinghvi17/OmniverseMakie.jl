@@ -1,15 +1,10 @@
 using Test
 
-# Paths / constants (reuse the same conventions as m0_render_test.jl)
-const _UPDATE_OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH",
-    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/python/minimal/.venv/lib/python3.13/site-packages/ovrtx/bin/libovrtx-dynamic.so")
-const _UPDATE_REPO_ROOT  = joinpath(@__DIR__, "..")
-const _UPDATE_OV_JL      = joinpath(_UPDATE_REPO_ROOT, "src", "binding", "OV.jl")
-const _UPDATE_USDA       = get(ENV, "OM_USDA",
-    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda")
-const _UPDATE_PRODUCT    = "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
-const _UPDATE_WARMUP     = 64
-const _UPDATE_PRIM       = "/World/Torus"
+# Paths / constants spliced into the subprocess prog.
+const _UPDATE_OV_JL   = joinpath(@__DIR__, "..", "src", "binding", "OV.jl")
+const _UPDATE_PRODUCT = "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
+const _UPDATE_WARMUP  = 64
+const _UPDATE_PRIM    = "/World/Torus"
 
 # The subprocess script:
 #   1. Renders frame1 (warmup frames).
@@ -81,39 +76,18 @@ println("OK_UPDATE")
 """
 
 @testset "M0.7 write_xform! moves torus (changed >= 50000 pixels)" begin
-    script = tempname() * ".jl"
-    try
-        open(script, "w") do io
-            print(io, _UPDATE_PROG)
-        end
-        cmd = setenv(
-            `julia --project=$(_UPDATE_REPO_ROOT) $script`,
-            "OVRTX_LIBRARY_PATH" => _UPDATE_OVRTX_LIB,
-            "OM_USDA"            => _UPDATE_USDA,
-            "PATH"               => get(ENV, "PATH", ""),
-            "HOME"               => get(ENV, "HOME", ""),
-        )
-        out = IOBuffer()
-        err = IOBuffer()
-        # Two 64-frame renders + create_renderer shader compile — allow 360 s total.
-        p = run(pipeline(cmd; stdout=out, stderr=err); wait=false)
-        wait(p)
-        output  = String(take!(out))
-        errtext = String(take!(err))
+    # Two 64-frame renders + create_renderer shader compile; a generous 600 s ceiling
+    # (the watchdog only fires on a genuine hang — a passing render returns immediately).
+    exitcode, output = run_ovrtx_subprocess(_UPDATE_PROG; timeout=600)
 
-        isempty(errtext) || @info "subprocess stderr" text=errtext
+    @test exitcode == 0
+    @test contains(output, "OK_UPDATE")
 
-        @test p.exitcode == 0
-        @test contains(output, "OK_UPDATE")
-
-        m = match(r"CHANGED_PIXELS=(\d+)", output)
-        if m !== nothing
-            changed = parse(Int, m.captures[1])
-            @test changed >= 50000
-        else
-            @test false  # sentinel — CHANGED_PIXELS line missing entirely
-        end
-    finally
-        isfile(script) && rm(script)
+    m = match(r"CHANGED_PIXELS=(\d+)", output)
+    if m !== nothing
+        changed = parse(Int, m.captures[1])
+        @test changed >= 50000
+    else
+        @test false  # sentinel — CHANGED_PIXELS line missing entirely
     end
 end

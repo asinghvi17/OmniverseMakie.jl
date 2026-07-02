@@ -1,19 +1,15 @@
 using Test
 
-# Paths / constants shared by the subprocess script
-const _RENDER_OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH",
-    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/python/minimal/.venv/lib/python3.13/site-packages/ovrtx/bin/libovrtx-dynamic.so")
-const _RENDER_REPO_ROOT  = joinpath(@__DIR__, "..")
-const _RENDER_OV_JL      = joinpath(_RENDER_REPO_ROOT, "src", "binding", "OV.jl")
-const _RENDER_USDA       = get(ENV, "OM_USDA",
-    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda")
-const _RENDER_PRODUCT    = "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
-const _RENDER_WARMUP     = 64
+# Paths / constants spliced into the subprocess prog.
+const _RENDER_OV_JL   = joinpath(@__DIR__, "..", "src", "binding", "OV.jl")
+const _RENDER_PRODUCT = "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
+const _RENDER_WARMUP  = 64
 
 # The subprocess script:
 # - uses LibOVRTX directly (OV.jl does `using ..LibOVRTX`, which resolves to Main.LibOVRTX)
 # - includes OV.jl (which in turn includes dlpack.jl via its own include)
-# - creates a Renderer, opens the USDA, runs render_to_matrix with warmup frames
+# - creates a Renderer, opens the USDA (OM_USDA, set by the harness), runs render_to_matrix
+#   with warmup frames
 # - asserts size == (1080,1920) and that the image is substantially non-black
 #   (tolerates up to 100 edge/border pixels that may be black after 64 frames)
 # - exits normally (clean teardown verified: no _exit needed)
@@ -44,44 +40,19 @@ println("OK")
 """
 
 @testset "M0.6 Julia-native render (torus, LdrColor, non-black)" begin
-    script = tempname() * ".jl"
-    try
-        open(script, "w") do io
-            print(io, _RENDER_PROG)
-        end
-        cmd = setenv(
-            `julia --project=$(_RENDER_REPO_ROOT) $script`,
-            "OVRTX_LIBRARY_PATH" => _RENDER_OVRTX_LIB,
-            "OM_USDA"            => _RENDER_USDA,
-            "PATH"               => get(ENV, "PATH", ""),
-            "HOME"               => get(ENV, "HOME", ""),
-        )
-        out = IOBuffer()
-        err = IOBuffer()
-        # Generous timeout: renderer creates shaders on first run (~30–60 s),
-        # plus 64 warmup frames (~11 s) — allow 300 s total.
-        p = run(pipeline(cmd; stdout=out, stderr=err); wait=false)
-        wait(p)
-        output  = String(take!(out))
-        errtext = String(take!(err))
+    # Renderer shader compile (~30–60 s) + 64 warmup frames (~11 s); the 300 s default is ample.
+    exitcode, output = run_ovrtx_subprocess(_RENDER_PROG)
 
-        # Print subprocess stderr so CI logs capture any crashes / warnings.
-        isempty(errtext) || @info "subprocess stderr" text=errtext
-
-        @test p.exitcode == 0
-        @test contains(output, "OK")
-        @test contains(output, "SIZE=(1080, 1920)")
-        # NONBLACK must be at least 2073500 (out of 2073600).
-        # We parse the value rather than exact-match the string so a few black
-        # edge pixels (up to 100) still pass.
-        m = match(r"NONBLACK=(\d+)", output)
-        if m !== nothing
-            nb = parse(Int, m.captures[1])
-            @test nb >= 1080 * 1920 - 100
-        else
-            @test false  # sentinel — NONBLACK line missing entirely
-        end
-    finally
-        isfile(script) && rm(script)
+    @test exitcode == 0
+    @test contains(output, "OK")
+    @test contains(output, "SIZE=(1080, 1920)")
+    # Parse NONBLACK rather than exact-match the string so a few black edge pixels (up to 100)
+    # still pass.  NONBLACK must be at least 2073500 (out of 2073600).
+    m = match(r"NONBLACK=(\d+)", output)
+    if m !== nothing
+        nb = parse(Int, m.captures[1])
+        @test nb >= 1080 * 1920 - 100
+    else
+        @test false  # sentinel — NONBLACK line missing entirely
     end
 end
