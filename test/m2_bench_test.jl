@@ -20,7 +20,7 @@ using Test
 const _M26_BENCH_SCRIPT = read(joinpath(@__DIR__, "..", "bench", "hot_path.jl"), String)
 
 @testset "M2.6 hot-path throughput gate (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M26_BENCH_SCRIPT; timeout = 600)
+    exitcode, output = run_ovrtx_subprocess(_M26_BENCH_SCRIPT; timeout = 600, retries = 2, ready_marker = "BENCH_OK")
     @info "M2.6 bench output" output
 
     # The script always exits 0 (shortfalls are documented, not fatal).

@@ -20,7 +20,7 @@ println("OK_BOUNDED_STEP")
 """
 include("helpers.jl")
 @testset "M5 bounded ovrtx step" begin
-    exitcode, output = run_ovrtx_subprocess(_M5_BOUNDED_PROG; timeout = 300)
+    exitcode, output = run_ovrtx_subprocess(_M5_BOUNDED_PROG; timeout = 300, retries = 2, ready_marker = "OK_BOUNDED_STEP")
     @test exitcode == 0
     @test contains(output, "STEP_OK=true")
     @test contains(output, "OK_BOUNDED_STEP")

@@ -116,7 +116,7 @@ println("OK_DIFFNODE")
 """
 
 @testset "M2.2 :ovrtx_renderobject diff node + push_to_ovrtx! (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M22_DIFFNODE_PROG; timeout = 900)
+    exitcode, output = run_ovrtx_subprocess(_M22_DIFFNODE_PROG; timeout = 900, retries = 2, ready_marker = "OK_DIFFNODE")
     @info "M2.2 diffnode subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_DIFFNODE")

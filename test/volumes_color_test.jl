@@ -22,7 +22,6 @@
 # Subprocess + env-gated; skips cleanly when the Kit IndeX libs dir is absent (CI without them stays green).
 
 using Test
-const _LIBS = get(ENV, "OMNIVERSEMAKIE_INDEX_LIBS", "/home/juliahub/.local/share/ov/data/exts/v2/omni.index.libs-1287db94366cf6fe")
 const _COLOR_PROG = """
 using OmniverseMakie
 import OmniverseMakie as OM
@@ -45,16 +44,14 @@ println("OK_COLOR")
 """
 include("helpers.jl")
 @testset "Volumes: colormap colors — BLOCKED-DEGRADE grayscale (subprocess)" begin
-    if !isdir(_LIBS)
+    if !isdir(_HELPER_INDEX_LIBS)
         @test_skip "IndeX libs absent — volume color test skipped"
     else
         # ovrtx has a known INTERMITTENT startup crash (GeometryGroup::attachToContext) that can kill
-        # the child before it renders; retry until it reports a render result (mirrors volumes_plot_test.jl).
-        out = ""
-        for _ in 1:4
-            _, out = run_ovrtx_subprocess(_COLOR_PROG; timeout=600, env=("OMNIVERSEMAKIE_INDEX_LIBS"=>_LIBS))
-            contains(out, "LIT=") && break
-        end
+        # the child before it renders; `retries`/`ready_marker` re-run until it reports a render result
+        # (mirrors volumes_plot_test.jl).
+        _, out = run_ovrtx_subprocess(_COLOR_PROG; timeout=600,
+            env=("OMNIVERSEMAKIE_INDEX_LIBS"=>_HELPER_INDEX_LIBS), retries=4, ready_marker="LIT=")
         contains(out, "OK_COLOR") || @info "volume color output" out
         @test contains(out, "OK_COLOR")                      # subprocess completed all work
         @test contains(out, "INDEX_ENABLED=true")

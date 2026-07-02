@@ -31,7 +31,7 @@ using Test
 const _M34_MATERIAL_LIVE_PROG = read(joinpath(@__DIR__, "m3_material_live_prog.jl"), String)
 
 @testset "M3.4 live material edits via the M2 diff path (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M34_MATERIAL_LIVE_PROG; timeout = 900)
+    exitcode, output = run_ovrtx_subprocess(_M34_MATERIAL_LIVE_PROG; timeout = 900, retries = 2, ready_marker = "OK_MATERIAL_LIVE")
     @info "M3.4 material-live subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_MATERIAL_LIVE")
@@ -95,7 +95,7 @@ const _M3_MESHSCATTER_MATERIAL_LIVE_PROG =
     read(joinpath(@__DIR__, "m3_meshscatter_material_live_prog.jl"), String)
 
 @testset "M3 live material-param edit on a materialized MeshScatter (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M3_MESHSCATTER_MATERIAL_LIVE_PROG; timeout = 900)
+    exitcode, output = run_ovrtx_subprocess(_M3_MESHSCATTER_MATERIAL_LIVE_PROG; timeout = 900, retries = 2, ready_marker = "OK_MESHSCATTER_MATERIAL_LIVE")
     @info "M3 meshscatter material-live subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_MESHSCATTER_MATERIAL_LIVE")

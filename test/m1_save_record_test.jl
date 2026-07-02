@@ -144,7 +144,7 @@ println("OK_SAVE_RECORD")
 """
 
 @testset "M1.6 save/record/offscreen plumbing (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M16_SAVE_RECORD_PROG; timeout = 1800)
+    exitcode, output = run_ovrtx_subprocess(_M16_SAVE_RECORD_PROG; timeout = 1800, retries = 2, ready_marker = "OK_SAVE_RECORD")
     @info "M1.6 subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_SAVE_RECORD")

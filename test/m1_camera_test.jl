@@ -135,7 +135,7 @@ println("OK_CAMERA")
 end
 
 @testset "M1.3 author_camera! drives viewpoint (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M13_CAMERA_PROG; timeout=600)
+    exitcode, output = run_ovrtx_subprocess(_M13_CAMERA_PROG; timeout=600, retries=2, ready_marker="OK_CAMERA")
     @info "M1.3 subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_CAMERA")

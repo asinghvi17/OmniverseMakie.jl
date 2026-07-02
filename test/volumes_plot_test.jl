@@ -15,13 +15,15 @@
 # Skips cleanly when the Kit IndeX libs dir is absent (CI without them stays green).
 
 using Test
-const _LIBS = get(ENV, "OMNIVERSEMAKIE_INDEX_LIBS", "/home/juliahub/.local/share/ov/data/exts/v2/omni.index.libs-1287db94366cf6fe")
+include("helpers.jl")   # _HELPER_INDEX_LIBS + PROG_PIXEL_HELPERS (the latter spliced into the prog below)
 const _VOLPLOT_PROG = """
 using OmniverseMakie
 import OmniverseMakie as OM
 using OmniverseMakie: OV
-# Loops are wrapped in FUNCTIONS to avoid Julia top-level soft-scope errors on the accumulators
-# (the same reason test/m1_orientation_test.jl wraps its centroid loop).
+$(PROG_PIXEL_HELPERS)
+# make_vol's loop is wrapped in a FUNCTION to avoid Julia top-level soft-scope errors on the
+# accumulator (as test/m1_orientation_test.jl wraps its centroid loop); lit_centroid now comes from
+# the shared PROG_PIXEL_HELPERS prelude spliced above (identical (H, nb, crow, ccol); LUM_MIN=0.04f0).
 function make_vol(n)
     vol = zeros(Float32, n, n, n)
     # Graded blob in ONE octant: HIGH-x, HIGH-y, LOW-z (indices ~[n/2..n, n/2..n, 1..n/2]).  The
@@ -34,17 +36,6 @@ function make_vol(n)
         vol[i, j, k] = d < R ? Float32(3 * (1 - d / R)) : 0.0f0   # SPATIALLY-VARYING (uniform → IndeX-transparent)
     end
     return vol
-end
-function lit_centroid(img)
-    H, W = size(img)                                   # row INCREASES DOWNWARD (top-left origin); world −Z → larger row
-    sr = 0.0; sc = 0.0; nb = 0
-    for h in 1:H, w in 1:W
-        cc = img[h, w]
-        if (Float32(cc.r) + Float32(cc.g) + Float32(cc.b)) > 0.04
-            sr += h; sc += w; nb += 1
-        end
-    end
-    return (H = H, nb = nb, crow = nb > 0 ? sr / nb : -1.0, ccol = nb > 0 ? sc / nb : -1.0)
 end
 scene = Scene(size=(256,256)); cam3d!(scene)
 update_cam!(scene, Vec3f(38,38,22), Vec3f(0,0,0), Vec3f(0,0,1))
@@ -67,19 +58,15 @@ println("VOLTMP_EXISTED=", existed)
 println("VOLTMP_GONE=", gone)
 println("OK_VOLPLOT")
 """
-include("helpers.jl")
 @testset "Volumes: volume! renders (subprocess)" begin
-    if !isdir(_LIBS)
+    if !isdir(_HELPER_INDEX_LIBS)
         @test_skip "IndeX libs absent — volume! render test skipped"
     else
         # ovrtx has a known INTERMITTENT startup crash (GeometryGroup::attachToContext) that can kill
-        # the child before it renders; retry until it reports a render result so the hard @tests aren't
-        # flaky on that crash (mirrors volumes_writer_test.jl).
-        out = ""
-        for _ in 1:4
-            _, out = run_ovrtx_subprocess(_VOLPLOT_PROG; timeout=600, env=("OMNIVERSEMAKIE_INDEX_LIBS"=>_LIBS))
-            contains(out, "VOLPLOT_NONBLACK=") && break
-        end
+        # the child before it renders; `retries`/`ready_marker` re-run until it reports a render result
+        # so the hard @tests aren't flaky on that crash (mirrors volumes_writer_test.jl).
+        _, out = run_ovrtx_subprocess(_VOLPLOT_PROG; timeout=600,
+            env=("OMNIVERSEMAKIE_INDEX_LIBS"=>_HELPER_INDEX_LIBS), retries=4, ready_marker="VOLPLOT_NONBLACK=")
         contains(out, "OK_VOLPLOT") || @info "volume! output" out
         @test contains(out, "OK_VOLPLOT")                                  # subprocess completed all work (no mid-run death)
         @test contains(out, "INDEX_ENABLED=true")

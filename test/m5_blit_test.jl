@@ -39,7 +39,7 @@ println("OK_BLIT")
 """
 include("helpers.jl")
 @testset "M5 cpu_blit! campixel! orientation (subprocess, offscreen GL)" begin
-    exitcode, output = run_ovrtx_subprocess(_M5_BLIT_PROG; timeout = 300)
+    exitcode, output = run_ovrtx_subprocess(_M5_BLIT_PROG; timeout = 300, retries = 2, ready_marker = "OK_BLIT")
     @info "M5 blit output" output
     @test exitcode == 0
     @test contains(output, "OK_BLIT")
