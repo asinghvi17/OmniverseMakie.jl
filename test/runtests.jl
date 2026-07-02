@@ -168,3 +168,9 @@ include("volumes_color_test.jl")
 # files stay bounded (prior deleted each edit, last cleaned on close), and an all-zero volume! no-ops
 # cleanly (subprocess, env-gated, skip-if-absent).
 include("volumes_live_test.jl")
+
+# Review Track A / Task A1 — OV.enqueue_wait op-error propagation + alive-check ordering:
+# open_usd! on a missing file throws OVRTXError (resolved from ovrtx_op_wait_result_t.error_op_ids,
+# which the enqueue/wait status hides); step!/reset! on a closed Renderer error cleanly before any
+# ccall now that the enqueue is a deferred thunk (subprocess).
+include("a1_op_error_test.jl")

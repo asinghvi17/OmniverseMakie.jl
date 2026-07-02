@@ -75,13 +75,36 @@ end
 # Async lifecycle: enqueue (ovrtx_enqueue_result_t) -> wait_op
 # ------------------------------------------------------------------
 
-function enqueue_wait(r::Renderer, enq, op::AbstractString;
+"""
+    enqueue_wait(f, r::Renderer, op::AbstractString; timeout_ns) -> ovrtx_op_wait_result_t
+
+Run one enqueue-then-wait cycle.  `f` is a THUNK returning the
+`ovrtx_enqueue_result_t` (pass it as a `do` block) — the alive check runs FIRST, so a
+closed Renderer errors cleanly BEFORE the enqueue ccall (whose args would otherwise
+pass `C_NULL` into ovrtx).  After the wait, per-op failures reported in
+`ovrtx_op_wait_result_t.error_op_ids` (e.g. a missing USD file — the enqueue AND the
+wait both still report SUCCESS) are resolved via `ovrtx_get_last_op_error` and thrown
+as `OVRTXError`.
+"""
+function enqueue_wait(f, r::Renderer, op::AbstractString;
                      timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
     r.alive || error("enqueue_wait called on a closed Renderer")
+    enq = f()
     LibOVRTX.check(enq, op)
     wait_ref = Ref{LibOVRTX.ovrtx_op_wait_result_t}()
     LibOVRTX.check(LibOVRTX.ovrtx_wait_op(r.ptr, enq.op_index, LibOVRTX.ovrtx_timeout_t(timeout_ns), wait_ref), op * ":wait")
-    return wait_ref[]
+    wr = wait_ref[]
+    if wr.num_error_ops != 0
+        # Per-op failures surface ONLY here.  error_op_ids + the ovrtx_get_last_op_error
+        # strings are transient thread-local data invalidated by the next ovrtx_wait_op —
+        # copy each String(::ovx_string_t) immediately, same discipline as LibOVRTX.check.
+        msgs = String[]
+        for i in 1:wr.num_error_ops
+            push!(msgs, String(LibOVRTX.ovrtx_get_last_op_error(unsafe_load(wr.error_op_ids, i))))
+        end
+        throw(LibOVRTX.OVRTXError(op, join(msgs, "; ")))
+    end
+    return wr
 end
 
 # ------------------------------------------------------------------
@@ -96,7 +119,9 @@ Open a USD stage from the file at `path`.  Synchronous (enqueue + wait);
 """
 function open_usd!(r::Renderer, path::AbstractString)
     GC.@preserve path begin
-        enqueue_wait(r, LibOVRTX.ovrtx_open_usd_from_file(r.ptr, LibOVRTX.ovx_string(path)), "open_usd")
+        enqueue_wait(r, "open_usd") do
+            LibOVRTX.ovrtx_open_usd_from_file(r.ptr, LibOVRTX.ovx_string(path))
+        end
     end
     return nothing
 end
@@ -108,7 +133,9 @@ Open a USD stage from an in-memory USDA string.  Synchronous.
 """
 function open_usd_string!(r::Renderer, usda::AbstractString)
     GC.@preserve usda begin
-        enqueue_wait(r, LibOVRTX.ovrtx_open_usd_from_string(r.ptr, LibOVRTX.ovx_string(usda)), "open_usd_string")
+        enqueue_wait(r, "open_usd_string") do
+            LibOVRTX.ovrtx_open_usd_from_string(r.ptr, LibOVRTX.ovx_string(usda))
+        end
     end
     return nothing
 end
@@ -149,7 +176,9 @@ function step!(r::Renderer, product::AbstractString;
     GC.@preserve product rp begin
         set = LibOVRTX.ovrtx_render_product_set_t(pointer(rp), Csize_t(1))
         h = Ref{LibOVRTX.ovrtx_step_result_handle_t}(0)
-        enqueue_wait(r, LibOVRTX.ovrtx_step(r.ptr, set, dt, h), "step"; timeout_ns)
+        enqueue_wait(r, "step"; timeout_ns) do
+            LibOVRTX.ovrtx_step(r.ptr, set, dt, h)
+        end
         sr = StepResult(r, h[], true)
         finalizer(close, sr)
         return sr
@@ -226,7 +255,10 @@ function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
     raw    = unsafe_wrap(Array, Ptr{UInt8}(dlt.data), (C, W, H); own=false)
     pixels = copy(raw)
 
-    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)  # NOSYNC: CPU map
+    # NOSYNC: CPU map.  Check the result — an unmap failure means the copy above may be
+    # invalid (mapped memory dies on unmap).
+    LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
+                   "unmap_render_var_output")
 
     return (pixels, W, H)
 end
@@ -266,7 +298,10 @@ function map_cpu_f32(sr::StepResult, name::AbstractString)
     raw16  = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
     pixels = Float32.(raw16)
 
-    LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)  # NOSYNC: CPU map
+    # NOSYNC: CPU map.  Check the result — an unmap failure means the copy above may be
+    # invalid (mapped memory dies on unmap).
+    LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
+                   "unmap_render_var_output")
 
     return (pixels, W, H)
 end
@@ -380,7 +415,9 @@ function enqueue_pick_query(r::Renderer, product::AbstractString, rect::NTuple{4
     GC.@preserve prod_s begin
         desc = Ref(LibOVRTX.ovrtx_pick_query_desc_t(LibOVRTX.ovx_string(prod_s),
                    Int32(rect[1]), Int32(rect[2]), Int32(rect[3]), Int32(rect[4]), flags))
-        enqueue_wait(r, LibOVRTX.ovrtx_enqueue_pick_query(r.ptr, desc), "enqueue_pick_query")
+        enqueue_wait(r, "enqueue_pick_query") do
+            LibOVRTX.ovrtx_enqueue_pick_query(r.ptr, desc)
+        end
     end
     return nothing
 end
@@ -566,8 +603,9 @@ function set_selection_outline_group!(r::Renderer, prim_paths::Vector{String}, g
         GC.@preserve dl_arr begin
             ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
                        Ptr{UInt8}(C_NULL), Csize_t(0), LibOVRTX.NOSYNC, LibOVRTX.NOSYNC))
-            enqueue_wait(r, LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
-                         "set_selection_outline_group")
+            enqueue_wait(r, "set_selection_outline_group") do
+                LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC)
+            end
         end
     end
     return nothing
@@ -586,8 +624,10 @@ function set_selection_group_styles!(r::Renderer, group_ids::Vector{UInt8},
     length(group_ids) == length(styles) ||
         error("set_selection_group_styles!: group_ids ($(length(group_ids))) and styles ($(length(styles))) length mismatch")
     GC.@preserve group_ids styles begin
-        enqueue_wait(r, LibOVRTX.ovrtx_set_selection_group_styles(r.ptr, pointer(group_ids),
-                     pointer(styles), Csize_t(length(group_ids))), "set_selection_group_styles")
+        enqueue_wait(r, "set_selection_group_styles") do
+            LibOVRTX.ovrtx_set_selection_group_styles(r.ptr, pointer(group_ids),
+                pointer(styles), Csize_t(length(group_ids)))
+        end
     end
     return nothing
 end
@@ -653,7 +693,9 @@ Enqueue + wait an RT2 accumulation reset.  Call after any geometry/camera change
 the path-tracer restarts fresh.
 """
 function reset!(r::Renderer; time::Float64=0.0)
-    enqueue_wait(r, LibOVRTX.ovrtx_reset(r.ptr, time), "reset")
+    enqueue_wait(r, "reset") do
+        LibOVRTX.ovrtx_reset(r.ptr, time)
+    end
     return nothing
 end
 
@@ -705,8 +747,9 @@ function _write_attribute!(r::Renderer, prim::AbstractString, attr_name::Abstrac
                 LibOVRTX.NOSYNC,
                 LibOVRTX.NOSYNC,
             ))
-            enqueue_wait(r, LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
-                         "write_attribute($attr_name)")
+            enqueue_wait(r, "write_attribute($attr_name)") do
+                LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC)
+            end
         end
     end
     return nothing
@@ -872,10 +915,10 @@ function add_usd_reference!(r::Renderer, usda::AbstractString, prim_path::Abstra
     path_s  = String(prim_path)
     h = Ref{LibOVRTX.ovrtx_usd_handle_t}(0)
     GC.@preserve layer_s path_s begin
-        enqueue_wait(r,
+        enqueue_wait(r, "add_usd_reference") do
             LibOVRTX.ovrtx_add_usd_reference_from_string(
-                r.ptr, LibOVRTX.ovx_string(layer_s), LibOVRTX.ovx_string(path_s), h),
-            "add_usd_reference")
+                r.ptr, LibOVRTX.ovx_string(layer_s), LibOVRTX.ovx_string(path_s), h)
+        end
     end
     return h[]
 end
@@ -886,7 +929,9 @@ end
 Remove the USD layer previously added via `add_usd_reference!`.
 """
 function remove_usd!(r::Renderer, handle::LibOVRTX.ovrtx_usd_handle_t)
-    enqueue_wait(r, LibOVRTX.ovrtx_remove_usd(r.ptr, handle), "remove_usd")
+    enqueue_wait(r, "remove_usd") do
+        LibOVRTX.ovrtx_remove_usd(r.ptr, handle)
+    end
     return nothing
 end
 
@@ -962,8 +1007,9 @@ function create_binding(r::Renderer, prim::AbstractString, name::AbstractString,
             attr_lookup, attr_type, LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY, flags)
         bref = Ref(bdesc)
         GC.@preserve bref begin
-            enqueue_wait(r, LibOVRTX.ovrtx_create_attribute_binding(r.ptr, bref, handle),
-                         "create_attribute_binding($name)")
+            enqueue_wait(r, "create_attribute_binding($name)") do
+                LibOVRTX.ovrtx_create_attribute_binding(r.ptr, bref, handle)
+            end
         end
     end
     b = Binding(r, handle[], prim_s, name_s, dtype, array, semantic,
@@ -1000,8 +1046,9 @@ or the Renderer is closed.
 """
 function unmap!(b::Binding)
     b.map_handle == 0 && return nothing
-    b.r.alive && enqueue_wait(b.r, LibOVRTX.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, LibOVRTX.NOSYNC),
-                              "unmap_attribute")
+    b.r.alive && enqueue_wait(b.r, "unmap_attribute") do
+        LibOVRTX.ovrtx_unmap_attribute(b.r.ptr, b.map_handle, LibOVRTX.NOSYNC)
+    end
     b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
     return nothing
 end
@@ -1048,8 +1095,9 @@ function write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
         GC.@preserve dl_arr begin
             ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
                        Ptr{UInt8}(C_NULL), Csize_t(0), LibOVRTX.NOSYNC, LibOVRTX.NOSYNC))
-            enqueue_wait(b.r, LibOVRTX.ovrtx_write_attribute(b.r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC),
-                         "write_attribute(binding:$(b.attr_name))")
+            enqueue_wait(b.r, "write_attribute(binding:$(b.attr_name))") do
+                LibOVRTX.ovrtx_write_attribute(b.r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC)
+            end
         end
     end
     return nothing
@@ -1065,8 +1113,9 @@ function destroy!(b::Binding)
     b.alive || return nothing
     if b.r.alive
         b.map_handle == 0 || unmap!(b)
-        enqueue_wait(b.r, LibOVRTX.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle),
-                     "destroy_attribute_binding")
+        enqueue_wait(b.r, "destroy_attribute_binding") do
+            LibOVRTX.ovrtx_destroy_attribute_binding(b.r.ptr, b.handle)
+        end
     end
     b.map_handle = LibOVRTX.ovrtx_map_handle_t(0)
     b.alive = false
