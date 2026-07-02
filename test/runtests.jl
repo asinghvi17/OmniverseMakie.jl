@@ -29,6 +29,11 @@ include("m1_lights_test.jl")
 # no corrupt diff baseline) + de-duplicated RectLight transform (pure, no GPU).
 include("l1_lights_structural_test.jl")
 
+# Review-fix Track L2 — sync_lights! allocation diet: LightState (stack-tuple xform) in a
+# concrete-eltype snapshot + path-string reuse make the per-frame rebuild allocation-lean
+# (no Dict / fresh strings / Matrix temporaries); + change detection stays exact (pure, no GPU).
+include("l2_lights_alloc_test.jl")
+
 include("m1_mesh_render_test.jl")
 include("m1_orientation_test.jl")
 include("m1_save_record_test.jl")
