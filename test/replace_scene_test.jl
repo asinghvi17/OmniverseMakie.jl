@@ -7,6 +7,12 @@
 #   • the RIGHT (2D diagnostic) region is ~UNCHANGED — the other axis stays GLMakie;
 #   • the ovrtx present buffer is non-black and RESPONDS to orbiting the LScene camera;
 #   • close() frees the ovrtx Screen but leaves the host GLMakie window open, and is idempotent.
+#
+# Second prog: a usdplot INSIDE the replaced LScene.  The childless USDPlot reaches GLMakie's
+# atomic branch (insert! → draw_atomic), so without the ext's no-op draw_atomic the
+# `display(fig)` PRECONDITION of replace_scene! MethodErrors before any RTX work starts.
+# Asserts: display succeeds, plain GL draws NOTHING for the usdplot, and the replace_scene!
+# overlay then shows the USD asset via ovrtx.
 
 using Test
 include("helpers.jl")
@@ -140,4 +146,111 @@ println("OK_REPLACE_SCENE")
     # Teardown contract: host window open, ovrtx Screen closed, idempotent.
     @test contains(out, "PARENT_OPEN_AFTER_CLOSE=true")
     @test contains(out, "SCREEN_CLOSED=true")
+end
+
+# ---------------------------------------------------------------------------------------------
+# usdplot inside the replaced scene
+# ---------------------------------------------------------------------------------------------
+
+# Red doubleSided X-Y quad, defaultPrim "Model" — same shape as the usdplot_test fixture.  Built
+# parent-side and embedded via `repr(...)` so no nested `\"\"\"` collides with the prog literal.
+const _REPLACE_QUAD_USDA = """#usda 1.0
+(
+    defaultPrim = "Model"
+)
+def Xform "Model"
+{
+    def Mesh "Geo"
+    {
+        uniform bool doubleSided = true
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        color3f[] primvars:displayColor = [(1, 0, 0)] (
+            interpolation = "constant"
+        )
+    }
+}
+"""
+
+const _REPLACE_USDPLOT_PROG = """
+using OmniverseMakie, GLMakie, ColorTypes, FixedPointNumbers
+const OM = OmniverseMakie
+
+lum(c) = Float32(c.r) + Float32(c.g) + Float32(c.b)
+# Red-dominant pixel count over a column range [c0,c1] of an [H,W] image.
+function region_red(img, c0, c1)
+    H, W = size(img); n = 0
+    for h in 1:H, w in c0:min(c1, W)
+        c = img[h, w]
+        Float32(c.r) > Float32(c.g) + 0.15f0 && Float32(c.r) > Float32(c.b) + 0.15f0 && (n += 1)
+    end
+    return n
+end
+function region_nonblack(img, c0, c1)
+    H, W = size(img); n = 0
+    for h in 1:H, w in c0:min(c1, W)
+        lum(img[h, w]) > 0.04 && (n += 1)
+    end
+    return n
+end
+
+const QUAD = tempname() * ".usda"
+write(QUAD, $(repr(_REPLACE_QUAD_USDA)))
+
+GLMakie.activate!()
+fig = Figure(size = (700, 350))
+ls  = LScene(fig[1, 1]; show_axis = false)
+p   = usdplot!(ls, QUAD)                     # the ONLY plot in the LScene (pure regression)
+ax  = Axis(fig[1, 2]); lines!(ax, 0:0.1:10, sin.(0:0.1:10); color = :blue, linewidth = 3)
+
+# The replace_scene! PRECONDITION: display the figure in GLMakie.  Without the ext's no-op
+# draw_atomic(::USDPlot) this MethodErrors in insertplots! before any RTX work starts.
+glscr = GLMakie.Screen(; visible = false)
+display(glscr, fig.scene)
+println("DISPLAY_OK=true")
+
+# Plain GL draws NOTHING for the usdplot (the documented no-op) — no red in the left half.
+base = copy(GLMakie.colorbuffer(glscr))
+W = size(base, 2); half = W ÷ 2
+println("GL_LEFT_RED=", region_red(base, 1, half))
+
+session = OM.replace_scene!(ls)
+println("AUTHORED_PLOTS=", length(session.screen.plot2robj))
+for _ in 1:6; GLMakie.colorbuffer(glscr); end
+shot = copy(GLMakie.colorbuffer(glscr))
+# The ovrtx overlay now shows the referenced USD asset (red quad) in the left half; the 2D
+# diagnostic on the right still renders.
+println("RTX_LEFT_RED=", region_red(shot, 1, half))
+println("RIGHT_NONBLACK=", region_nonblack(shot, half + 1, W))
+
+close(session)
+println("PARENT_OPEN_AFTER_CLOSE=", isopen(glscr))
+GLMakie.colorbuffer(glscr)                   # the usdplot stays in the GL scene — still no crash
+println("POST_CLOSE_RENDER_OK=true")
+println("OK_REPLACE_USDPLOT")
+"""
+
+@testset "replace_scene!: usdplot in the replaced scene (subprocess)" begin
+    _, out = run_ovrtx_subprocess(_REPLACE_USDPLOT_PROG; timeout = 600, retries = 4,
+                                  ready_marker = "OK_REPLACE_USDPLOT")
+    contains(out, "OK_REPLACE_USDPLOT") || @info "replace_scene!+usdplot output" out
+    @test contains(out, "OK_REPLACE_USDPLOT")
+
+    # GLMakie ingested the childless USDPlot (display precondition) and drew nothing for it.
+    @test contains(out, "DISPLAY_OK=true")
+    m_glr = match(r"GL_LEFT_RED=(\d+)", out)
+    @test m_glr !== nothing && parse(Int, m_glr.captures[1]) == 0
+
+    # replace_scene! authored the usdplot and the overlay shows the red USD quad.
+    m_auth = match(r"AUTHORED_PLOTS=(\d+)", out)
+    @test m_auth !== nothing && parse(Int, m_auth.captures[1]) >= 1
+    m_red = match(r"RTX_LEFT_RED=(\d+)", out)
+    @test m_red !== nothing && parse(Int, m_red.captures[1]) > 300
+    m_rnb = match(r"RIGHT_NONBLACK=(\d+)", out)
+    @test m_rnb !== nothing && parse(Int, m_rnb.captures[1]) > 300
+
+    # Teardown: host window survives, and GL keeps tolerating the (no-op) usdplot.
+    @test contains(out, "PARENT_OPEN_AFTER_CLOSE=true")
+    @test contains(out, "POST_CLOSE_RENDER_OK=true")
 end

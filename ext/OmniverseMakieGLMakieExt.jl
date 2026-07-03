@@ -10,6 +10,16 @@ import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
 using OmniverseMakie: tonemap
 using Makie: Consume, MouseButtonEvent  # event types for the input forwarders
 
+# A USDPlot is a CHILDLESS recipe, so GLMakie's insert! routes it to the atomic branch
+# (plot-primitives.jl: `isempty(x.plots)` → draw_atomic) — without a method here,
+# `display(fig)` MethodErrors, and that display is the replace_scene! PRECONDITION.  GL cannot
+# render a USD reference, so draw NOTHING (the usdplot docstring's contract; same shape as
+# GLMakie's own `draw_atomic(::Screen, ::Scene, ::PlotList) = nothing` for childless
+# PlotLists) — the asset appears only through an ovrtx path (offscreen colorbuffer,
+# interactive_display, or the replace_scene! overlay).  Deletion is already safe: GLMakie's
+# `delete!(screen, scene, plot)` tolerates a plot with no cached renderobject.
+GLMakie.draw_atomic(::GLMakie.Screen, ::Makie.Scene, ::OmniverseMakie.USDPlot) = nothing
+
 # ===== moved verbatim from src/interactive/blit.jl =====
 # CPU blit (M5): set the image! plot's data Observable from a frame; GLMakie
 # re-uploads the texture on the change (idiomatic Makie path).
