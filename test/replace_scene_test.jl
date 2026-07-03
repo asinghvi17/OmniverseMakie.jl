@@ -78,6 +78,14 @@ for _ in 1:6; GLMakie.colorbuffer(glscr); end
 c2 = pbuf_centroid(session.present_buf)
 println("ORBIT_MOVED=", abs(c1[1] - c2[1]) + abs(c1[2] - c2[2]))
 
+# ★ Regression guard (the notify(::Computed) no-op bug): assert the COMPOSITED output — a second
+# GLMakie.colorbuffer AFTER the orbit — actually changed in the embedded (left) region, not just
+# present_buf. `shot` was the pre-orbit composite; if the GL texture never re-uploaded (the bug),
+# shot2's left region is byte-frozen and COMPOSITE_ORBIT_DIFF ≈ 0.
+shot2 = copy(GLMakie.colorbuffer(glscr))
+println("COMPOSITE_ORBIT_DIFF=", region_diff(shot, shot2, 1, half))
+println("COMPOSITE_ORBIT_RIGHT_DIFF=", region_diff(shot, shot2, half + 1, W))
+
 # Teardown: host window stays open, embedded ovrtx Screen closes; idempotent.
 close(session)
 println("PARENT_OPEN_AFTER_CLOSE=", isopen(glscr))
@@ -114,9 +122,20 @@ println("OK_REPLACE_SCENE")
     m_rnb = match(r"RIGHT_NONBLACK=(\d+)", out)
     @test m_rnb !== nothing && parse(Int, m_rnb.captures[1]) > 300
 
-    # The live embedded loop responds to orbiting the LScene camera.
+    # The live embedded loop responds to orbiting the LScene camera (present buffer moved).
     m_mov = match(r"ORBIT_MOVED=([-\d.]+)", out)
     @test m_mov !== nothing && parse(Float64, m_mov.captures[1]) > 2.0
+
+    # ★ ...AND that response reaches the COMPOSITED frame — a second colorbuffer after the orbit
+    # differs in the embedded (left) region, well above the ~unchanged 2D (right) region. This is
+    # the regression guard for the notify(::Computed)-is-a-no-op freeze (the old code never
+    # re-uploaded the GL texture, so the composite stayed frozen while present_buf advanced).
+    m_cod  = match(r"COMPOSITE_ORBIT_DIFF=([-\d.]+)", out)
+    m_codr = match(r"COMPOSITE_ORBIT_RIGHT_DIFF=([-\d.]+)", out)
+    @test m_cod !== nothing && parse(Float64, m_cod.captures[1]) > 0.02
+    if m_cod !== nothing && m_codr !== nothing
+        @test parse(Float64, m_cod.captures[1]) > parse(Float64, m_codr.captures[1]) * 3
+    end
 
     # Teardown contract: host window open, ovrtx Screen closed, idempotent.
     @test contains(out, "PARENT_OPEN_AFTER_CLOSE=true")

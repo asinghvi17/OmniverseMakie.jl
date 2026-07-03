@@ -429,10 +429,21 @@ function _cpu_present!(session)
                 session.present_buf = buf
                 session.image_plot[3][] = buf
             end
-            # Fuse tonemap+orient straight into the cached buffer (in place), then notify so GLMakie
-            # re-uploads the texture from that SAME array — zero steady-state display garbage.
+            # Fuse tonemap+orient straight into the cached buffer (in place), then re-seat it as the
+            # image plot's data so GLMakie re-uploads the texture from that SAME array — zero
+            # steady-state display garbage.
+            #
+            # ★ Use ASSIGNMENT (`[3][] = buf`), NOT `notify(image_plot[3])`: `image_plot[3]` is a
+            # ComputePipeline `Computed` node, and `Base.notify(::Computed)` is a NO-OP
+            # (Makie compute-plots.jl: `notify(computed) = computed`).  A bare notify never marks
+            # the graph dirty, so GLMakie's `poll_updates`→`:gl_renderobject`→`update_robjs!`
+            # texture upload never fires and the composited frame stays FROZEN at the warmup image
+            # (only `present_buf` — mutated in place — advances).  `setindex!` routes through
+            # `mark_dirty!`; because `is_same` conservatively returns `false` for the same mutable
+            # array object, re-assigning the in-place-mutated `buf` still dirties the node and
+            # triggers the re-upload, with no fresh allocation (INT-2 zero-copy preserved).
             _tonemap_orient!(buf, raw16, session.exposure)
-            Makie.notify(session.image_plot[3])
+            session.image_plot[3][] = buf
             return nothing
         end
     finally
