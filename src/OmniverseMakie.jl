@@ -60,13 +60,19 @@ function _pick_at! end
 # figure with a live ovrtx raytraced render, leaving the other axes as GLMakie 2D diagnostics
 # (the RPRMakie `replace_scene_rpr!` pattern).  GLMakie ext adds the method.
 function replace_scene! end
-export interactive_display, replace_scene!
+# Scripted-recording companion (GLMakie ext adds the method): drive `ticks` synchronous host
+# frames on a STOPPED render loop and return the composited figure image — see the
+# `replace_scene!` docstring's recording recipe.
+function record_frame! end
+export interactive_display, replace_scene!, record_frame!
 
 # Error helpfully when no GLMakie extension is loaded (no method otherwise).
 interactive_display(::Any; kwargs...) =
     error("interactive_display requires GLMakie — run `using GLMakie` (and `using CUDA` for GPU-direct).")
 replace_scene!(::Any; kwargs...) =
     error("replace_scene! requires GLMakie — run `using GLMakie` and display the figure first.")
+record_frame!(::Any; kwargs...) =
+    error("record_frame! requires GLMakie — run `using GLMakie`; it records a replace_scene! session.")
 
 # Re-export every Makie name verbatim (GLMakie/src/GLMakie.jl:36-41).
 for name in names(Makie, all = true)

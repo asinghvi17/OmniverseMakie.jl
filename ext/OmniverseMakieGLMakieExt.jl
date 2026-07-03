@@ -6,7 +6,7 @@ using OmniverseMakie: Makie, RGBA, N0f8, ColorTypes
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
     _scene_for_camera, interactive_display, present!, on_render_tick!, cpu_blit!,
     attach_picking!, detach_picking!, _pick_at!,  # M6.B Task 5: picking
-    replace_scene!, ScreenConfig                   # hybrid embedded viewport
+    replace_scene!, record_frame!, ScreenConfig    # hybrid embedded viewport
 using OmniverseMakie: tonemap
 using Makie: Consume, MouseButtonEvent  # event types for the input forwarders
 
@@ -686,6 +686,41 @@ stops.  v1 is CPU-blit and one embedded scene per figure.
 
 Returns an `EmbeddedSession`; `close(session)` detaches the hooks, removes the overlay, and
 frees the ovrtx renderer WITHOUT touching the host GLMakie window.
+
+## Recording (scripted / offscreen)
+
+The embedded blit marks the host scene dirty on every tick, so once a session is attached
+GLMakie's on-demand render loop self-sustains at full rate — a `write` to a child-process pipe
+(e.g. ffmpeg rawvideo) from the same task can then starve forever (libuv never gets a loop
+turn).  For scripted recording, STOP the loop and drive frames synchronously:
+
+    glscr = GLMakie.Screen(; visible = false, px_per_unit = 1, scalefactor = 1)
+    display(glscr, fig.scene)
+    GLMakie.colorbuffer(glscr)                                        # layout pass
+    GLMakie.stop_renderloop!(glscr; close_after_renderloop = false)   # keep the screen OPEN
+    session = replace_scene!(ls; steps_per_tick = 8)
+    for t in timesteps
+        # ... update observables, then re-apply update_cam! (see below) ...
+        img = record_frame!(session; ticks = 3)     # 3 sync ticks = 24 accumulated samples
+        write(vio, permutedims(img))                # pipe writes now complete
+    end
+
+Two footguns: `stop_renderloop!`'s default `close_after_renderloop = true` CLOSES the screen
+(after which `replace_scene!` errors) — pass `false`; and the loop must only be stopped, the
+screen kept open, which still satisfies the `replace_scene!` precondition.  Each
+[`record_frame!`](@ref) tick is a fully synchronous `GLMakie.colorbuffer` (pollevents →
+render_tick → embedded step+blit → texture upload → composite), so this is also ~10% faster
+than recording against a live loop.
+
+Scripted cameras: the per-tick sync follows the target's `Camera3D` LIVE — anything that
+touches it after your `update_cam!` (an LScene re-fit around display, a recipe's own camera
+logic) silently wins and BOTH views jump.  Re-apply `update_cam!` per recorded frame; it is
+cheap (accumulation only resets on an actual change).
+
+Debugging a wrong composite: save (a) the pure-GL baseline (`colorbuffer` before
+`replace_scene!`), (b) the native ground truth (`Makie.colorbuffer(OmniverseMakie.Screen(ls.scene))`),
+and (c) `permutedims(session.present_buf)`.  Composite == GL baseline ⇒ the overlay is not
+drawing; present_buf correct but wrong view ⇒ a camera fight.
 """
 # Typed narrower than the main module's `replace_scene!(::Any)` fallback so it OVERRIDES (not
 # overwrites) it: LScene / Axis3 are `Makie.Block`s, a raw target is a `Makie.Scene`.
@@ -695,7 +730,8 @@ function replace_scene!(target::Union{Makie.Scene,Makie.Block};
     parent = Makie.getscreen(Makie.root(tscene), GLMakie)
     parent === nothing && throw(ArgumentError(
         "replace_scene!: the figure is not shown in a GLMakie window. Run `GLMakie.activate!(); \
-         display(fig)` before replace_scene! (the target needs a laid-out viewport + a render loop)."))
+         display(fig)` before replace_scene! (the target needs a laid-out viewport on an OPEN \
+         GLMakie screen — the render loop may be stopped, see the docstring's recording recipe)."))
     cam_scene = something(_scene_for_camera(tscene), tscene)
 
     # Render size = the target scene's pixel rectangle (blitted 1:1 into that rectangle).
@@ -715,8 +751,15 @@ function replace_scene!(target::Union{Makie.Scene,Makie.Block};
 
     # Overlay: a pixel-space child scene SHARING the target's viewport Observable (so it tracks
     # the rectangle across layout/resize), with our opaque image! drawn over the GL 3D beneath.
+    # ★ The overlay must NOT inherit the target's transformation: Makie's child-Scene constructor
+    # defaults `transformation = Transformation(parent)` (scenes.jl), so a root transform on the
+    # target — e.g. `rotate!(ls.scene, Q_X90)`, the usual Z-up trick — would rotate the blit quad
+    # edge-on and the composite would silently show the plain GL render underneath.  An unparented
+    # identity Transformation keeps the quad pixel-space forever (covers _resize_embedded! too,
+    # which re-creates the image! in this same sub-scene).
     GLMakie.activate!()
-    sub = Makie.Scene(tscene; viewport = tscene.viewport, clear = false)
+    sub = Makie.Scene(tscene; viewport = tscene.viewport, clear = false,
+                      transformation = Makie.Transformation())
     Makie.campixel!(sub)
     present_buf = Matrix{RGBA{N0f8}}(undef, W, H)
     _tonemap_orient!(present_buf, warmup_hdr, Float32(exposure))
@@ -744,6 +787,30 @@ function replace_scene!(target::Union{Makie.Scene,Makie.Block};
     end
 
     return session
+end
+
+"""
+    record_frame!(session::EmbeddedSession; ticks = 3)
+
+Drive `ticks` synchronous host frames and return the composited figure image (`[H,W]`,
+`Makie.JuliaNative`) — the scripted-recording companion to [`replace_scene!`](@ref); see its
+docstring's recording recipe (stop the render loop first with
+`GLMakie.stop_renderloop!(glscr; close_after_renderloop = false)`).
+
+Each tick is one `GLMakie.colorbuffer` on the host screen: pollevents fires `render_tick` →
+the embedded hook steps ovrtx `steps_per_tick` times and blits → the dirtied texture uploads →
+the frame composites, all synchronously.  So one recorded frame accumulates
+`ticks × steps_per_tick` RTX samples (a moved camera/scene resets accumulation on the first
+tick; the rest refine).  The returned image is GLMakie's frame cache — copy it (or feed it
+straight to a `write`/`permutedims`, which copies) before the next frame.
+"""
+function record_frame!(session::EmbeddedSession; ticks::Int = 3)
+    ticks >= 1 || throw(ArgumentError("record_frame!: need ticks >= 1, got $ticks"))
+    local img
+    for _ in 1:ticks
+        img = Makie.colorbuffer(session.parent_glscreen)
+    end
+    return img
 end
 
 # Per-frame embedded hook: push live camera/light/plot deltas, reset RT2 only on a real change

@@ -13,6 +13,15 @@
 # `display(fig)` PRECONDITION of replace_scene! MethodErrors before any RTX work starts.
 # Asserts: display succeeds, plain GL draws NOTHING for the usdplot, and the replace_scene!
 # overlay then shows the USD asset via ovrtx.
+#
+# Third prog (CarComponents field report): rotated target + scripted recording.
+#   • a root `rotate!(ls.scene, Q_X90)` (the Z-up trick) must NOT rotate the overlay — pre-fix
+#     the sub-scene inherited the target's Transformation, the blit quad went edge-on, and the
+#     composite silently equaled the pure-GL baseline (LEFT_DIFF == 0.0, repro-proven);
+#   • the recording recipe: `stop_renderloop!(glscr; close_after_renderloop = false)` BEFORE
+#     replace_scene! (the corrected precondition accepts a stopped loop on an open screen), then
+#     `record_frame!` drives fully synchronous ticks and a >64KB child-process pipe write
+#     completes (the field failure: a hot on-demand loop starved libuv → ffmpeg write hung).
 
 using Test
 include("helpers.jl")
@@ -253,4 +262,100 @@ println("OK_REPLACE_USDPLOT")
     # Teardown: host window survives, and GL keeps tolerating the (no-op) usdplot.
     @test contains(out, "PARENT_OPEN_AFTER_CLOSE=true")
     @test contains(out, "POST_CLOSE_RENDER_OK=true")
+end
+
+# ---------------------------------------------------------------------------------------------
+# rotated target + scripted recording (CarComponents field report #1 + #2)
+# ---------------------------------------------------------------------------------------------
+
+const _REPLACE_ROTATED_RECORD_PROG = """
+using OmniverseMakie, GLMakie, ColorTypes, FixedPointNumbers
+const OM = OmniverseMakie
+
+lum(c) = Float32(c.r) + Float32(c.g) + Float32(c.b)
+function region_diff(a, b, c0, c1)
+    H, W = size(a); s = 0.0; n = 0
+    for h in 1:H, w in c0:min(c1, W)
+        p = a[h, w]; q = b[h, w]
+        s += abs(Float32(p.r) - Float32(q.r)) + abs(Float32(p.g) - Float32(q.g)) +
+             abs(Float32(p.b) - Float32(q.b)); n += 1
+    end
+    return n == 0 ? 0.0 : s / n
+end
+
+GLMakie.activate!()
+fig = Figure(size = (700, 350))
+ls  = LScene(fig[1, 1])
+mesh!(ls, Rect3f(Point3f(-0.5), Vec3f(1)); color = :orange)
+ax  = Axis(fig[1, 2]); lines!(ax, 0:0.1:10, sin.(0:0.1:10); color = :blue, linewidth = 3)
+
+# The Z-up trick (MultibodyComponents-style content): a root rotation on the TARGET scene.
+# The overlay must not inherit it — pre-fix the blit quad went edge-on and the composite
+# silently equaled the pure-GL baseline.
+Makie.rotate!(ls.scene, Makie.qrotation(Vec3f(1, 0, 0), Float32(pi) / 2))
+
+glscr = GLMakie.Screen(; visible = false, px_per_unit = 1, scalefactor = 1)
+display(glscr, fig.scene)
+base = copy(GLMakie.colorbuffer(glscr))          # layout pass + pure-GL baseline
+W = size(base, 2); half = W ÷ 2
+
+# Recording recipe: STOP the render loop (screen stays OPEN) BEFORE replace_scene!.
+GLMakie.stop_renderloop!(glscr; close_after_renderloop = false)
+session = OM.replace_scene!(ls)
+println("REPLACED_ON_STOPPED_LOOP=true")
+
+img  = OM.record_frame!(session; ticks = 3)      # 3 fully synchronous host ticks
+shot = copy(img)
+println("PRESENT_NONBLACK=", count(c -> lum(c) > 0.04, session.present_buf))
+println("LEFT_DIFF=",  region_diff(base, shot, 1, half))
+println("RIGHT_DIFF=", region_diff(base, shot, half + 1, W))
+
+# Pipe-write smoke: a frame (>64KB, larger than the pipe buffer) written to a child process
+# completes on a stopped loop — the field failure was this write starving forever.
+sink = open(pipeline(`cat`; stdout = devnull), "w")
+write(sink, permutedims(shot))
+close(sink)
+println("PIPE_WRITE_OK=true")
+
+# Scripted camera per frame (docstring pattern): move, record again — the composite responds
+# without any live render loop.
+Makie.update_cam!(ls.scene, Vec3f(4, 2, 3), Vec3f(0, 0, 0), Vec3f(0, 0, 1))
+shot2 = copy(OM.record_frame!(session; ticks = 3))
+println("FRAME2_DIFF=", region_diff(shot, shot2, 1, half))
+
+close(session)
+println("PARENT_OPEN_AFTER_CLOSE=", isopen(glscr))
+println("OK_REPLACE_ROTATED_RECORD")
+"""
+
+@testset "replace_scene!: rotated target + stopped-loop recording (subprocess)" begin
+    _, out = run_ovrtx_subprocess(_REPLACE_ROTATED_RECORD_PROG; timeout = 600, retries = 2,
+                                  ready_marker = "OK_REPLACE_ROTATED_RECORD")
+    contains(out, "OK_REPLACE_ROTATED_RECORD") || @info "rotated+record output" out
+    @test contains(out, "OK_REPLACE_ROTATED_RECORD")
+
+    # The corrected precondition: replace_scene! attaches to an open screen with a STOPPED loop.
+    @test contains(out, "REPLACED_ON_STOPPED_LOOP=true")
+
+    # ovrtx rendered (present buffer lit) AND the overlay actually composited over the rotated
+    # target — pre-fix LEFT_DIFF was exactly 0.0 (composite == GL baseline, quad edge-on).
+    m_pnb = match(r"PRESENT_NONBLACK=(\d+)", out)
+    @test m_pnb !== nothing && parse(Int, m_pnb.captures[1]) > 300
+    m_ld = match(r"LEFT_DIFF=([-\d.]+)",  out)
+    m_rd = match(r"RIGHT_DIFF=([-\d.]+)", out)
+    @test m_ld !== nothing && m_rd !== nothing
+    if m_ld !== nothing && m_rd !== nothing
+        left_diff  = parse(Float64, m_ld.captures[1])
+        right_diff = parse(Float64, m_rd.captures[1])
+        @test left_diff  > 0.05           # the RTX overlay replaced the GL 3D despite the rotation
+        @test right_diff < left_diff / 3  # the 2D diagnostic stayed GLMakie
+    end
+
+    # The recording recipe end to end: the child-process pipe write completed (no libuv
+    # starvation on a stopped loop) and a second scripted-camera frame changed the composite.
+    @test contains(out, "PIPE_WRITE_OK=true")
+    m_f2 = match(r"FRAME2_DIFF=([-\d.]+)", out)
+    @test m_f2 !== nothing && parse(Float64, m_f2.captures[1]) > 0.02
+
+    @test contains(out, "PARENT_OPEN_AFTER_CLOSE=true")
 end

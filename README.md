@@ -138,6 +138,16 @@ session = replace_scene!(ls)                # ls is now a live RTX viewport, ax 
 v1 is CPU-blit and one embedded scene per figure; GPU-direct blit and multiple concurrent
 embeds are planned follow-ups.
 
+The embedded overlay is pixel-space and does NOT inherit the target scene's transformation,
+so a root `rotate!(ls.scene, ...)` (e.g. the Z-up trick) composites correctly.
+
+**Recording a hybrid figure** (e.g. piping frames to ffmpeg): stop the host render loop first —
+the per-tick blit otherwise keeps GLMakie's on-demand loop hot and a pipe `write` can starve.
+`stop_renderloop!(glscr; close_after_renderloop = false)` (the `false` keeps the screen open),
+then `record_frame!(session; ticks = 3)` per frame drives fully synchronous ticks and returns
+the composited image; re-apply `update_cam!` each frame if you script the camera. Full recipe
+in the `replace_scene!` docstring.
+
 ### Realtime-style recording (accumulate across frames)
 
 By default every frame reconverges the path tracer from scratch — correct, but slow for
