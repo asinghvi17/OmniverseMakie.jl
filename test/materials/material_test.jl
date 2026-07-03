@@ -65,7 +65,7 @@ end
 const _M32_COMPOSE_PROG = read(joinpath(@__DIR__, "material_compose_prog.jl"), String)
 
 @testset "M3.2 materialized mesh renders metallic via colorbuffer (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M32_COMPOSE_PROG; timeout = 900, retries = 2, ready_marker = "OK_COMPOSE")
+    exitcode, output = run_ovrtx_subprocess(_M32_COMPOSE_PROG; timeout = 900, retries = 2, ready_marker = "ELTYPE=")
     @info "M3.2 compose subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_COMPOSE")
@@ -172,7 +172,7 @@ end
 const _M35_PRIM_MAT_PROG = read(joinpath(@__DIR__, "primitives_material_prog.jl"), String)
 
 @testset "M3.5 materials on MeshScatter/Surface/Lines render (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M35_PRIM_MAT_PROG; timeout = 1500, retries = 2, ready_marker = "OK_PRIMITIVES_MATERIAL")
+    exitcode, output = run_ovrtx_subprocess(_M35_PRIM_MAT_PROG; timeout = 1500, retries = 2, ready_marker = "MESHSCATTER_MEANABSDIFF=")
     @info "M3.5 primitives-material subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_PRIMITIVES_MATERIAL")

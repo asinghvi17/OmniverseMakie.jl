@@ -36,7 +36,7 @@ end
 const _M4_SURF_TEX_PROG = read(joinpath(@__DIR__, "surface_texture_prog.jl"), String)
 
 @testset "M4 textured surface! samples the texture via colorbuffer (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M4_SURF_TEX_PROG; timeout = 600, retries = 2, ready_marker = "OK_SURFACE_TEXTURE")
+    exitcode, output = run_ovrtx_subprocess(_M4_SURF_TEX_PROG; timeout = 600, retries = 2, ready_marker = "ELTYPE=")
     @info "M4 surface-texture subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_SURFACE_TEXTURE")

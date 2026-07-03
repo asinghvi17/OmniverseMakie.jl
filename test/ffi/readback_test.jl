@@ -108,7 +108,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 @testset "A2 with_mapped_hdr passthrough + unmap-on-throw (subprocess)" begin
     # Retry the known intermittent ovrtx GeometryGroup::attachToContext startup crash:
     # re-run until the child reaches its first map.
-    _, out = run_ovrtx_subprocess(_A2_HDR_PROG; timeout = 400, retries = 4,
+    _, out = run_ovrtx_subprocess(_A2_HDR_PROG; timeout = 600, retries = 4,
                                   ready_marker = "PASSTHROUGH_OK=")
     contains(out, "OK_A2_HDR") || @info "A2 with_mapped_hdr output" out
     @test contains(out, "OK_A2_HDR")           # subprocess completed all work

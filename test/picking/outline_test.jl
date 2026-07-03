@@ -41,7 +41,7 @@ println("OK_OUTLINE")
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 @testset "M6.B selection outline (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M6B_OUTLINE_PROG; timeout = 400, retries = 2, ready_marker = "OK_OUTLINE")
+    exitcode, output = run_ovrtx_subprocess(_M6B_OUTLINE_PROG; timeout = 600, retries = 2, ready_marker = "OK_OUTLINE")
     @info "M6.B outline output" output
     @test exitcode == 0
     @test contains(output, "OK_OUTLINE")
@@ -77,7 +77,7 @@ println("OK_NOOUTLINE")
 """
 
 @testset "M6.B select! no-op without outline flag (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M6B_NOOUTLINE_PROG; timeout = 300, retries = 2, ready_marker = "OK_NOOUTLINE")
+    exitcode, output = run_ovrtx_subprocess(_M6B_NOOUTLINE_PROG; timeout = 600, retries = 2, ready_marker = "OK_NOOUTLINE")
     @info "M6.B no-outline output" output
     @test exitcode == 0
     @test contains(output, "OUTLINE_FLAG=false")

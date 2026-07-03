@@ -239,14 +239,20 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
     #    errors, so an uncaught throw here (e.g. the intermittent ovrtx startup crash
     #    while rebuilding the Screen) would kill GLMakie's @async render task and freeze
     #    the whole window.  On failure the session keeps the OLD screen (warn + carry on).
+    resize_inflight = Ref(false)   # re-entrancy guard: two entries past the fb_size check
+                                   # would double-build/double-free the ovrtx Screen
     session.resize_listener = on(glscene.events.window_area) do area
         w, h = Int.(widths(area))
         (w, h) == session.screen.fb_size && return   # no change — skip
         w > 0 && h > 0                  || return   # skip degenerate sizes
+        resize_inflight[] && return
+        resize_inflight[] = true
         try
             resize_viewport!(session, (w, h))
         catch e
             @warn "M5: viewport resize failed (window kept alive at the old size)" exception=(e, catch_backtrace()) maxlog=5
+        finally
+            resize_inflight[] = false
         end
         return nothing
     end
@@ -781,13 +787,18 @@ function replace_scene!(target::Union{Makie.Scene,Makie.Block};
     # ovrtx render + image at the new size.  Guarded for the same reason as the tick above —
     # the rebuild runs ovrtx Screen creation (the historically crash-prone window); on failure
     # the session keeps rendering at the OLD size instead of killing the host render task.
+    embed_resize_inflight = Ref(false)   # re-entrancy guard (same rationale as the standalone viewport)
     session.resize_listener = on(tscene.viewport) do rect2
         w, h = Int.(widths(rect2))
         ((w, h) == session.screen.fb_size || w <= 0 || h <= 0) && return nothing
+        embed_resize_inflight[] && return nothing
+        embed_resize_inflight[] = true
         try
             _resize_embedded!(session, (w, h))
         catch e
             @warn "replace_scene!: embedded resize failed (kept the old render size)" exception=(e, catch_backtrace()) maxlog=5
+        finally
+            embed_resize_inflight[] = false
         end
         return nothing
     end
@@ -851,23 +862,45 @@ end
 """
     Base.close(session::EmbeddedSession) -> Nothing
 
-Detach the render-loop + resize hooks, remove the overlay image, and free the embedded ovrtx
-renderer.  Does NOT close the host GLMakie window (the figure lives on).  Idempotent.
+Detach the render-loop + resize hooks, QUIESCE the host render loop across the ovrtx
+teardown, remove the overlay image, and free the embedded ovrtx renderer.  Does NOT close
+the host GLMakie window (the figure lives on; a live loop is restarted).  Idempotent.
 """
 function Base.close(session::EmbeddedSession)
     session.tick_listener   === nothing || off(session.tick_listener)
     session.resize_listener === nothing || off(session.resize_listener)
     session.tick_listener   = nothing     # no more ticks BEFORE freeing the ovrtx Screen
     session.resize_listener = nothing
+    # Quiesce the HOST loop across the teardown (mirror ViewportSession.close): stop + JOIN
+    # so no in-flight embedded tick can overlap the Screen free — `Base.close(::Renderer)`
+    # destroys the ptr before flipping `alive`, so a mid-tick `step!` would be a
+    # use-after-free under any future threaded renderloop (today's @async loop masks it).
+    # Restart only if WE stopped a running loop: a stopped-loop recording session
+    # (record_frame! recipe) must stay stopped.
+    parent = session.parent_glscreen
+    was_running = false
+    try
+        if parent !== nothing && isopen(parent) && GLMakie.renderloop_running(parent)
+            was_running = true
+            GLMakie.stop_renderloop!(parent; close_after_renderloop = false)   # joins the task
+        end
+    catch e
+        @warn "replace_scene!: error stopping the host render loop for teardown" exception = e
+    end
     try
         # Remove the overlay sub-scene's GL renderobjects from the host screen (the GL 3D beneath
         # reappears), then drop the sub-scene from the target's children.
-        delete!(session.parent_glscreen, session.sub_scene)
+        delete!(parent, session.sub_scene)
         filter!(c -> c !== session.sub_scene, session.target_scene.children)
     catch e
         @warn "replace_scene!: error removing overlay" exception = e
     end
     close(session.screen)                 # ovrtx renderer + bindings; host window untouched
+    was_running && try
+        GLMakie.start_renderloop!(parent) # the figure lives on — resume its loop
+    catch e
+        @warn "replace_scene!: error restarting the host render loop" exception = e
+    end
     return nothing
 end
 

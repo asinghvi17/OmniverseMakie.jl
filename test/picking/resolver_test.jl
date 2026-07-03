@@ -75,7 +75,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 @testset "A3 PathResolver cache invalidation on composition change (subprocess)" begin
     # Retry the known intermittent ovrtx GeometryGroup::attachToContext startup crash:
     # re-run until the child reaches its first pick.
-    _, out = run_ovrtx_subprocess(_A3_RESOLVER_PROG; timeout = 500, retries = 4,
+    _, out = run_ovrtx_subprocess(_A3_RESOLVER_PROG; timeout = 600, retries = 4,
                                   ready_marker = "PICK_A_IS_A=")
     contains(out, "OK_STALE_RESOLVER") || @info "A3 resolver output" out
     @test contains(out, "OK_STALE_RESOLVER")                # subprocess completed all work

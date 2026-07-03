@@ -36,12 +36,14 @@ _three_lights() = AbstractLight[
     GC.gc()
     a2 = @allocated _lights_snapshot(lights, seed)
 
-    # Measured ≈1088 B for this 3-light scene (three boxed LightState) vs the pre-L2
-    # 6048 B (Dict + fresh path strings + Matrix temporaries in Any[]). 2048 B leaves
-    # struct-layout headroom while staying ~3× under the pre-L2 baseline, so a revert to
-    # the Dict/strings/Matrix path trips it.
-    @test a1 ≤ 2048
-    @test a2 ≤ 2048
+    # Measured ≈1088 B for this 3-light scene (three boxed LightState, Julia 1.12.6) vs
+    # the pre-L2 6048 B (Dict + fresh path strings + Matrix temporaries in Any[]).  The
+    # 4096 B ceiling is DELIBERATELY generous (~3.8× the measurement): Julia minor
+    # versions shift Union-field/tuple boxing and small-array layout, and the bound's job
+    # is only to trip a revert to the Dict/strings/Matrix path — which still lands well
+    # above it at ~6048 B.
+    @test a1 ≤ 4096
+    @test a2 ≤ 4096
 
     # Reuse preserves the authored paths AND hands back the exact same String OBJECTS
     # (the point of the diet: zero fresh path allocation on an unchanged frame).

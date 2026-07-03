@@ -79,7 +79,7 @@ println("OK_INSERT")
 """
 
 @testset "imperative insert! on open stage (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M21_INSERT_PROG; timeout = 900, retries = 2, ready_marker = "OK_INSERT")
+    exitcode, output = run_ovrtx_subprocess(_M21_INSERT_PROG; timeout = 900, retries = 2, ready_marker = "ROBJ_AFTER_AUTHOR=")
     @info "insert subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_INSERT")

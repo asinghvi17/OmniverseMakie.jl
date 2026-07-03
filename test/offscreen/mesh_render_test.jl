@@ -77,7 +77,7 @@ println("OK_MESH")
 """
 
 @testset "mesh → colorbuffer (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M15_MESH_PROG; timeout = 900, retries = 2, ready_marker = "OK_MESH")
+    exitcode, output = run_ovrtx_subprocess(_M15_MESH_PROG; timeout = 900, retries = 2, ready_marker = "ELTYPE=")
     @info "mesh_render subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_MESH")

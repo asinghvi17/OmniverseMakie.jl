@@ -4,7 +4,9 @@ using Test
 # (helpers.jl): they spawn cheap single-process `julia` children (exit / sleep / crash) —
 # NO ovrtx, NO GPU, no GPU lock needed — and assert the returned exit code is TRUTHFUL:
 #   * 0    only on a real clean exit,
-#   * -9   when the watchdog times out and kills the child,
+#   * -124 when the WATCHDOG times out and kills the child (negated GNU-timeout convention
+#          — distinct from -9, which is reserved for an EXTERNAL SIGKILL such as the OOM
+#          killer, so triage can tell "it hung" from "something killed it"),
 #   * -N   when the child dies from uncaught signal N (a crash),
 #   * else the child's own nonzero exit code.
 # The pre-fix helper read `p.exitcode` without `wait(p)`, so a timed-out child returned
@@ -23,11 +25,11 @@ using Test
         @test exitcode == 3
     end
 
-    @testset "timeout => -9, stdout captured" begin
+    @testset "timeout => -124, stdout captured" begin
         # A plain sleeper that outlives the 2 s timeout; SIGTERM reaps it within the grace.
         prog = "redirect_stderr(devnull); println(\"STARTED\"); flush(stdout); sleep(60)"
         exitcode, output = run_ovrtx_subprocess(prog; timeout = 2)
-        @test exitcode == -9
+        @test exitcode == -124
         @test contains(output, "STARTED")   # output collected AFTER the child is reaped
     end
 
@@ -45,7 +47,7 @@ using Test
         local exitcode, output
         elapsed = @elapsed ((exitcode, output) =
             run_ovrtx_subprocess(prog; timeout = 2, kill_grace = 1))
-        @test exitcode == -9
+        @test exitcode == -124
         @test contains(output, "STARTED")
         # Without SIGKILL escalation the child ignores SIGTERM and sleeps ~60 s;
         # a bounded elapsed proves the watchdog forced it down.

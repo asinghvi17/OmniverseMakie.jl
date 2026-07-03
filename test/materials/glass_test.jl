@@ -48,7 +48,7 @@ end
 const _M4_GLASS_PROG = read(joinpath(@__DIR__, "glass_prog.jl"), String)
 
 @testset "M4 refractive glass transmits the backdrop via colorbuffer (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M4_GLASS_PROG; timeout = 600, retries = 2, ready_marker = "OK_GLASS")
+    exitcode, output = run_ovrtx_subprocess(_M4_GLASS_PROG; timeout = 600, retries = 2, ready_marker = "ELTYPE=")
     @info "M4 glass subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_GLASS")
@@ -61,7 +61,7 @@ end
 const _M4_GLASS_LIVE_PROG = read(joinpath(@__DIR__, "glass_live_prog.jl"), String)
 
 @testset "M4 LIVE glass material edit routes to OmniGlass inputs (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M4_GLASS_LIVE_PROG; timeout = 600, retries = 2, ready_marker = "OK_GLASS_LIVE")
+    exitcode, output = run_ovrtx_subprocess(_M4_GLASS_LIVE_PROG; timeout = 600, retries = 2, ready_marker = "NONBLACK_B=")
     @info "M4 glass-live subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_GLASS_LIVE")

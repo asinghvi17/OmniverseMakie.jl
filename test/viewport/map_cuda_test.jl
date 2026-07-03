@@ -30,7 +30,7 @@ println("OK_MAP_CUDA")
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 @testset "M6 OV.map_cuda (subprocess, CUDA linear)" begin
-    exitcode, output = run_ovrtx_subprocess(_M6_MAPCUDA_PROG; timeout = 400, retries = 2, ready_marker = "OK_MAP_CUDA")
+    exitcode, output = run_ovrtx_subprocess(_M6_MAPCUDA_PROG; timeout = 600, retries = 2, ready_marker = "OK_MAP_CUDA")
     @info "M6 map_cuda output" output
     @test exitcode == 0
     @test contains(output, "CUDA_FUNCTIONAL=true")

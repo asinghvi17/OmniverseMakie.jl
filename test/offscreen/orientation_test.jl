@@ -74,7 +74,7 @@ println("ORIENT_OK")
 """
 
 @testset "M1.5 orientation — red above blue (top-left-origin)" begin
-    exitcode, output = run_ovrtx_subprocess(_M15_ORIENT_PROG; timeout = 900, retries = 2, ready_marker = "ORIENT_OK")
+    exitcode, output = run_ovrtx_subprocess(_M15_ORIENT_PROG; timeout = 900, retries = 2, ready_marker = "ORIENT_SIZE=")
     @info "M1.5 orientation subprocess output" output
     @test exitcode == 0
     @test contains(output, "ORIENT_OK")

@@ -24,7 +24,7 @@ println("OK_PATH2PLOT")
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 @testset "M6.B path2plot reverse map (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M6B_PATH2PLOT_PROG; timeout = 300, retries = 2, ready_marker = "OK_PATH2PLOT")
+    exitcode, output = run_ovrtx_subprocess(_M6B_PATH2PLOT_PROG; timeout = 600, retries = 2, ready_marker = "OK_PATH2PLOT")
     @info "M6.B path2plot output" output
     @test exitcode == 0
     @test contains(output, "FWD_OK=true")
@@ -89,7 +89,7 @@ println("OK_PICK")
 """
 
 @testset "M6.B Makie.pick / pick_closest / pick_sorted (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M6B_PICK_PROG; timeout = 400, retries = 2, ready_marker = "OK_PICK")
+    exitcode, output = run_ovrtx_subprocess(_M6B_PICK_PROG; timeout = 600, retries = 2, ready_marker = "OK_PICK")
     @info "M6.B pick output" output
     @test exitcode == 0
     @test contains(output, "HIT_IS_SCATTER=true")

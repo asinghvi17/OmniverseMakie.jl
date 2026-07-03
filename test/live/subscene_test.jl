@@ -128,7 +128,7 @@ println("OK_SUBSCENE")
 """
 
 @testset "M2.3 nested-subscene render + paths (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M23_SUBSCENE_PROG; timeout = 900, retries = 2, ready_marker = "OK_SUBSCENE")
+    exitcode, output = run_ovrtx_subprocess(_M23_SUBSCENE_PROG; timeout = 900, retries = 2, ready_marker = "NONBLACK=")
     @info "M2.3 subscene subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_SUBSCENE")

@@ -53,7 +53,7 @@ println("OK_VIEWPORT")
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 @testset "interactive_display: frame + resize + teardown (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_VIEWPORT_PROG; timeout = 600, retries = 2, ready_marker = "OK_VIEWPORT")
+    exitcode, output = run_ovrtx_subprocess(_VIEWPORT_PROG; timeout = 600, retries = 2, ready_marker = "VIEWPORT_NONBLACK=")
     @info "viewport output" output
     @test exitcode == 0
     @test contains(output, "OK_VIEWPORT")

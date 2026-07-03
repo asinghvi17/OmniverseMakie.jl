@@ -58,13 +58,38 @@ function _find_top_level_app(base::AbstractString)
     return match(Regex("^" * indent * "\"app\"[ \\t]*:[ \\t]*\\{", "m"), base)
 end
 
+# Neutralize carb's breakpad crash reporter in a config body: its SIGSEGV handler
+# intercepts Julia's RECOVERABLE GC-safepoint page faults and kills the process — the root
+# cause of the historical intermittent startup crash (full analysis in
+# src/binding/signals.jl).  `/crashreporter/enabled = false` stops the interception:
+# PROBE-PROVEN on this install — an unguarded create + post-create GC stress dies 3/3
+# without the key and survives 3/3 with it.  The install config carries a top-level
+# "crashreporter" block (product/dumpDir), so inject `"enabled": false` INTO it; if a
+# future install drops the block, prepend a fresh one after the opening brace.  (Should a
+# config ever already set "enabled", ours lands FIRST in the block — carb honors the first
+# occurrence, per the probe.)  This is defense-in-depth alongside the GC-window guard in
+# signals.jl: the guard protects create even when no config can be synthesized; this key
+# also covers any handler re-arming AFTER create that the guard's one-shot restore misses.
+function _disable_crashreporter(base::AbstractString)
+    m = match(r"\"crashreporter\"[ \t]*:[ \t]*\{", base)
+    if m === nothing
+        i = findfirst('{', base)
+        i === nothing && return String(base)   # not a JSON object — leave untouched
+        return base[1:i] * "\n    \"crashreporter\": {\n        \"enabled\": false\n    }," *
+               base[i + 1:end]
+    end
+    endidx = m.offset + ncodeunits(m.match) - 1
+    return base[1:endidx] * "\n        \"enabled\": false," * base[endidx + 1:end]
+end
+
 # Synthesize a carb config registering /app/tokens/omni.index.libs = `libs`; return its path.
 # The install ovrtx.config.json is JSON5 (trailing commas) with a top-level `"app": {` block,
 # so MERGE a `tokens` sub-key by minimal text surgery — NOT parse+reserialize (a strict JSON
 # writer would drop comments/trailing-commas and reorder keys).  Copying the whole file keeps
-# the install's log/graphics/crashreporter settings, since the CARB_FRAMEWORK_CONFIG_NAME
-# config REPLACES the default ovrtx.config.json.  The libs value is JSON-escaped and the merge
-# is anchored to the top-level `"app"` block (see `_json_escape` / `_find_top_level_app`).
+# the install's log/graphics settings, since the CARB_FRAMEWORK_CONFIG_NAME config REPLACES
+# the default ovrtx.config.json.  The crash reporter is disabled in the copy (see
+# `_disable_crashreporter`).  The libs value is JSON-escaped and the merge is anchored to
+# the top-level `"app"` block (see `_json_escape` / `_find_top_level_app`).
 function _synth_index_config(ovrtx_bin::AbstractString, libs::AbstractString)
     base = read(joinpath(ovrtx_bin, "ovrtx.config.json"), String)
     m = _find_top_level_app(base)
@@ -72,10 +97,33 @@ function _synth_index_config(ovrtx_bin::AbstractString, libs::AbstractString)
         error("ovrtx.config.json has no top-level \"app\" block to merge the IndeX token into")
     token_block = "\n        \"tokens\": {\n            \"omni.index.libs\": \"$(_json_escape(libs))\"\n        },"
     endidx = m.offset + ncodeunits(m.match) - 1      # byte index of the matched `… "app": {` end
-    merged = base[1:endidx] * token_block * base[endidx + 1:end]
+    merged = _disable_crashreporter(base[1:endidx] * token_block * base[endidx + 1:end])
     path = joinpath(mktempdir(), "idx.config.json")
     write(path, merged)
     return path
+end
+
+# The crash-reporter fix for the NON-volume path (no IndeX env): synthesize a copy of the
+# install config with the crash reporter disabled and point CARB_FRAMEWORK_CONFIG_NAME at
+# it — unless carb was already routed to a config (user-set env wins; a user-supplied
+# OMNIVERSEMAKIE_OVRTX_CONFIG is likewise left untouched on the volume path).  Never
+# throws: on any failure the GC-window guard in signals.jl still protects create.
+function _ensure_crashreporter_off!()
+    haskey(ENV, "CARB_FRAMEWORK_CONFIG_NAME") && return nothing   # existing routing wins
+    try
+        lib = get(ENV, "OVRTX_LIBRARY_PATH", "")
+        isempty(lib) && return nothing
+        ovrtx_bin = dirname(lib)
+        base_path = joinpath(ovrtx_bin, "ovrtx.config.json")
+        isfile(base_path) || return nothing
+        path = joinpath(mktempdir(), "nocrash.config.json")
+        write(path, _disable_crashreporter(read(base_path, String)))
+        ENV["CARB_FRAMEWORK_CONFIG_NAME"] = _carb_config_name(path, ovrtx_bin)
+    catch e
+        @warn "OmniverseMakie: could not disable the carb crash reporter (the GC-window \
+               guard in signals.jl still protects renderer creation)" exception = e maxlog = 1
+    end
+    return nothing
 end
 
 # Compute CARB_FRAMEWORK_CONFIG_NAME.  carb force-joins it onto CARB_APP_PATH (= <ovrtx>/bin,
@@ -102,7 +150,10 @@ at framework init; only the first renderer pays setup (later calls are a Ref rea
 const _ensure_index = Base.OncePerProcess{Bool}() do
     cfg  = get(ENV, "OMNIVERSEMAKIE_OVRTX_CONFIG", "")
     libs = get(ENV, "OMNIVERSEMAKIE_INDEX_LIBS", "")
-    (isempty(cfg) && isempty(libs)) && return false          # disabled → zero overhead
+    if isempty(cfg) && isempty(libs)                         # IndeX disabled…
+        _ensure_crashreporter_off!()                         # …but still neutralize breakpad
+        return false
+    end
     try
         ovrtx_bin = dirname(ENV["OVRTX_LIBRARY_PATH"])       # <ovrtx>/bin == CARB_APP_PATH
         config_file = if !isempty(cfg)

@@ -95,6 +95,7 @@ const _GOLDEN_CLEAN = """
         }
     },
     "crashreporter": {
+        "enabled": false,
         "product": "Omniverse.ovrtx",
         "dumpDir": "."
     },
@@ -195,6 +196,24 @@ const _NO_APP_FIXTURE = """
     for s in ("/opt/li\"bs", "C:\\\\ov\\\\libs", "a\"\\\nb\t", "/plain/ok")
         @test _json_unescape(OV._json_escape(s)) == s
     end
+end
+
+@testset "crash-reporter disable: injected into an existing block / prepended when absent (pure)" begin
+    # Existing top-level "crashreporter" block (the real install shape): the key is injected
+    # INTO it, first position (carb honors the first occurrence — probe-proven).
+    with_block = "{\n    \"crashreporter\": {\n        \"product\": \"x\"\n    },\n}"
+    out = OV._disable_crashreporter(with_block)
+    @test occursin("\"crashreporter\": {\n        \"enabled\": false,\n        \"product\"", out)
+    @test count("\"crashreporter\"", out) == 1          # injected, not duplicated
+
+    # No crashreporter block: a fresh disabled block is prepended after the opening brace.
+    without = "{\n    \"log\": {}\n}"
+    out2 = OV._disable_crashreporter(without)
+    @test occursin("\"crashreporter\": {\n        \"enabled\": false\n    },", out2)
+    @test findfirst("\"crashreporter\"", out2).start < findfirst("\"log\"", out2).start
+
+    # Not a JSON object at all: passthrough, no throw.
+    @test OV._disable_crashreporter("plain text") == "plain text"
 end
 
 @testset "A5 _synth_index_config: happy path byte-stable vs golden (pure)" begin

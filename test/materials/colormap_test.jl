@@ -44,7 +44,7 @@ end
 const _M4_COLORMAP_PROG = read(joinpath(@__DIR__, "colormap_prog.jl"), String)
 
 @testset "M4 colormapped scatter+lines render via colorbuffer (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M4_COLORMAP_PROG; timeout = 600, retries = 2, ready_marker = "OK_COLORMAP")
+    exitcode, output = run_ovrtx_subprocess(_M4_COLORMAP_PROG; timeout = 600, retries = 2, ready_marker = "ELTYPE=")
     @info "M4 colormap subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_COLORMAP")
@@ -59,7 +59,7 @@ end
 const _M4_COLORMAP_LIVE_PROG = read(joinpath(@__DIR__, "colormap_live_prog.jl"), String)
 
 @testset "M4 LIVE numeric-color edit re-maps via colormap (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M4_COLORMAP_LIVE_PROG; timeout = 600, retries = 2, ready_marker = "OK_COLORMAP_LIVE")
+    exitcode, output = run_ovrtx_subprocess(_M4_COLORMAP_LIVE_PROG; timeout = 600, retries = 2, ready_marker = "NONBLACK_A=")
     @info "M4 colormap-live subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_COLORMAP_LIVE")

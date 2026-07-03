@@ -75,7 +75,7 @@ println("OK_RAW_RENDER")
 @testset "raw OV render + write_xform! (subprocess)" begin
     # Renderer shader compile (~30–60 s) + three 64-warmup renders; 600 s is ample.
     exitcode, output = run_ovrtx_subprocess(_RAW_RENDER_PROG; timeout = 600, retries = 2,
-                                            ready_marker = "OK_RAW_RENDER")
+                                            ready_marker = "SIZE=")
     @test exitcode == 0
     @test contains(output, "OK_RAW_RENDER")
     @test contains(output, "SIZE=(1080, 1920)")

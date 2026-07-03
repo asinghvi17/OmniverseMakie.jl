@@ -16,9 +16,10 @@ module SignalGuard
 # disables the GC for the window (no GC → the safepoint page is never armed → no SIGSEGV
 # to mis-handle), which measured 0/6 under the stress that crashes 4/4 unguarded.  The
 # create ccall is bounded and the calling thread allocates nothing while blocked, so the
-# GC pause is harmless.  (A stronger future fix: disable carb's crash reporter outright
-# via `"crashreporter": {"enabled": false}` in a synthesized carb config, so breakpad
-# never installs handlers — unvalidated, see index_config.jl.)
+# GC pause is harmless.  DEFENSE IN DEPTH: index_config.jl additionally routes carb to a
+# config with `/crashreporter/enabled = false` (probe-proven to stop the interception even
+# on an UNGUARDED create), which also covers any handler re-arming after create that this
+# guard's one-shot restore would miss.
 #
 # struct sigaction is platform-specific (Linux/glibc x86-64 sizeof==152); treat it as an
 # opaque fixed-size blob — _SA_SIZE=256 gives headroom.

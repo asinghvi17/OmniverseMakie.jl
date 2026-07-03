@@ -28,7 +28,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 const _MATERIAL_LIVE_PROG = read(joinpath(@__DIR__, "material_live_prog.jl"), String)
 
 @testset "live material edits: mesh + meshscatter (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_MATERIAL_LIVE_PROG; timeout = 900, retries = 2, ready_marker = "OK_MATERIAL_LIVE")
+    exitcode, output = run_ovrtx_subprocess(_MATERIAL_LIVE_PROG; timeout = 900, retries = 2, ready_marker = "MATERIAL_SHADER=")
     @info "material-live subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_MATERIAL_LIVE")

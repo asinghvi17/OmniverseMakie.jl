@@ -168,10 +168,14 @@ function _run_ovrtx_once(prog::String; timeout::Int, kill_grace::Real, env)
             end
         end
         wait(p)                                       # ALWAYS reap before reading exit state/output
-        # Truthful exit code (see docstring): 0 only on real success; a timed-out
-        # kill is -9; an uncaught signal (crash) is -signal; else the child's code.
+        # Truthful exit code (see docstring): 0 only on real success; a WATCHDOG timeout
+        # kill is -124 (GNU-timeout's 124 convention, negated — real signals stop at 64,
+        # so this can never collide with -signal); an uncaught signal (crash, OR an
+        # EXTERNAL SIGKILL such as the OOM killer → -9) is -signal; else the child's code.
+        # Distinguishing the watchdog from an external SIGKILL matters for triage: "-124 →
+        # bump the timeout / it hung" vs "-9 → something killed it (check dmesg for OOM)".
         exitcode = success(p) ? 0 :
-                   timed_out  ? -9 :
+                   timed_out  ? -124 :
                    p.termsignal != 0 ? -p.termsignal : p.exitcode
         output = String(take!(out))
         errtext = String(take!(err))
@@ -197,8 +201,10 @@ before reading its exit code and output.  The returned `exitcode` is therefore
 TRUTHFUL — callers can assert `exitcode == 0`:
 
   * `0`       — the child exited 0 (real success);
-  * `-9`      — the watchdog timed out and killed it;
-  * `-N`      — the child died from uncaught signal `N` (e.g. a crash / segfault);
+  * `-124`    — the WATCHDOG timed out and killed it (negated GNU-timeout convention;
+                distinct from `-9`, which means something ELSE SIGKILLed the child, e.g.
+                the OOM killer);
+  * `-N`      — the child died from uncaught signal `N` (e.g. -11 segfault, -9 external kill);
   * otherwise — the child's own nonzero exit code.
 
 `env` forwards extra `name => value` pairs (a single `Pair` or an iterable of Pairs)
@@ -215,10 +221,17 @@ the test project — while `using OmniverseMakie` alone still doesn't load it.
 `retries` / `ready_marker`: re-run `prog` until `ready_marker` appears in its stdout,
 up to `retries` attempts, returning the LAST attempt's `(exitcode, output)`.  The
 default `retries=1` / empty `ready_marker` is a single run (an empty marker short-
-circuits the loop).  The known use case is ovrtx's intermittent
-`GeometryGroup::attachToContext` startup crash: pass e.g. `retries=4,
-ready_marker="OK_…"` so a startup-crashed attempt is retried rather than failing the
-hard `@test`s.
+circuits the loop).  The known use case is ovrtx's intermittent startup crash
+(historically labelled `GeometryGroup::attachToContext`; root-caused to breakpad vs
+Julia's GC safepoint — see src/binding/signals.jl): retries absorb a pre-render death.
+
+CONVENTION — pick an EARLY marker, not the final OK sentinel: the marker should be the
+first line the child prints AFTER its first successful render, BEFORE any in-child
+pixel `@assert`.  Then only a startup death is retried; a NOISE-MARGINAL pixel assert
+that fails after the marker fails ONCE, honestly.  With a final-OK marker the retry
+loop would re-roll a flaky assert until it passes — converting real flakiness into a
+silent green.  (Progs with no in-child asserts, where the parent judges printed values,
+may keep a final OK marker.)
 """
 function run_ovrtx_subprocess(prog::String; timeout::Int=300, kill_grace::Real=10, env=(),
                               retries::Int=1, ready_marker::AbstractString="")

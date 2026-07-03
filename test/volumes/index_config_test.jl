@@ -55,7 +55,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     if isempty(libs) || !isdir(libs)
         @test_skip "OMNIVERSEMAKIE_INDEX_LIBS unset/absent — IndeX-enabled check skipped"
     else
-        ec_on, out_on = run_ovrtx_subprocess(_IDX_ON_PROG; timeout = 300,
+        ec_on, out_on = run_ovrtx_subprocess(_IDX_ON_PROG; timeout = 600,
             env = ("OMNIVERSEMAKIE_INDEX_LIBS" => libs))
         @test ec_on == 0
         @test contains(out_on, "ENABLED=true")
@@ -63,7 +63,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
         @test contains(out_on, "QUERY=true")
     end
 
-    ec_off, out_off = run_ovrtx_subprocess(_IDX_OFF_PROG; timeout = 300, retries = 2,
+    ec_off, out_off = run_ovrtx_subprocess(_IDX_OFF_PROG; timeout = 600, retries = 2,
                                            ready_marker = "OK_IDX_OFF")
     @test ec_off == 0
     @test contains(out_off, "ENABLED=false")

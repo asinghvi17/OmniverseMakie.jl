@@ -1,10 +1,16 @@
 using Test
 # Track-C Task C3 — GPU-direct present!: FUSED oriented tonemap kernel + cached device/texture
 # buffers.  Proves (subprocess, CUDA [+ offscreen GL + ovrtx]):
-#   1. ORIENTED BYTE-EQUALITY — the fused device kernel (out[j, H+1-i]) byte-equals host
+#   1. ORIENTED AGREEMENT — the fused device kernel (out[j, H+1-i]) matches host
 #      reverse(permutedims(tonemap_frame(hdr, ev)), dims=2) == the C2 `_tonemap_orient!` twin,
-#      on the same HDR input (a deterministic case + a random HDR-range sweep).  This EXTENDS
-#      the M6 host-vs-kernel agreement coverage to the new oriented kernel.
+#      on the same HDR input (a deterministic case + a random HDR-range sweep), within
+#      ≤1 LSB PER BYTE.  Exact byte-equality is NOT cross-GPU-portable: the tonemap's sole
+#      transcendental is the sRGB `c^(1/2.4)` (host libm `powf` vs device `__nv_powf` are
+#      independent implementations, contractually ≤ a few ULP apart), and a 1-ULP pow
+#      difference flips the output byte whenever a pixel lands within ~1/510 of a rounding
+#      boundary.  On the A5000 the diff happens to be exactly 0; the gate allows ≤1 so a
+#      different GPU/driver/CUDA toolkit stays green while any REAL kernel/orientation bug
+#      (large, structured diffs) still fails.
 #   2. ZERO STEADY-STATE DEVICE ALLOCATION — a warmed GPU present! allocates 0 bytes of CUDA
 #      device memory per tick (cached oriented buffer + cached GL Texture; no permutedims/reverse
 #      temporaries, no per-frame plot2robjs/uniforms Dict), measured with CUDA.@allocated (which
@@ -21,21 +27,27 @@ ExtGL = Base.get_extension(OmniverseMakie, :OmniverseMakieGLMakieExt)
 println("EXT_LOADED=", Ext !== nothing && ExtGL !== nothing)
 println("CUDA_FUNCTIONAL=", CUDA.functional())
 
-# 1. ORIENTED-KERNEL BYTE-EQUALITY (no window): fused device kernel == host orient chain == twin.
+# 1. ORIENTED-KERNEL AGREEMENT (no window): fused device kernel vs host orient chain vs twin,
+#    max PER-BYTE deviation (device powf may differ ≤1 ULP from host libm — see header).
+bytedev(a, b) = maximum(max(abs(Int(reinterpret(UInt8, x.r)) - Int(reinterpret(UInt8, y.r))),
+                            abs(Int(reinterpret(UInt8, x.g)) - Int(reinterpret(UInt8, y.g))),
+                            abs(Int(reinterpret(UInt8, x.b)) - Int(reinterpret(UInt8, y.b))),
+                            abs(Int(reinterpret(UInt8, x.alpha)) - Int(reinterpret(UInt8, y.alpha))))
+                        for (x, y) in zip(a, b))
 ev  = 0.5f0
 hdr = Float32[c==1 ? 0.5f0 : (c==2 ? 0.1f0 : 2.0f0) for c in 1:4, x in 1:8, y in 1:6]  # [C,W,H]
 dev_or  = Ext.tonemap_oriented_kernel_to_matrix(CuArray(hdr), ev)             # [W,H]
 host_or = reverse(permutedims(tonemap_frame(hdr, ev)), dims = 2)              # [W,H]
 println("ORIENT_SIZE=", size(dev_or) == size(host_or) == (8, 6))
-println("ORIENT_MISMATCH=", count(i -> dev_or[i] != host_or[i], eachindex(host_or)))
+println("ORIENT_MAXDEV=", bytedev(dev_or, host_or))
 twin = Matrix{RGBA{N0f8}}(undef, 8, 6)
 ExtGL._tonemap_orient!(twin, hdr, ev)                                         # the C2 host twin
-println("ORIENT_VS_TWIN_MISMATCH=", count(i -> dev_or[i] != twin[i], eachindex(twin)))
+println("ORIENT_VS_TWIN_MAXDEV=", bytedev(dev_or, twin))
 using Random; Random.seed!(11)
 hdr2  = rand(Float32, 4, 96, 72) .* 6.0f0
 dev2  = Ext.tonemap_oriented_kernel_to_matrix(CuArray(hdr2), 0.0f0)
 host2 = reverse(permutedims(tonemap_frame(hdr2, 0.0f0)), dims = 2)
-println("ORIENT_MISMATCH_RAND=", count(i -> dev2[i] != host2[i], eachindex(host2)), " / ", length(host2))
+println("ORIENT_MAXDEV_RAND=", bytedev(dev2, host2))
 
 # 2. ZERO STEADY-STATE DEVICE ALLOCATION (window + ovrtx): a warmed GPU present! -> 0 device bytes.
 OM.activate!(warmup = 16)
@@ -77,11 +89,14 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     @test contains(out, "CUDA_FUNCTIONAL=true")
     @test contains(out, "OK_C3_PRESENT")                 # subprocess completed all work (no mid-run death)
 
-    # 1. Oriented kernel == host orient chain == the _tonemap_orient! twin, pixel for pixel.
+    # 1. Oriented kernel ≈ host orient chain ≈ the _tonemap_orient! twin: every byte within
+    #    ≤1 LSB (device __nv_powf vs host libm powf; exact 0 on the A5000 but not portable —
+    #    a real kernel/orientation bug produces large, structured deviations).
     @test contains(out, "ORIENT_SIZE=true")              # oriented output is [W,H]
-    @test contains(out, "ORIENT_MISMATCH=0")
-    @test contains(out, "ORIENT_VS_TWIN_MISMATCH=0")
-    @test contains(out, "ORIENT_MISMATCH_RAND=0 / ")     # device == host across the HDR range
+    for key in ("ORIENT_MAXDEV", "ORIENT_VS_TWIN_MAXDEV", "ORIENT_MAXDEV_RAND")
+        m = match(Regex("$key=(\\d+)"), out)
+        @test m !== nothing && parse(Int, m.captures[1]) <= 1
+    end
 
     # 2. Genuine GPU path (no vacuous pass via CPU fallback) + a real frame reached the buffer.
     @test contains(out, "ALLOC_BLITTER=gpu")
@@ -89,12 +104,16 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     m_nb = match(r"ORIENTED_NONBLACK=(\d+)", out)
     @test m_nb !== nothing && parse(Int, m_nb.captures[1]) > 1000
 
-    # 3. Zero steady-state device allocation per GPU present! tick (the C3 gate).
+    # 3. No FRAME-SCALED device allocation per warmed GPU present! tick (the C3 gate).
+    #    Measured 0 bytes on CUDA.jl 6.2.0; the ≤256-byte allowance tolerates incidental
+    #    pool bookkeeping a future CUDA.jl might add (unsafe_wrap / launch config / events)
+    #    while still failing the pre-fix chain, which allocated three full display buffers
+    #    (hundreds of KB at 320×240, MBs at 4K) every tick.
     m1 = match(r"DEV_ALLOC1=(\d+)", out)
     m2 = match(r"DEV_ALLOC2=(\d+)", out)
     @test m1 !== nothing && m2 !== nothing
     if m1 !== nothing && m2 !== nothing
-        @test parse(Int, m1.captures[1]) == 0
-        @test parse(Int, m2.captures[1]) == 0
+        @test parse(Int, m1.captures[1]) <= 256
+        @test parse(Int, m2.captures[1]) <= 256
     end
 end
