@@ -235,11 +235,19 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
     # 7. Window-resize hook (resize_viewport!): rebuild the ovrtx renderer +
     #    image! at the new size.  Fires on glscene.events.window_area (GLFW size
     #    callback); the initial fire carries fb_size and is a no-op.
+    #    Guarded like on_render_tick!: `notify(::Observable)` does NOT catch listener
+    #    errors, so an uncaught throw here (e.g. the intermittent ovrtx startup crash
+    #    while rebuilding the Screen) would kill GLMakie's @async render task and freeze
+    #    the whole window.  On failure the session keeps the OLD screen (warn + carry on).
     session.resize_listener = on(glscene.events.window_area) do area
         w, h = Int.(widths(area))
         (w, h) == session.screen.fb_size && return   # no change — skip
         w > 0 && h > 0                  || return   # skip degenerate sizes
-        resize_viewport!(session, (w, h))
+        try
+            resize_viewport!(session, (w, h))
+        catch e
+            @warn "M5: viewport resize failed (window kept alive at the old size)" exception=(e, catch_backtrace()) maxlog=5
+        end
         return nothing
     end
 
@@ -757,17 +765,30 @@ function replace_scene!(target::Union{Makie.Scene,Makie.Block};
                               steps_per_tick, Float32(exposure), :cpu, nothing, nothing)
 
     # Hook the HOST window's render loop (never open our own).  Observer only — Consume(false).
+    # Guarded: `notify(::Observable)` does NOT catch listener errors, and the host loop is a
+    # plain @async task with no guard of its own — an uncaught throw from a bad frame would
+    # kill the render task and silently freeze the ENTIRE host figure (all GL plots too).
     session.tick_listener = on(parent.render_tick) do _
-        _embedded_tick!(session)
+        try
+            _embedded_tick!(session)
+        catch e
+            @warn "replace_scene!: embedded tick failed (host window kept alive)" exception=(e, catch_backtrace()) maxlog=5
+        end
         return Makie.Consume(false)
     end
 
     # Track the target rectangle: a layout/window resize changes tscene.viewport → rebuild the
-    # ovrtx render + image at the new size.
+    # ovrtx render + image at the new size.  Guarded for the same reason as the tick above —
+    # the rebuild runs ovrtx Screen creation (the historically crash-prone window); on failure
+    # the session keeps rendering at the OLD size instead of killing the host render task.
     session.resize_listener = on(tscene.viewport) do rect2
         w, h = Int.(widths(rect2))
         ((w, h) == session.screen.fb_size || w <= 0 || h <= 0) && return nothing
-        _resize_embedded!(session, (w, h))
+        try
+            _resize_embedded!(session, (w, h))
+        catch e
+            @warn "replace_scene!: embedded resize failed (kept the old render size)" exception=(e, catch_backtrace()) maxlog=5
+        end
         return nothing
     end
 

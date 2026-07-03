@@ -6,6 +6,20 @@ module SignalGuard
 # Fix: ATOMICALLY save Julia's handlers and set SIG_DFL BEFORE create_renderer (breakpad
 # then inits cleanly over SIG_DFL); restore Julia's handlers after.
 #
+# ★ ROOT CAUSE of the suite's historical "intermittent startup crash" (the retry-harness
+# mnemonic `GeometryGroup::attachToContext` — a legacy label; the string exists in no
+# binary): Julia's GC stop-the-world safepoint works by PROTECTING a page and having every
+# thread take a *recoverable* SIGSEGV when it polls.  If a GC fires during the multi-second
+# create window, breakpad's SIGSEGV handler (or, under this guard, SIG_DFL) intercepts that
+# safepoint fault and kills the process — 4/4 reproducible under thread+GC pressure,
+# rare single-threaded.  So the guard alone is NOT enough: `with_restored_signals` ALSO
+# disables the GC for the window (no GC → the safepoint page is never armed → no SIGSEGV
+# to mis-handle), which measured 0/6 under the stress that crashes 4/4 unguarded.  The
+# create ccall is bounded and the calling thread allocates nothing while blocked, so the
+# GC pause is harmless.  (A stronger future fix: disable carb's crash reporter outright
+# via `"crashreporter": {"enabled": false}` in a synthesized carb config, so breakpad
+# never installs handlers — unvalidated, see index_config.jl.)
+#
 # struct sigaction is platform-specific (Linux/glibc x86-64 sizeof==152); treat it as an
 # opaque fixed-size blob — _SA_SIZE=256 gives headroom.
 const _SIGS    = (4, 6, 7, 8, 11)   # SIGILL, SIGABRT, SIGBUS, SIGFPE, SIGSEGV
@@ -48,15 +62,20 @@ end
     with_restored_signals(f)
 
 Run `f()` (typically `ovrtx_create_renderer`) with the crash-reporter signals reset to
-SIG_DFL, restoring Julia's handlers afterward.  Neutralises the carb breakpad crash
-reporter ovrtx installs at renderer-creation time.
+SIG_DFL AND the Julia GC disabled, restoring both afterward.  Neutralises the carb
+breakpad crash reporter ovrtx installs at renderer-creation time; the GC pause keeps
+Julia's safepoint page from ever being armed during the window, so there is no
+recoverable safepoint SIGSEGV for breakpad/SIG_DFL to mis-handle (the root cause of the
+historical intermittent startup crash — see the module header).
 """
 function with_restored_signals(f)
-    saved = snapshot()
+    saved  = snapshot()
+    gc_was = GC.enable(false)          # returns the PREVIOUS state — restore that, not `true`
     try
         return f()
     finally
-        restore(saved)
+        restore(saved)                 # evict breakpad FIRST (it persists past create)…
+        GC.enable(gc_was)              # …then let the GC run again under Julia's handlers
     end
 end
 

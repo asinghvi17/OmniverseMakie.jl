@@ -80,6 +80,27 @@ function region_diff(a, b, c0, c1)
 end
 """
 
+# X credentials for the GLMakie-tier subprocesses.  ENV wins; otherwise DISCOVER the
+# Xwayland auth cookie instead of hardcoding one — mutter regenerates the
+# `.mutter-Xwaylandauth.<random>` suffix on EVERY Wayland login, so a hardcoded fallback
+# silently rots on the next reboot and kills every GL/CUDA test with an opaque GLFW init
+# error.  When no cookie exists at all, warn ONCE with the required vars and forward
+# nothing (offscreen-only tests still pass; GL tests fail fast with a clear GLFW error).
+const _HELPER_RUNTIME_DIR = get(ENV, "XDG_RUNTIME_DIR", "/run/user/$(Base.Libc.getuid())")
+function _discover_xauthority()
+    haskey(ENV, "XAUTHORITY") && return ENV["XAUTHORITY"]
+    candidates = filter(isfile,
+        [joinpath(_HELPER_RUNTIME_DIR, f) for f in
+         (isdir(_HELPER_RUNTIME_DIR) ? readdir(_HELPER_RUNTIME_DIR) : String[])
+         if startswith(f, ".mutter-Xwaylandauth.")])
+    isempty(candidates) || return candidates[argmax(mtime.(candidates))]   # newest cookie
+    @warn """no Xwayland auth cookie found under $(_HELPER_RUNTIME_DIR) — GLMakie-tier
+             subprocess tests will fail at GL context creation.  Export DISPLAY and
+             XAUTHORITY (and XDG_RUNTIME_DIR if non-standard) to fix.""" maxlog = 1
+    return nothing
+end
+const _HELPER_XAUTHORITY = _discover_xauthority()
+
 # One attempt of `run_ovrtx_subprocess`: write `prog` to a temp `.jl`, run it as a child
 # `julia --project=<repo>` under the standard ovrtx env, reap it with the E1 truthful-exit
 # watchdog, and return `(exitcode, output)`.  The public `run_ovrtx_subprocess` (below) wraps
@@ -103,13 +124,10 @@ function _run_ovrtx_once(prog::String; timeout::Int, kill_grace::Real, env)
             "PATH"                      => get(ENV, "PATH", ""),
             "HOME"                      => get(ENV, "HOME", ""),
             # GLMakie (M5) needs a real X display for GL context creation.  Forward the
-            # Xwayland display vars (ENV first).  DEV-BOX DEFAULTS: the XAUTHORITY fallback is
-            # session-specific (mutter regenerates the `.mutter-Xwaylandauth.*` suffix each
-            # Wayland login) and XDG_RUNTIME_DIR hardcodes UID 1000 — same dev-box-only tier as
-            # _HELPER_OVRTX_LIB / _HELPER_USDA above; on a fresh session or CI, set these in ENV.
+            # Xwayland display vars: ENV first, else the DISCOVERED newest mutter cookie
+            # (see _discover_xauthority above — never a hardcoded session-specific path).
             "DISPLAY"                   => get(ENV, "DISPLAY", ":0"),
-            "XAUTHORITY"                => get(ENV, "XAUTHORITY", "/run/user/1000/.mutter-Xwaylandauth.QRQ4Q3"),
-            "XDG_RUNTIME_DIR"           => get(ENV, "XDG_RUNTIME_DIR", "/run/user/1000"),
+            "XDG_RUNTIME_DIR"           => _HELPER_RUNTIME_DIR,
             # GLMakie cannot precompile without a display available.  AUTO=0 skips
             # startup auto-precompile so the subprocess loads OmniverseMakie cleanly.
             "JULIA_PKG_PRECOMPILE_AUTO" => "0",
@@ -124,6 +142,11 @@ function _run_ovrtx_once(prog::String; timeout::Int, kill_grace::Real, env)
             # is loadable by subprocess programs that do `using GLMakie`.
             "JULIA_LOAD_PATH"           => _load_path,
         ]
+        # Only forward XAUTHORITY when a cookie actually exists (ENV or discovered) —
+        # forwarding a dead path produces an opaque GL error a minute later instead of
+        # GLFW's clear init failure.
+        _HELPER_XAUTHORITY === nothing ||
+            push!(env_pairs, "XAUTHORITY" => _HELPER_XAUTHORITY)
         # Volumes M1: forward caller-supplied env pairs (e.g. OMNIVERSEMAKIE_INDEX_LIBS).
         # `env` is a single `name=>value` Pair or an iterable of Pairs.  These append to (and
         # can override) the base set above; anything not present is absent from the child.
