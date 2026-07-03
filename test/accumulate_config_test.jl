@@ -8,21 +8,23 @@ import OmniverseMakie as OM
 using OmniverseMakie: OV
 
 @testset "accumulate-across-frames: ScreenConfig plumbing (pure)" begin
-    # Field order matters: Makie.merge_screen_config constructs ScreenConfig POSITIONALLY, so the
-    # two new fields must be trailing (selection_outline stays 5th).
+    # Field order matters: Makie.merge_screen_config constructs ScreenConfig POSITIONALLY, so new
+    # fields must be trailing (selection_outline stays 5th; `background` is 8th/last).
     @test fieldnames(OM.ScreenConfig) ==
           (:mode, :samples, :warmup, :max_bounces, :selection_outline,
-           :accumulate_across_frames, :accumulation_preroll)
+           :accumulate_across_frames, :accumulation_preroll, :background)
 
-    # Positional constructor over all 7 fields (the m3_material_prog site relies on this).
-    c = OM.ScreenConfig(:rt2, 512, 64, 4, false, true, 8)
+    # Positional constructor over all 8 fields (the m3_material_prog site relies on this).
+    c = OM.ScreenConfig(:rt2, 512, 64, 4, false, true, 8, :default)
     @test c.accumulate_across_frames === true
     @test c.accumulation_preroll === 8
+    @test c.background === :default
 
     # Theme defaults resolve WITHOUT an override (off + preroll 40), matching pre-feature behaviour.
     d = OM.Makie.merge_screen_config(OM.ScreenConfig, Dict{Symbol,Any}())
     @test d.accumulate_across_frames === false
     @test d.accumulation_preroll === 40
+    @test d.background === :default
 
     # Caller overrides flow through the merge.
     o = OM.Makie.merge_screen_config(OM.ScreenConfig,

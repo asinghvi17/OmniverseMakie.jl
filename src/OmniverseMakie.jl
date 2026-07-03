@@ -17,6 +17,7 @@ include("translation/materials.jl") # displaycolor_for (plot.color → primvars:
 include("translation/meshes.jl")    # to_ovrtx_object (Makie.Mesh → UsdGeomMesh reference)
 include("translation/primitives.jl") # to_ovrtx_object (scatter/meshscatter/lines/surface)
 include("translation/volume.jl")     # Volumes M1: _vdb_volume_usda / author_vdb_volume! (UsdVol)
+include("translation/envlight.jl")   # IBL: EnvLightState / push_environment_image! (dome via removable reference) — before screen.jl (Screen.env_light field type)
 include("compute.jl")            # OvrtxRObj (Screen.plot2robj references it) — before screen.jl
 include("screen.jl")             # Screen, open-stage colorbuffer, insert!/insertplots!, activate!
 include("translation/usdplot.jl")  # USDPlot recipe + bind_usd! (needs compute.jl + screen.jl); @recipe exports usdplot/usdplot!
@@ -24,6 +25,8 @@ include("tonemap.jl")            # shared HDR tonemap math (Task 2)
 
 # usdplot bindings API (the recipe itself auto-exports USDPlot / usdplot / usdplot!).
 export bind_usd!, unbind_usd!
+# Environment-light image (IBL): set/live-swap the DomeLight environment map.
+export push_environment_image!
 
 # M5/M6 interactive viewport lives in package extensions (GLMakie / CUDA). The main
 # module only DECLARES the generics; the GLMakie ext adds the methods.
@@ -82,6 +85,7 @@ function __init__()
         selection_outline = false,   # M6.B: outline feature off by default at every level
         accumulate_across_frames = false,  # realtime-style recording; off = per-frame reconverge
         accumulation_preroll = 40,   # first-frame warm-up steps when accumulate is on
+        background = :default,       # :default (none) | :sky (procedural) | :domelight (env map)
     )
     # M3.5: make `material=` a backend-universal attribute so Lines/Scatter/LineSegments accept it
     # too (Makie validates undocumented keywords; only mesh-like recipes document it natively).

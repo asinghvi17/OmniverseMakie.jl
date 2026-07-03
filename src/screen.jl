@@ -27,6 +27,9 @@ mutable struct Screen <: Makie.MakieScreen
     # once per frame in `_sync_and_needs_reset!`.  Value is `(USDBinding, value)` — typed `Any` because
     # `USDBinding` (usdplot.jl) is defined AFTER this struct.
     pending_usd_writes::Dict{Tuple{String,Union{Nothing,String}},Any}
+    # Environment-light (IBL) record: the removable dome-layer handle + screen-owned temp texture
+    # (+ a pre-author pending push).  `nothing` until an EnvironmentLight / push_environment_image!.
+    env_light::Union{Nothing,EnvLightState}
 end
 
 # ------------------------------------------------------------------
@@ -65,6 +68,7 @@ function Screen(scene::Makie.Scene, config::ScreenConfig;
         false,     # structural_dirty (accumulate mode: no composition change yet)
         false,     # preroll_done (accumulate mode: first-frame warm-up not yet folded in)
         Dict{Tuple{String,Union{Nothing,String}},Any}(),  # pending_usd_writes (usdplot bind_usd!)
+        nothing,   # env_light (IBL dome state; created on first EnvironmentLight / push)
     )
 end
 
@@ -108,6 +112,7 @@ function Base.close(s::Screen)
     for robj in values(s.plot2robj)
         destroy_bindings!(robj)
     end
+    _destroy_env_light!(s)       # GC the env dome's temp texture (idempotent)
     close(s.renderer)
     return
 end
@@ -322,6 +327,10 @@ function _author_screen!(screen::Screen, cam_scene, plot_scene)
     screen.last_camera = _camera_snapshot(cam_scene)
     screen.last_lights = _lights_snapshot(cam_scene.compute[:lights][])
     screen.authored    = true
+    # Environment dome (IBL): a stashed push_environment_image! or the scene's EnvironmentLight —
+    # authored as a REMOVABLE reference on the now-open stage (envlight.jl), so it can be
+    # live-swapped later (asset inputs are not FFI-writable; the root layer is not removable).
+    _author_env_light!(screen, cam_scene)
     Makie.insertplots!(screen, plot_scene)
     return screen
 end

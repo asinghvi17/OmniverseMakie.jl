@@ -108,9 +108,9 @@ material_prim_path(plot) = "/World/Looks/Mat_$(objectid(plot))"
 USDA fragment for ONE OmniPBR `UsdShade Material` named `name`, composed at
 `/World/Looks/<name>` (8-space indent to nest under `/World/Looks`). `inputs`
 maps an OmniPBR shader-input name to a value, typed by the USD kind emitted:
-`NTuple{3}`→`color3f (r,g,b)`, `Bool`→`bool 0|1`, `AbstractString`→`asset @…@`,
-else→`float Float32(value)`. `outputs:mdl:surface.connect` targets the material's
-absolute `Shader.outputs:out`.
+`NTuple{3}`→`color3f (r,g,b)`, `NTuple{2}`→`float2 (x,y)`, `Bool`→`bool 0|1`,
+`AbstractString`→`asset @…@`, else→`float Float32(value)`.
+`outputs:mdl:surface.connect` targets the material's absolute `Shader.outputs:out`.
 
 CONSTRAINT (M3.1-validated): must be composed INLINE at root-author time, i.e.
 PRE-AUTHORED into the stage passed to `open_usd_string!`. Adding it to the OPEN
@@ -134,14 +134,17 @@ usda_glass_material(name::AbstractString, inputs::AbstractDict) =
 
 # Author ONE MDL-backed `UsdShade Material` `name` from `mdl_asset`
 # (subIdentifier `subid`); `inputs` typed by value: NTuple{3}→color3f,
-# Bool→bool, AbstractString→asset, else→float. Shared by OmniPBR + OmniGlass
-# authoring; OmniPBR output is byte-identical to pre-M4 usda_omnipbr_material.
+# NTuple{2}→float2, Bool→bool, AbstractString→asset, else→float. Shared by
+# OmniPBR + OmniGlass authoring; OmniPBR output is byte-identical to pre-M4
+# usda_omnipbr_material.
 function _usda_mdl_material(name::AbstractString, mdl_asset::AbstractString,
                            subid::AbstractString, inputs::AbstractDict)
     lines = String[]
     for (input_name, input_value) in inputs
         if input_value isa NTuple{3}                     # color3f
             push!(lines, "                color3f inputs:$(input_name) = ($(input_value[1]), $(input_value[2]), $(input_value[3]))")
+        elseif input_value isa NTuple{2}                 # float2 (UV tiling: texture_scale/_translate)
+            push!(lines, "                float2 inputs:$(input_name) = ($(Float32(input_value[1])), $(Float32(input_value[2])))")
         elseif input_value isa Bool                      # bool; MUST precede float (Bool <: Real)
             push!(lines, "                bool inputs:$(input_name) = $(input_value ? 1 : 0)")
         elseif input_value isa AbstractString            # asset (texture)
@@ -191,6 +194,16 @@ const _OMNIPBR_KEY_MAP = Dict{Symbol,String}(
     :normal_texture     => "normalmap_texture",
     :roughness_texture  => "reflectionroughness_texture",
     :metallic_texture   => "metallic_texture",
+    # UVW projection / tiling (OmniPBR.mdl "UV" group): `project_uvw = true` derives UVs by
+    # projection instead of the mesh's authored `st`, so textures tile with NO hand-authored UVs
+    # (e.g. world-space grass).  `world_or_object` picks the projection space (true = world);
+    # `texture_scale`/`texture_translate` (2-tuples → float2) and `texture_rotate` (float,
+    # degrees) transform the projected UVs — OmniPBR gates all four on `project_uvw == true`.
+    :project_uvw        => "project_uvw",
+    :world_or_object    => "world_or_object",
+    :texture_scale      => "texture_scale",
+    :texture_translate  => "texture_translate",
+    :texture_rotate     => "texture_rotate",
 )
 
 # Default OmniPBR `emissive_intensity` authored with an `emissive=` key.
@@ -380,7 +393,10 @@ function _merge_material_input!(inputs::AbstractDict, key::Symbol, value, plot,
         inputs["opacity_constant"] = value
         inputs["enable_opacity"]   = true              # companion bool gate
     elseif haskey(_OMNIPBR_KEY_MAP, key)
-        inputs[_OMNIPBR_KEY_MAP[key]] = value   # metallic, roughness, …
+        # Normalize a 2-element static vector (Vec2f/Point2f) to the NTuple{2} the float2
+        # emitter/live-push branches dispatch on, so `texture_scale = Vec2f(4, 4)` works too.
+        v = value isa Makie.VecTypes{2} ? (Float32(value[1]), Float32(value[2])) : value
+        inputs[_OMNIPBR_KEY_MAP[key]] = v       # metallic, roughness, tiling, …
     else
         @warn "OmniverseMakie: unknown `material=` key `$(key)` — skipped (not an OmniPBR \
                escape-hatch input)."

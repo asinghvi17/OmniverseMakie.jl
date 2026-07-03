@@ -579,6 +579,9 @@ function _push_material!(r, shader_prim::AbstractString, kind::Symbol, material_
         elseif v isa NTuple{3}
             _write_shader_input!(r, shader_prim, input_name,
                                  (Float32(v[1]), Float32(v[2]), Float32(v[3])))
+        elseif v isa NTuple{2}
+            # float2 (UV tiling: texture_scale/texture_translate) — live-writable like scalars.
+            _write_shader_input!(r, shader_prim, input_name, (Float32(v[1]), Float32(v[2])))
         elseif v isa Real
             _write_shader_input!(r, shader_prim, input_name, Float32(v))
         else

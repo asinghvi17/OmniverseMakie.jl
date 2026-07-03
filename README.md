@@ -206,6 +206,34 @@ Three rules worth knowing:
 A runnable showcase — the NVIDIA Kit "Zeus ZS300" sedan with all four wheels spun live and
 recorded to an `.mp4` — is [`examples/usdplot_zeus_wheels.jl`](examples/usdplot_zeus_wheels.jl).
 
+### Environment lighting: `push_environment_image!` + backgrounds
+
+Image-based lighting through a `UsdLux DomeLight` whose latlong (equirectangular) map you can
+set — and **live-replace** — at any time:
+
+```julia
+img = fill(RGBf(0.8, 0.9, 1.0), 256, 512)               # any Matrix{<:Colorant}
+scene = Scene(lights = [EnvironmentLight(1.0, img)])     # honored at display time
+screen = OmniverseMakie.Screen(scene; background = :domelight)  # map also shows as background
+
+push_environment_image!(screen, other_img)               # live swap (Matrix — LDR, clamped)
+push_environment_image!(screen, "studio.exr")            # or a file path — true HDR radiance
+```
+
+A matrix source is written to a temp PNG (components clamped to `[0,1]`); pass an `.exr`/`.hdr`
+**file path** for real HDR. Swaps use the same proven remove+re-reference mechanism as volume
+reloads, so in `accumulate_across_frames` mode a swap resets accumulation exactly once. The
+`background` screen option selects `:default`, `:domelight` (pin the env map as the visible
+background), or `:sky` — note the procedural sky is authored but **not rendered by standalone
+ovrtx** (a Kit-runtime feature, like volume colormap colors; a warning says so).
+
+OmniPBR materials also gained UV-projection tiling — textures without hand-authored UVs:
+
+```julia
+mesh!(ax, floor_rect; color = grass_texture,
+      material = (; project_uvw = true, world_or_object = true, texture_scale = (8, 8)))
+```
+
 ---
 
 ## Feature status
@@ -226,6 +254,7 @@ surface is exercised by [`test/runtests.jl`](test/runtests.jl).
 | **Volumes M1** | NVIDIA IndeX enablement (carb-token) + `author_vdb_volume!` (UsdVol / OpenVDB) | shipped |
 | **Volumes M2** | Dense-array `volume!(x, y, z, array)` + live data edits — **grayscale**¹ | shipped |
 | **usdplot** | `usdplot!` external USD files (`.usda`/`.usdc`, payloads, textures, materials) as atomic plots + `bind_usd!` observable→prim/attribute bindings | shipped |
+| **IBL** | `EnvironmentLight` / `push_environment_image!` (live-swappable DomeLight env map), `background = :domelight`, OmniPBR UV-projection tiling — procedural `:sky` authored but Kit-only² | shipped |
 
 ¹ **Volume colormaps render grayscale**, by design, not as a bug. In standalone `ovrtx`
 the only bundled volume path is **NVIDIA IndeX Direct**, which renders scalar density as
@@ -234,14 +263,21 @@ extension that ships no library here. See the explanation and tripwire test in
 [`test/volumes_color_test.jl`](test/volumes_color_test.jl) and the IndeX notes in
 [`src/binding/index_config.jl`](src/binding/index_config.jl).
 
+² **The procedural sky background is not rendered by standalone `ovrtx`** (verified against
+both RT and PT render modes): `background = :sky` authors the correct
+`omni:rtx:background:source:type` token — which a Kit/composite runtime honors — but renders
+black here and warns once. `:domelight` works natively. Tripwire test in
+[`test/envlight_test.jl`](test/envlight_test.jl).
+
 ---
 
 ## API surface
 
 - **Exported:** `interactive_display`, `replace_scene!`, `usdplot` / `usdplot!` (place an
   external USD file), `bind_usd!` / `unbind_usd!` (tie observables to prims/attributes inside
-  it). (Every exported Makie name is re-exported too, so `using OmniverseMakie` gives you
-  `Figure`, `mesh!`, `save`, etc.)
+  it), `push_environment_image!` (set / live-swap the environment-light map). (Every exported
+  Makie name is re-exported too, so `using OmniverseMakie` gives you `Figure`, `mesh!`, `save`,
+  etc.)
 - **Documented but unexported** (qualify with `OmniverseMakie.`): `Screen`,
   `Makie.colorbuffer`, `select!` (selection outline, offscreen), `author_vdb_volume!`
   (low-level VDB authoring), `reset_accumulation!` (force an RT2 reset in accumulate mode).

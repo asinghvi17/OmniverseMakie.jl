@@ -308,3 +308,8 @@ include("texture_freshpath_test.jl")
 # prims/attributes inside it. Pure: recipe/parsing/registry/dispatch. Subprocess: compose + render,
 # displayColor flip, prim-transform move, fail-fast bind, delete, accumulate reset suppression, up=:y.
 include("usdplot_test.jl")
+
+# Environment-light image (IBL) + background source + OmniPBR UV tiling: push_environment_image!
+# (removable-reference dome, live swap), ScreenConfig background (:sky = documented Kit-only
+# tripwire), project_uvw/texture_scale tiling. Pure + subprocess pixel tests.
+include("envlight_test.jl")

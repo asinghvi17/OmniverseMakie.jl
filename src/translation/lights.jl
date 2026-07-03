@@ -9,7 +9,8 @@
 #   AmbientLight     → DomeLight    (250)
 #   RectLight        → RectLight    [orient+translate from fields]
 #   SpotLight        → SphereLight  + ShapingAPI
-#   EnvironmentLight → DomeLight    [texture deferred to M4]
+#   EnvironmentLight → textured DomeLight via a REMOVABLE reference (envlight.jl), NOT baked
+#                      here — live-swappable via push_environment_image!
 #
 # Open-stage live updates (M2.1): author_root_from_scene! BAKES camera + lights once;
 # afterwards sync_lights! pushes minimal writes (inputs:intensity, inputs:color,
@@ -240,17 +241,12 @@ function usda_light(l::Makie.SpotLight, index::Int)
 """
 end
 
-function usda_light(l::Makie.EnvironmentLight, index::Int)
-    # Best-effort: DomeLight, l.intensity scaled to USD range. Texture (l.image)
-    # deferred to M4 (HDR environment map).
-    intensity = Float64(l.intensity) * 1000.0
-    return """    def DomeLight "$(light_prim_name(l, index))"
-    {
-        float inputs:intensity = $(intensity)
-    }
-
-"""
-end
+# EnvironmentLight is NOT baked here: its textured DomeLight is authored as a REMOVABLE
+# reference by `_author_env_light!` (envlight.jl, hooked in `_author_screen!`) so the
+# environment map can be live-swapped via `push_environment_image!` — asset inputs are not
+# FFI-writable and the root layer is not removable, so a root-baked dome would be frozen.
+# Emitting nothing here keeps `_enumerate_lights` indices stable for the other types.
+usda_light(l::Makie.EnvironmentLight, index::Int) = ""
 
 # Fallback for any future unknown light types — emit nothing, warn.
 function usda_light(l, index::Int)

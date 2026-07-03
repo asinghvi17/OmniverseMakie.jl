@@ -866,22 +866,27 @@ end
 
 """
     write_shader_input!(r::Renderer, shader_prim::AbstractString, name::AbstractString,
-                        value::Union{Float32,NTuple{3,Float32}})
+                        value::Union{Float32,NTuple{2,Float32},NTuple{3,Float32}})
 
 Live re-write of OmniPBR `inputs:<name>` on the OPEN stage `shader_prim` (e.g.
 `/World/Looks/Mat_<id>/Shader`) — the M3.4 material-edit path.
 - `Float32` scalar → dtype {kDLFloat,32,1}, data=[v].
+- `float2` `NTuple{2,Float32}` → dtype {kDLFloat,32,2} (2 lanes) — the UV-tiling inputs
+  (`texture_scale`/`texture_translate`).
 - `color3f` `NTuple{3,Float32}` → dtype {kDLFloat,32,3} (3 lanes), data=[r,g,b].
-Both is_array=false, shape=[1]; the backing Float32 vector is GC.@preserve'd.  Does
+All is_array=false, shape=[1]; the backing Float32 vector is GC.@preserve'd.  Does
 NOT reset — caller restarts RT2 accumulation (one `OV.reset!` per changed frame).
 """
 function write_shader_input!(r::Renderer, shader_prim::AbstractString, name::AbstractString,
-                             value::Union{Float32,NTuple{3,Float32}})
+                             value::Union{Float32,NTuple{2,Float32},NTuple{3,Float32}})
     r.alive || error("write_shader_input! on a closed Renderer")
     attr_name = "inputs:" * String(name)
     if value isa Float32
         dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(1))
         data  = Float32[value]
+    elseif value isa NTuple{2,Float32}                   # float2 (UV tiling inputs)
+        dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(2))
+        data  = Float32[value[1], value[2]]
     else
         dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(32), UInt16(3))
         data  = Float32[value[1], value[2], value[3]]
