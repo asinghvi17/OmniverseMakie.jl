@@ -48,33 +48,8 @@ mutable struct GPUBlitState
 end
 
 # ------------------------------------------------------------------
-# Device tonemap kernels — reuse the SHARED scalar `tonemap` (Task 2)
+# Device tonemap kernel — reuses the SHARED scalar `tonemap` (Task 2)
 # ------------------------------------------------------------------
-# One thread per output pixel (i,j) of the [H,W] matrix; reads channel-fastest
-# hdr[1:3, j, i] (float16/float32) → out[i,j] = tonemap((r,g,b), scale).
-# Same indexing as host `tonemap_frame`, so host and device agree pixelwise.
-function _tonemap_kernel!(out, hdr, scale::Float32, H::Int, W::Int)
-    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if idx <= H * W
-        i = (idx - 1) % H + 1
-        j = (idx - 1) ÷ H + 1
-        @inbounds out[i, j] = tonemap(
-            (Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
-    end
-    return nothing
-end
-
-# [C,W,H] HDR CuArray → [H,W] RGBA{N0f8} CuArray (matches tonemap_frame).
-function _tonemap_dev(hdr, exposure::Float32)
-    C, W, H = size(hdr)
-    out = CuArray{RGBA{N0f8}}(undef, H, W)
-    n = H * W
-    threads = 256
-    scale = exp2(exposure)                          # once per launch (host-side), not per thread
-    @cuda threads = threads blocks = cld(n, threads) _tonemap_kernel!(out, hdr, scale, H, W)
-    return out
-end
-
 # FUSED tonemap + display-orient kernel (C3): one thread per HDR pixel (i in 1:H, j in 1:W)
 # writes the y-flipped/transposed output out[j, H+1-i] straight into a [W,H] RGBA8 buffer —
 # ONE kernel replacing _tonemap_dev + permutedims + reverse (3 kernels / 3 device allocations).
@@ -128,15 +103,6 @@ function _tonemap_orient_cached!(st::GPUBlitState, hdr, exposure::Float32)
     end
     return _tonemap_orient_dev!(out, hdr, exposure)
 end
-
-"""
-    tonemap_kernel_to_matrix(hdr::CuArray{<:Real,3}, exposure::Float32) -> Matrix{RGBA{N0f8}}
-
-Test-only: device-tonemap an `[C,W,H]` HDR CuArray to a host `[H,W]` matrix (same
-layout/indexing as `tonemap_frame`), proving the CUDA kernel matches the host tonemap.
-"""
-tonemap_kernel_to_matrix(hdr::CuArray{<:Real,3}, exposure::Float32) =
-    Array(_tonemap_dev(hdr, exposure))
 
 """
     tonemap_oriented_kernel_to_matrix(hdr::CuArray{<:Real,3}, exposure::Float32) -> Matrix{RGBA{N0f8}}

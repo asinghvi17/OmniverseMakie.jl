@@ -33,9 +33,6 @@ export push_environment_image!
 function interactive_display end
 function present! end
 function on_render_tick! end
-# Declared here (GLMakie ext adds the method) so `OmniverseMakie.cpu_blit!` resolves for
-# callers/tests; the M6.A ext refactor moved its body to the GLMakie ext.
-function cpu_blit! end
 # M6.A: the CUDA ext defines `_cuda_functional() = CUDA.functional()`; the GLMakie ext's
 # `_pick_blitter` calls it (invokelatest) to decide :gpu vs :cpu.  Declared here so the GLMakie
 # ext can reference it without a CUDA dep.

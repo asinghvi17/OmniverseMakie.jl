@@ -6,7 +6,7 @@
 # resolved compute outputs.  Surface (empty consumed_inputs) is the ONE type
 # still built via to_ovrtx_object here; old build wrappers were dead + removed.
 #
-# Schemas (all non-black through ovrtx RT2; guarded by m1_primitives_test.jl):
+# Schemas (all non-black through ovrtx RT2; guarded by test/offscreen/primitives_test.jl):
 #   Scatter/MeshScatter → PointInstancer + Sphere/Mesh prototype
 #   Lines/LineSegments  → BasisCurves (uniform token type = "linear")
 #   Surface             → Mesh (grid re-meshed; reuses usda_mesh)

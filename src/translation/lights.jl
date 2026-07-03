@@ -79,7 +79,7 @@ Flat 4×4 USD orientation matrix (row-vector, `_xform_matrix` layout) for a ligh
 along `dir`. USD DistantLights/RectLights emit along local −Z, so local +Z = −`dir`.
 Computed on `Vec3d` (StaticArrays) math so it ALLOCATES NOTHING — the form the per-frame
 snapshot stores. Byte-identical to the pre-L2 `Matrix` build (pinned by the RectLight golden
-in `test/l1_lights_structural_test.jl`).
+in `test/offscreen/lights_structural_test.jl`).
 """
 function _direction_to_xform_tuple(dir)
     z = -normalize(Vec3d(dir[1], dir[2], dir[3]))     # local +Z = −emission direction

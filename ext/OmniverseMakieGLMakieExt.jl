@@ -4,7 +4,7 @@ using OmniverseMakie, GLMakie
 using OmniverseMakie: Makie, RGBA, N0f8, ColorTypes
 # main-module internals used by the moved src/interactive code (bare names):
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
-    _scene_for_camera, interactive_display, present!, on_render_tick!, cpu_blit!,
+    _scene_for_camera, interactive_display, present!, on_render_tick!,
     attach_picking!, detach_picking!, _pick_at!,  # M6.B Task 5: picking
     replace_scene!, record_frame!, ScreenConfig    # hybrid embedded viewport
 using OmniverseMakie: tonemap
@@ -34,10 +34,7 @@ GLMakie.draw_atomic(::GLMakie.Screen, ::Makie.Scene, ::OmniverseMakie.USDPlot) =
 # `_tonemap_orient!` below: present!, interactive_display, and resize_viewport! all
 # fill their session-owned [W,H] display buffer through it — reproducing
 # reverse(permutedims(tonemap_frame([C,W,H] hdr, exposure)), dims=2) via out[j, H+1-i]
-# (the SAME fused indexing the CUDA ext's oriented copy uses).  `_orient_for_display`
-# / `cpu_blit!` are the equivalent orientation for an ALREADY-tonemapped [H,W] frame
-# (the standalone M5 blit helper + its test); keep them pixel-consistent with the loop.
-_orient_for_display(frame) = reverse(permutedims(frame), dims = 2)
+# (the SAME fused indexing the CUDA ext's oriented copy uses).
 
 # Fused host tonemap + display-orient: write the [C,W,H] linear-HDR `hdr` INTO the
 # pre-oriented [W,H] RGBA{N0f8} buffer `out` in place — one pass, no intermediate
@@ -66,18 +63,6 @@ function _tonemap_orient!(out::AbstractMatrix{RGBA{N0f8}},
         out[j, H + 1 - i] = tonemap((Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
     end
     return out
-end
-
-"""
-    cpu_blit!(image_plot, frame::AbstractMatrix{RGBA{N0f8}}) -> Nothing
-
-Set the GLMakie `image!` plot's data Observable from a `[H,W]` host frame (row 1 =
-top), triggering a texture re-upload (CPU blit).  `reverse(permutedims(frame),
-dims=2)` orients it right-side-up in the window.
-"""
-function cpu_blit!(image_plot, frame::AbstractMatrix{RGBA{N0f8}})
-    image_plot[3][] = _orient_for_display(frame)   # [3] = data Observable
-    return nothing
 end
 
 # ===== moved verbatim from src/interactive/viewport.jl =====

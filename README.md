@@ -270,14 +270,14 @@ surface is exercised by [`test/runtests.jl`](test/runtests.jl).
 the only bundled volume path is **NVIDIA IndeX Direct**, which renders scalar density as
 grayscale and ignores the authored colormap; the color-compositing path lives in a Kit
 extension that ships no library here. See the explanation and tripwire test in
-[`test/volumes_color_test.jl`](test/volumes_color_test.jl) and the IndeX notes in
+[`test/volumes/plot_test.jl`](test/volumes/plot_test.jl) and the IndeX notes in
 [`src/binding/index_config.jl`](src/binding/index_config.jl).
 
 ² **The procedural sky background is not rendered by standalone `ovrtx`** (verified against
 both RT and PT render modes): `background = :sky` authors the correct
 `omni:rtx:background:source:type` token — which a Kit/composite runtime honors — but renders
 black here and warns once. `:domelight` works natively. Tripwire test in
-[`test/envlight_test.jl`](test/envlight_test.jl).
+[`test/offscreen/envlight_test.jl`](test/offscreen/envlight_test.jl).
 
 ---
 

@@ -704,7 +704,7 @@ end
 
 Run `warmup` RT2 steps (RT2 needs many samples to converge), then map the final
 `LdrColor` to a `Matrix{RGBA{N0f8}}` (H, W).  Warmup frames are freed immediately.
-Top-left origin (row 1 = top), NO y-flip — verified by test/m1_orientation_test.jl.
+Top-left origin (row 1 = top), NO y-flip — verified by test/offscreen/orientation_test.jl.
 """
 function render_to_matrix(r::Renderer, product::AbstractString;
                          warmup::Int=64, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)

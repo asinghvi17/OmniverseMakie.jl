@@ -380,7 +380,7 @@ attribute).  If anything was written, `OV.reset!` restarts RT2 accumulation once
 `write_xform!`, and a `plot.color`/`translate!` edit writes displayColor/`omni:xform` in place.
 
 The matrix is returned EXACTLY as `OV.render_to_matrix` produces it — top-left origin
-(right-side-up, verified by `test/m1_orientation_test.jl`), 4-channel `RGBA{N0f8}`, NO
+(right-side-up, verified by `test/offscreen/orientation_test.jl`), 4-channel `RGBA{N0f8}`, NO
 flip/alpha-drop/conversion.
 """
 function Makie.colorbuffer(screen::Screen; kw...)
@@ -433,7 +433,7 @@ const _PICK_TIMEOUT_NS = UInt64(10_000_000_000)
 # VERIFIED EMPIRICALLY (off-center marker): x maps straight through; y is FLIPPED (`H - y`).  The
 # ovrtx row returning the marker was `H - round(y)`, never `round(y)` (that row was background),
 # agreeing across `Makie.project`, the framebuffer row, and the pick FFI.  Getting this flip wrong
-# silently picks the wrong pixel — locked by an off-center assertion in test/m6b_pick_test.jl.
+# silently picks the wrong pixel — locked by an off-center assertion in test/picking/pick_test.jl.
 function _to_ovrtx_pixel(xy, fb_size)
     W, H = fb_size
     px = clamp(round(Int, xy[1]), 0, W - 1)

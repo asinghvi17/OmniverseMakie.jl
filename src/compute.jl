@@ -77,7 +77,7 @@ plot_prim_path(scene2scope::AbstractDict, scene, plot) =
 # Mesh/MeshScatter (→ `nothing`) but NOT for Scatter/Lines/LineSegments (Makie registers it
 # there only with a `material=` kwarg) → tracked for Mesh + MeshScatter ONLY.  Hence a live
 # material-PARAM edit on a MATERIALIZED Scatter/Lines/LineSegments is a no-op (documented —
-# test/m3_material_live_test.jl); a live `color` edit still works (`:scaled_color` tracked).
+# test/materials/material_live_test.jl); a live `color` edit still works (`:scaled_color` tracked).
 consumed_inputs(::Makie.Mesh)         = [:positions_transformed_f32c, :model_f32c, :faces, :normals, :scaled_color, :material, :visible]
 consumed_inputs(::Makie.Scatter)      = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
 consumed_inputs(::Makie.MeshScatter)  = [:positions_transformed_f32c, :model_f32c, :scaled_color, :material, :visible]
@@ -522,11 +522,11 @@ function _push_instancer_positions!(screen, robj, plot, binding, value)
 end
 
 # Diagnostic hook: called with the attribute name on every `push_to_ovrtx!` write.
-# `nothing` (default) → no overhead.  test/m2_diffnode_test.jl asserts EXACTLY ONE write per edit.
+# `nothing` (default) → no overhead.  test/live/diffnode_test.jl asserts EXACTLY ONE write per edit.
 const _PUSH_OBSERVER = Ref{Any}(nothing)
 
 # Diagnostic hook (M3.4): called with the OmniPBR INPUT name on every live shader-input write.
-# `nothing` (default) → no overhead.  test/m3_material_live_test.jl asserts exactly the changed
+# `nothing` (default) → no overhead.  test/materials/material_live_test.jl asserts exactly the changed
 # inputs were written (one write per changed param).
 const _SHADER_WRITE_OBSERVER = Ref{Any}(nothing)
 

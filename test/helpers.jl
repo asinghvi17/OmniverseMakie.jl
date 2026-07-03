@@ -21,11 +21,17 @@ Prelude spliced into subprocess progs (`\$(PROG_PIXEL_HELPERS)`) that inspect a 
 `Makie.colorbuffer`.  Defines the shared lit-pixel helpers + thresholds so render/volume
 progs stop re-deriving them:
 
+  * `lum(c)`            — r+g+b luminance of one pixel;
   * `nonblack(img)`     — count of strictly non-black pixels (any channel > 0);
   * `lit_centroid(img)` — `(H, nb, crow, ccol)`: image height, lit-pixel count, and the mean
     (row, col) of pixels brighter than `LUM_MIN`.  Row INCREASES DOWNWARD (top-left origin),
     so world −Z projects to a LARGER row;
-  * `LIT_PX_MIN = 300`  — min lit pixels for "the volume rendered" (the M2 floor);
+  * `region_nonblack(img, c0, c1)` — count of pixels with `lum > LUM_MIN` over columns [c0,c1];
+  * `region_red(img, c0, c1)`      — red-DOMINANT pixel count (r > g+0.15 && r > b+0.15) over
+    columns [c0,c1] (the usdplot/replace_scene red-quad oracle);
+  * `region_diff(a, b, c0, c1)`    — mean PER-CHANNEL abs difference over columns [c0,c1] of two
+    same-size images (per-channel so it is not blind to equal-luminance swaps like red↔blue);
+  * `LIT_PX_MIN = 300`  — min lit pixels for "it rendered" (the M2 floor);
   * `LUM_MIN = 0.04f0`  — r+g+b luminance above which a pixel counts as "lit".
 
 Loops are wrapped in FUNCTIONS: progs run at top level, where Julia's soft-scope rules break
@@ -35,6 +41,7 @@ element), so no `using ColorTypes` is required in the prog.
 const PROG_PIXEL_HELPERS = raw"""
 const LIT_PX_MIN = 300
 const LUM_MIN = 0.04f0
+lum(c) = Float32(c.r) + Float32(c.g) + Float32(c.b)
 nonblack(img) = count(c -> (Float32(c.r) + Float32(c.g) + Float32(c.b)) > 0, img)
 function lit_centroid(img)
     H, W = size(img)
@@ -46,6 +53,30 @@ function lit_centroid(img)
         end
     end
     return (H = H, nb = nb, crow = nb > 0 ? sr / nb : -1.0, ccol = nb > 0 ? sc / nb : -1.0)
+end
+function region_nonblack(img, c0, c1)
+    H, W = size(img); n = 0
+    for h in 1:H, w in c0:min(c1, W)
+        lum(img[h, w]) > LUM_MIN && (n += 1)
+    end
+    return n
+end
+function region_red(img, c0, c1)
+    H, W = size(img); n = 0
+    for h in 1:H, w in c0:min(c1, W)
+        c = img[h, w]
+        Float32(c.r) > Float32(c.g) + 0.15f0 && Float32(c.r) > Float32(c.b) + 0.15f0 && (n += 1)
+    end
+    return n
+end
+function region_diff(a, b, c0, c1)
+    H, W = size(a); s = 0.0; n = 0
+    for h in 1:H, w in c0:min(c1, W)
+        p = a[h, w]; q = b[h, w]
+        s += abs(Float32(p.r) - Float32(q.r)) + abs(Float32(p.g) - Float32(q.g)) +
+             abs(Float32(p.b) - Float32(q.b)); n += 1
+    end
+    return n == 0 ? 0.0 : s / n
 end
 """
 
