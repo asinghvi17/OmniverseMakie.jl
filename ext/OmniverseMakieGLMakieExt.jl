@@ -49,6 +49,14 @@ GLMakie.draw_atomic(::GLMakie.Screen, ::Makie.Scene, ::OmniverseMakie.USDPlot) =
 # The Float32 path stays byte-identical (`Float32(::Float32)` is identity, goldens/C2/C3 pin it);
 # Float16→Float32 widening is exact, so the zero-copy Float16 path matches the widen-first Float32
 # path pixel-for-pixel.
+#
+# Threaded over columns j: each j writes a DISJOINT output column (out[j, ·]) and every pixel is
+# independent scalar math with NO reductions, so the result is BYTE-IDENTICAL at any thread count
+# (the CUDA twin's ≤1-LSB gate is preserved).  At nthreads()==1 an explicit serial branch avoids
+# `Threads.@threads`'s task-setup allocation, keeping a warmed `_cpu_present!` tick inside the C2
+# absolute allocation gate (test/viewport/present_cpu_test.jl).  The subprocess test harness spawns
+# single-threaded children, so tests exercise the serial branch; users get the speedup with
+# `julia -t auto` (measured 17.9 ms → parallel at 1.14 Mpx, the 1080p present's #2 cost).
 function _tonemap_orient!(out::AbstractMatrix{RGBA{N0f8}},
                           hdr::AbstractArray{<:Real,3}, exposure::Float32)
     C, W, H = size(hdr)
@@ -59,8 +67,16 @@ function _tonemap_orient!(out::AbstractMatrix{RGBA{N0f8}},
     size(out) == (W, H) ||
         throw(DimensionMismatch("_tonemap_orient!: out is $(size(out)), need ($W, $H) for the [C=$C,W,H] hdr"))
     scale = exp2(exposure)                          # once per tick, hoisted out of the W×H loop
-    @inbounds for j in 1:W, i in 1:H
-        out[j, H + 1 - i] = tonemap((Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
+    if Threads.nthreads() == 1
+        @inbounds for j in 1:W, i in 1:H
+            out[j, H + 1 - i] = tonemap((Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
+        end
+    else
+        Threads.@threads for j in 1:W
+            @inbounds for i in 1:H
+                out[j, H + 1 - i] = tonemap((Float32(hdr[1, j, i]), Float32(hdr[2, j, i]), Float32(hdr[3, j, i])), scale)
+            end
+        end
     end
     return out
 end
@@ -814,28 +830,52 @@ Drive `ticks` synchronous host frames and return the composited figure image (`[
 docstring's recording recipe (stop the render loop first with
 `GLMakie.stop_renderloop!(glscr; close_after_renderloop = false)`).
 
-Each tick is one `GLMakie.colorbuffer` on the host screen: pollevents fires `render_tick` →
-the embedded hook steps ovrtx `steps_per_tick` times and blits → the dirtied texture uploads →
-the frame composites, all synchronously.  So one recorded frame accumulates
-`ticks × steps_per_tick` RTX samples (a moved camera/scene resets accumulation on the first
-tick; the rest refine).  The returned image is GLMakie's frame cache — copy it (or feed it
-straight to a `write`/`permutedims`, which copies) before the next frame.
+A recorded frame accumulates `ticks × steps_per_tick` RTX samples (a moved camera/scene resets
+accumulation once, then the steps refine).  Only the LAST tick's image is returned, so the
+intermediate ticks' per-frame present + composite + readback (host tonemap + HdrColor map + GL
+composite, ≈ 26.6 ms/tick at 1080p) is discarded — for `ticks > 1` those are skipped: sync ONCE,
+run `(ticks-1) × steps_per_tick` BARE ovrtx steps (no present/composite), then a single presenting
+`GLMakie.colorbuffer` for the returned frame.  Same sample count, pixel-equivalent
+(profiler-verified: bare-step vs all-present frame, nonblack ratio 1.0000).  `ticks == 1` is one
+presenting colorbuffer, unchanged.
+
+The bare steps run on the CALLER's task (not the render task) — safe under the stopped-loop
+recording recipe (no @async loop competes) and cooperatively serialized with a live @async loop
+(a step yields at its boundary; the final tick's own sync is then a no-op re-check).
+
+Each presenting tick is one `GLMakie.colorbuffer` on the host screen: pollevents fires
+`render_tick` → the embedded hook steps ovrtx `steps_per_tick` times and blits → the dirtied
+texture uploads → the frame composites, all synchronously.  The returned image is GLMakie's frame
+cache — copy it (or feed it straight to a `write`/`permutedims`, which copies) before the next
+frame.
 """
 function record_frame!(session::EmbeddedSession; ticks::Int = 3)
     ticks >= 1 || throw(ArgumentError("record_frame!: need ticks >= 1, got $ticks"))
-    local img
-    for _ in 1:ticks
-        img = Makie.colorbuffer(session.parent_glscreen)
+    ticks == 1 && return Makie.colorbuffer(session.parent_glscreen)
+    # ticks > 1: sync once, then (ticks-1)·steps_per_tick bare steps (no present/composite), then
+    # ONE presenting colorbuffer.  Its _embedded_tick! syncs again (a no-op — nothing changed) and
+    # steps the final steps_per_tick before compositing, so the total is ticks·steps_per_tick.
+    _embedded_sync!(session)
+    for _ in 1:((ticks - 1) * session.steps_per_tick)
+        sr = OV.step!(session.screen.renderer, session.screen.product; timeout_ns = _M5_STEP_TIMEOUT_NS)
+        close(sr)
     end
-    return img
+    return Makie.colorbuffer(session.parent_glscreen)
 end
 
-# Per-frame embedded hook: push live camera/light/plot deltas, reset RT2 only on a real change
-# (accumulate mode → only a structural edit), step, and CPU-blit into the overlay image.  Runs on
-# the host window's render task.
-function _embedded_tick!(session::EmbeddedSession)
+# Per-frame embedded SYNC: push live camera/light/plot deltas, reset RT2 accumulation only on a
+# real change (accumulate mode → only a structural edit).  Factored out of _embedded_tick! so
+# record_frame!'s bare-step path syncs through the SAME code (the two cannot drift).
+function _embedded_sync!(session::EmbeddedSession)
     _sync_and_needs_reset!(session.screen, session.cam_scene) &&
         OV.reset!(session.screen.renderer)
+    return nothing
+end
+
+# Per-frame embedded hook: sync (above), step, and CPU-blit into the overlay image.  Runs on the
+# host window's render task.
+function _embedded_tick!(session::EmbeddedSession)
+    _embedded_sync!(session)
     _cpu_present!(session)
     return nothing
 end
