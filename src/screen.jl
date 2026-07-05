@@ -656,6 +656,12 @@ clear_selection!(screen::Screen) =                # clear ALL currently-tracked 
 Set OmniverseMakie as the active Makie backend and optionally update screen configuration.
 Accepted keys match `ScreenConfig` field names: `mode`, `samples`, `warmup`, `max_bounces`,
 `selection_outline`.
+
+`mode` picks the RTX render mode (see `rtx_settings_usda`):
+  * `:rt2` (default) — the realtime accumulating path tracer + OptiX denoiser.  `samples` is inert.
+  * `:pathtracing`   — the OFFLINE path tracer for final-quality stills; `samples` sets the SPP per
+                       still (converged over the `warmup` step loop).  Slower, higher quality.
+`:minimal` is not a valid `mode` (throws) — in standalone ovrtx it is an exact RT2 fallback.
 """
 function activate!(; screen_config...)
     Makie.set_screen_config!(OmniverseMakie, screen_config)

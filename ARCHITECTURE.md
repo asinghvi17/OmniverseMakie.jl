@@ -184,7 +184,7 @@ OmniverseMakie/                      # backend package
 │   ├── screen.jl                    # Screen <: MakieScreen + contract methods + renderloop
 │   ├── events.jl                    # scene.events.* injection, render_tick
 │   ├── display.jl                   # GLMakie image! target; CPU + CUDA-GL blit
-│   └── settings.jl                  # render mode (RT2/PathTracing/Minimal), samples
+│   └── settings.jl                  # render mode (RT2 realtime / PathTracing offline), samples
 ├── lib/LibOVRTX/                    # subpackage (raw bindings)
 │   ├── Project.toml                 # name=LibOVRTX; deps CEnum, Libdl
 │   ├── src/LibOVRTX.jl              # generated + loader (OVRTX_LIBRARY_PATH) + check_error

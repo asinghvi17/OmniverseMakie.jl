@@ -47,6 +47,7 @@ include("offscreen/lights_test.jl")            # usda_light dispatch + luminance
 include("offscreen/lights_structural_test.jl") # live add/remove fails loud; RectLight xform golden
 include("offscreen/lights_alloc_test.jl")      # sync_lights! allocation budget + path reuse
 include("offscreen/envlight_test.jl")          # env-image push (IBL), background source, UV tiling
+include("offscreen/pathtracing_test.jl")       # mode=:pathtracing rendermode + samples SPP wiring
 
 # --- live: the open-stage diff pipeline (insert/edit/delete without re-authoring) -----------
 include("live/insert_test.jl")             # live insert! + recipe children + stable-handle no-op

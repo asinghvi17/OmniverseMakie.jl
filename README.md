@@ -89,11 +89,15 @@ img    = Makie.colorbuffer(screen)         # Matrix{RGBA{N0f8}}
 ```
 
 Render quality/mode is set through `activate!` (or per-`Screen` config): `mode`
-(`:rt2` default, `:pathtracing`, `:minimal`), `samples`, `warmup`, `max_bounces`.
+(`:rt2` default realtime, `:pathtracing` offline), `samples`, `warmup`, `max_bounces`.
 
 ```julia
 OmniverseMakie.activate!(; mode = :pathtracing, samples = 512)
 ```
+
+`:pathtracing` switches to the offline path tracer and renders each still at `samples`
+samples-per-pixel — slower but higher quality than the default realtime `:rt2` mode
+(`samples` is inert in `:rt2`).
 
 ### Interactive viewport
 

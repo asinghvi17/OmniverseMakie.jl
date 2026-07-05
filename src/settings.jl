@@ -7,8 +7,8 @@
 # OmniverseMakie.__init__ (theme registration), NOT here.
 
 struct ScreenConfig
-    mode::Symbol        # :rt2 (default) | :pathtracing | :minimal
-    samples::Int        # offline SPP for :pathtracing (default 512)
+    mode::Symbol        # :rt2 (default, realtime path tracer) | :pathtracing (offline path tracer)
+    samples::Int        # total SPP cap for a :pathtracing still (default 512); INERT in :rt2
     warmup::Int         # RT2 warmup frames (default 64)
     max_bounces::Int    # max ray bounces (default 4)
     selection_outline::Bool  # M6.B: enable creation-time selection-outline feature (default false)
@@ -40,16 +40,56 @@ end
     rtx_settings_usda(cfg::ScreenConfig) -> String
 
 Emit the `omni:rtx:*` attribute lines for the **RenderProduct** prim (rendermode, maxBounces,
-ambient, background source); `author_render_root!` injects them into the RenderProduct body.
+ambient, path-tracing SPP, background source); `author_render_root!` injects them into the
+RenderProduct body.
 
 RECONCILIATION (M1.2): `omni:rtx:rendermode` + `maxBounces` must live on the RenderProduct, NOT a
-separate RenderSettings prim (spike-proven).  Only `"RealTimePathTracing"` is spike-verified;
-`:pathtracing` maps to it too until the `PathTracing` token is tested.
+separate RenderSettings prim (spike-proven).
+
+Render-mode facts (PROBE-PROVEN in standalone ovrtx):
+  * `:rt2` → `"RealTimePathTracing"` — the realtime accumulating path tracer + OptiX denoiser
+    (default; byte-identical output for default configs).  `samples` is inert here.
+  * `:pathtracing` → `"PathTracing"` — the OFFLINE path tracer (it renders the *background*
+    non-black, a strong discriminator vs RT2).  `samples` becomes the per-still SPP cap via
+    `omni:rtx:pt:samplesPerPixel`, with `omni:rtx:pt:samplesPerIteration = cld(samples, warmup)`
+    so the STANDARD `warmup` step loop reaches the cap; accumulated SPP = min(warmup×spi, samples).
+    PT ignores the RT2 `rtpt:maxBounces` namespace, so its own `omni:rtx:pt:maxBounces` is authored.
+  * UNKNOWN/bogus rendermode tokens are SILENTLY absorbed by ovrtx → RT2 fallback (binaries log
+    "Uninitialized or unknown render mode ... Switching to RealTimePathTracing instead.").  That
+    silent absorption is WHY `mode` must be validated HERE — an unrecognised token would otherwise
+    masquerade as :rt2 instead of failing loudly.
+  * `"RaytracedLighting"` is also honored but not yet exposed (a faint discriminator on diffuse
+    scenes; a possible future `:raytraced` mode).
+  * `:minimal` is NOT selectable via USD rendermode: `"Minimal"`/`"MinimalRendering"` are both
+    pixel-proven EXACT (byte-identical) RT2 fallbacks — Minimal needs a renderer-config pipeline
+    flag, not a USD token — so `:minimal` throws rather than silently rendering RT2.
 """
 function rtx_settings_usda(cfg::ScreenConfig)
-    # Only "RealTimePathTracing" is spike-verified; :rt2 + :pathtracing both map to it.
-    rendermode = "RealTimePathTracing"
     indent = "            "   # 12-space indent to match RenderProduct body
+    # Render-mode selection + validation (see docstring: ovrtx silently falls unknown tokens back
+    # to RT2, so we must reject anything we don't map).  `pt_lines` carries the PathTracing-only
+    # SPP/bounce attributes; it stays "" for :rt2 so that path is byte-identical to the pre-feature
+    # output (regression goldens must not move for :rt2).
+    pt_lines = ""
+    rendermode = if cfg.mode === :rt2
+        "RealTimePathTracing"
+    elseif cfg.mode === :pathtracing
+        # `samples` is honored PURELY at author time: samplesPerIteration = samples-per-step so the
+        # ordinary `warmup` step loop in render_to_matrix REACHES the samplesPerPixel cap without
+        # any render-path change.  cld → ceil so warmup×spi ≥ samples (default 512/64 → spi = 8).
+        spi = cld(cfg.samples, cfg.warmup)
+        pt_lines =
+            "\n$(indent)int omni:rtx:pt:samplesPerPixel = $(cfg.samples)" *
+            "\n$(indent)int omni:rtx:pt:samplesPerIteration = $(spi)" *
+            "\n$(indent)int omni:rtx:pt:maxBounces = $(cfg.max_bounces)"   # PT ignores rtpt:maxBounces
+        "PathTracing"
+    else
+        throw(ArgumentError("OmniverseMakie: unsupported `mode = $(repr(cfg.mode))` — use :rt2 " *
+                            "(realtime path tracer, default) or :pathtracing (offline path tracer). " *
+                            ":minimal is NOT selectable via USD rendermode in standalone ovrtx " *
+                            "(pixel-proven EXACT RealTimePathTracing fallback — it needs a renderer-" *
+                            "config pipeline flag, not a USD token)."))
+    end
     # Background source token: `:default` authors NOTHING (the pre-feature byte-identical output);
     # note the camelCase "domeLight" USD token vs the all-lowercase Julia-facing Symbol.
     background_line = if cfg.background === :default
@@ -67,9 +107,12 @@ function rtx_settings_usda(cfg::ScreenConfig)
         throw(ArgumentError("OmniverseMakie: unsupported `background = $(repr(cfg.background))` — " *
                             "use :default, :sky, or :domelight."))
     end
-    # Explicit concatenation avoids triple-quoted-string dedentation.
+    # Explicit concatenation avoids triple-quoted-string dedentation.  rtpt:maxBounces is kept
+    # unconditionally (harmless in PathTracing; keeps the :rt2 path byte-identical).  pt_lines is
+    # empty for :rt2, so the :rt2 emission is unchanged from the pre-feature output.
     return "$(indent)token omni:rtx:rendermode = \"$(rendermode)\"\n" *
            "$(indent)int omni:rtx:rtpt:maxBounces = $(cfg.max_bounces)\n" *
            "$(indent)color3f omni:rtx:rt:ambientLight:color = (0.2, 0.2, 0.2)" *
+           pt_lines *
            background_line
 end
