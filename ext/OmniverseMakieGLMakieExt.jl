@@ -19,6 +19,10 @@ using Makie: Consume, MouseButtonEvent  # event types for the input forwarders
 # interactive_display, or the replace_scene! overlay).  Deletion is already safe: GLMakie's
 # `delete!(screen, scene, plot)` tolerates a plot with no cached renderobject.
 GLMakie.draw_atomic(::GLMakie.Screen, ::Makie.Scene, ::OmniverseMakie.USDPlot) = nothing
+# Sensors (lidar!/radar!) draw nothing in GL for the same reason — they only exist on the
+# ovrtx side (their measurements arrive via `sensor_returns`).
+GLMakie.draw_atomic(::GLMakie.Screen, ::Makie.Scene, ::OmniverseMakie.Lidar) = nothing
+GLMakie.draw_atomic(::GLMakie.Screen, ::Makie.Scene, ::OmniverseMakie.Radar) = nothing
 
 # ===== moved verbatim from src/interactive/blit.jl =====
 # CPU blit (M5): set the image! plot's data Observable from a frame; GLMakie
@@ -849,9 +853,15 @@ texture uploads → the frame composites, all synchronously.  The returned image
 cache — copy it (or feed it straight to a `write`/`permutedims`, which copies) before the next
 frame.
 """
-function record_frame!(session::EmbeddedSession; ticks::Int = 3)
+function record_frame!(session::EmbeddedSession; ticks::Int = 3,
+                       sensor_dt::Union{Nothing,Real} = nothing)
     ticks >= 1 || throw(ArgumentError("record_frame!: need ticks >= 1, got $ticks"))
-    ticks == 1 && return Makie.colorbuffer(session.parent_glscreen)
+    if ticks == 1
+        # Sensor sugar: advance lidar!/radar! simulation by `sensor_dt` just before the
+        # presenting tick, so the scan matches the presented frame's scene state.
+        sensor_dt === nothing || OmniverseMakie.step_sensors!(session.screen, sensor_dt)
+        return Makie.colorbuffer(session.parent_glscreen)
+    end
     # ticks > 1: sync once, then (ticks-1)·steps_per_tick bare steps (no present/composite), then
     # ONE presenting colorbuffer.  Its _embedded_tick! syncs again (a no-op — nothing changed) and
     # steps the final steps_per_tick before compositing, so the total is ticks·steps_per_tick.
@@ -860,8 +870,19 @@ function record_frame!(session::EmbeddedSession; ticks::Int = 3)
         sr = OV.step!(session.screen.renderer, session.screen.product; timeout_ns = _M5_STEP_TIMEOUT_NS)
         close(sr)
     end
+    sensor_dt === nothing || OmniverseMakie.step_sensors!(session.screen, sensor_dt)
     return Makie.colorbuffer(session.parent_glscreen)
 end
+
+"""
+    step_sensors!(session::EmbeddedSession, dt::Real) -> nothing
+
+Advance the embedded screen's lidar!/radar! sensors by `dt` seconds — the hybrid-panel
+companion to `step_sensors!(screen, dt)` (see that docstring); `record_frame!`'s `sensor_dt`
+kwarg calls this for you.
+"""
+OmniverseMakie.step_sensors!(session::EmbeddedSession, dt::Real) =
+    OmniverseMakie.step_sensors!(session.screen, dt)
 
 # Per-frame embedded SYNC: push live camera/light/plot deltas, reset RT2 accumulation only on a
 # real change (accumulate mode → only a structural edit).  Factored out of _embedded_tick! so

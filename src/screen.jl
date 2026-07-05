@@ -36,12 +36,24 @@ end
 # Core constructor: build the OV.Renderer and capture scene dimensions.
 # ------------------------------------------------------------------
 
+# Sensor detection for the constructor's motion-BVH auto-enable.  The generic is `false` for
+# every plot; sensors.jl (included AFTER this file) specializes it for Lidar/Radar.
+_is_sensor_plot(::Any) = false
+function _scene_contains_sensors(scene::Makie.Scene)
+    any(_is_sensor_plot, scene.plots) && return true
+    return any(_scene_contains_sensors, scene.children)
+end
+
 function Screen(scene::Makie.Scene, config::ScreenConfig;
                fb_size::Tuple{Int,Int} = size(Makie.root(scene)))
     # M6.B: selection-outline is a creation-time renderer config (on `ScreenConfig` so
     # `resize_viewport!`, which rebuilds the Screen, preserves it).  Default false ⇒ empty
     # config, identical to the pre-M6.B path.
-    renderer = OV.Renderer(; selection_outline = config.selection_outline)
+    # Sensors: motion BVH (required for correct MOVING-object lidar/radar returns) is also
+    # creation-frozen — auto-enable it when the scene ALREADY holds sensor plots, or when
+    # `config.sensors` forces it (the post-display lidar!/radar! workflow).
+    renderer = OV.Renderer(; selection_outline = config.selection_outline,
+                             enable_motion_bvh = config.sensors || _scene_contains_sensors(scene))
     # Default fb_size is the ROOT scene size: `Makie.colorbuffer(scene)` crops a NON-root (e.g.
     # LScene) scene out of the full figure via `get_sub_picture`, indexing with the scene's
     # viewport in ROOT pixel coords — so the image must be root-sized for that crop to be
@@ -655,13 +667,17 @@ clear_selection!(screen::Screen) =                # clear ALL currently-tracked 
 
 Set OmniverseMakie as the active Makie backend and optionally update screen configuration.
 Accepted keys match `ScreenConfig` field names: `mode`, `samples`, `warmup`, `max_bounces`,
-`selection_outline`.
+`selection_outline`, `accumulate_across_frames`, `accumulation_preroll`, `background`, `sensors`.
 
 `mode` picks the RTX render mode (see `rtx_settings_usda`):
   * `:rt2` (default) — the realtime accumulating path tracer + OptiX denoiser.  `samples` is inert.
   * `:pathtracing`   — the OFFLINE path tracer for final-quality stills; `samples` sets the SPP per
                        still (converged over the `warmup` step loop).  Slower, higher quality.
 `:minimal` is not a valid `mode` (throws) — in standalone ovrtx it is an exact RT2 fallback.
+
+`sensors = true` forces the renderer's motion BVH on (correct MOVING-object `lidar!`/`radar!`
+returns) — only needed when sensors are added AFTER display; a scene that already contains
+sensor plots auto-enables it.
 """
 function activate!(; screen_config...)
     Makie.set_screen_config!(OmniverseMakie, screen_config)

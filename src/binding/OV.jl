@@ -19,8 +19,11 @@ const _TIMEOUT_INFINITE_NS = LibOVRTX.OVRTX_TIMEOUT_INFINITE.time_out_ns
 mutable struct Renderer
     ptr::Ptr{LibOVRTX.ovrtx_renderer_t}
     alive::Bool
-    # selection_outline=true builds a creation-time `ovrtx_config_t` enabling the M6.B
-    # outline; default false passes an EMPTY config (entry_count 0), byte-identical to the
+    motion_bvh::Bool   # creation-time enable_motion_bvh flag (sensors warn when authored without)
+    # selection_outline=true adds the creation-time M6.B outline entries; enable_motion_bvh
+    # adds the motion-BVH entry REQUIRED by non-visual sensor render products (lidar/radar/
+    # acoustic — ovrtx_config.h; creation-frozen, changing it means a new Renderer).  With
+    # neither flag an EMPTY config (entry_count 0) is passed, byte-identical to the
     # pre-M6.B path.  outline_width = global thickness in px (only meaningful when on).
     #
     # Config-entry FFI (REPL-VERIFIED vs ovrtx_config.h ovrtx_config_entry_bool/_int +
@@ -30,7 +33,8 @@ mutable struct Renderer
     # `entries` is GC.@preserve'd across ovrtx_create_renderer (which copies the config).
     # Mirrors the C inlines: bool → BOOL/key.bool_key/value.bool_value; int64 → INT64/
     # key.int64_key/value.int_value.
-    function Renderer(; selection_outline::Bool=false, outline_width::Int=8)
+    function Renderer(; selection_outline::Bool=false, outline_width::Int=8,
+                        enable_motion_bvh::Bool=false)
         # Volumes M1: enable NVIDIA IndeX (once/process) BEFORE ovrtx_create_renderer so
         # carb consumes the IndeX-libs token at framework init.  No-op false unless a volume
         # env var is set — zero overhead on the non-volume path (memoized after 1st call).
@@ -39,23 +43,33 @@ mutable struct Renderer
         _create(cfg) = with_restored_signals() do
             LibOVRTX.check(LibOVRTX.ovrtx_create_renderer(cfg, renderer_ref), "create_renderer")
         end
-        if selection_outline
-            entries = fill(LibOVRTX.ovrtx_config_entry_t(ntuple(_ -> UInt8(0), 24)), 2)
-            GC.@preserve entries begin
-                entry1 = pointer(entries, 1)
-                entry1.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_BOOL
-                entry1.key.bool_key     = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_ENABLED
-                entry1.value.bool_value = true
-                entry2 = pointer(entries, 2)
-                entry2.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_INT64
-                entry2.key.int64_key    = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_WIDTH
-                entry2.value.int_value  = Int64(outline_width)
-                _create(Ref(LibOVRTX.ovrtx_config_t(pointer(entries), Csize_t(2))))
-            end
-        else
+        nentries = (selection_outline ? 2 : 0) + (enable_motion_bvh ? 1 : 0)
+        if nentries == 0
             _create(Ref(LibOVRTX.ovrtx_config_t(Ptr{LibOVRTX.ovrtx_config_entry_t}(C_NULL), Csize_t(0))))
+        else
+            entries = fill(LibOVRTX.ovrtx_config_entry_t(ntuple(_ -> UInt8(0), 24)), nentries)
+            GC.@preserve entries begin
+                i = 0
+                if selection_outline
+                    e = pointer(entries, i += 1)
+                    e.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_BOOL
+                    e.key.bool_key     = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_ENABLED
+                    e.value.bool_value = true
+                    e = pointer(entries, i += 1)
+                    e.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_INT64
+                    e.key.int64_key    = LibOVRTX.OVRTX_CONFIG_SELECTION_OUTLINE_WIDTH
+                    e.value.int_value  = Int64(outline_width)
+                end
+                if enable_motion_bvh
+                    e = pointer(entries, i += 1)
+                    e.key_type         = LibOVRTX.OVRTX_CONFIG_KEY_TYPE_BOOL
+                    e.key.bool_key     = LibOVRTX.OVRTX_CONFIG_ENABLE_MOTION_BVH
+                    e.value.bool_value = true
+                end
+                _create(Ref(LibOVRTX.ovrtx_config_t(pointer(entries), Csize_t(nentries))))
+            end
         end
-        r = new(renderer_ref[], true)
+        r = new(renderer_ref[], true, enable_motion_bvh)
         finalizer(close, r)
         return r
     end
@@ -162,35 +176,63 @@ end
 # ------------------------------------------------------------------
 
 """
-    step!(r::Renderer, product::AbstractString; dt=1/60, timeout_ns) -> StepResult
+    step!(r::Renderer, product::AbstractString;  dt=1/60, timeout_ns) -> StepResult
+    step!(r::Renderer, products::AbstractVector; dt=1/60, timeout_ns) -> StepResult
 
-Enqueue + wait one RT2 render step for `product`.  `timeout_ns` bounds the wait
-(defaults to infinite; the M5 camera loop sets a finite value to avoid hanging on
-a stalled step).  The backing `ovx_string_t` array and `product` are GC.@preserve'd
-across the ccall + wait.  Caller must `close` the returned `StepResult` (or let the
-finalizer run).
+Enqueue + wait one render/sensor-simulation step for the given RenderProduct(s).
+`timeout_ns` bounds the wait (defaults to infinite; the M5 camera loop sets a finite
+value to avoid hanging on a stalled step).  The backing `ovx_string_t` array and the
+product string(s) are GC.@preserve'd across the ccall + wait.  Caller must `close`
+the returned `StepResult` (or let the finalizer run).
+
+The vector method exists for SENSOR simulation: ovrtx DISCARDS the accumulated
+sensor rendering history of every render product NOT in a step's set (ovrtx.h step
+contract), so a camera product and the sensor products that must stay warm step
+TOGETHER in one set.  `dt` advances sensor simulation time; image accumulation is
+reset-based and does not depend on it.  The single-product method keeps its own
+body (not a 1-element-vector delegate) so its per-step allocations stay identical
+for the hot present/tick paths.
 """
 function step!(r::Renderer, product::AbstractString;
               dt::Float64=1/60, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
     rp = LibOVRTX.ovx_string_t[ LibOVRTX.ovx_string(product) ]
     GC.@preserve product rp begin
         set = LibOVRTX.ovrtx_render_product_set_t(pointer(rp), Csize_t(1))
-        h = Ref{LibOVRTX.ovrtx_step_result_handle_t}(0)
-        try
-            enqueue_wait(r, "step"; timeout_ns) do
-                LibOVRTX.ovrtx_step(r.ptr, set, dt, h)
-            end
-        catch
-            # A1 made enqueue_wait a thunk: the enqueue ccall fills h[] BEFORE the wait.
-            # If the wait times out/fails (a finite-timeout M5 path), the results handle
-            # is live but no StepResult owns it — free it best-effort, then rethrow.
-            h[] != 0 && r.alive && LibOVRTX.ovrtx_destroy_results(r.ptr, h[])
-            rethrow()
-        end
-        sr = StepResult(r, h[], true)
-        finalizer(close, sr)
-        return sr
+        return _step_set!(r, set, dt, timeout_ns)
     end
+end
+
+function step!(r::Renderer, products::AbstractVector{<:AbstractString};
+              dt::Float64=1/60, timeout_ns::UInt64 = _TIMEOUT_INFINITE_NS)
+    isempty(products) && throw(ArgumentError("step! requires at least one render product"))
+    rp = LibOVRTX.ovx_string_t[ LibOVRTX.ovx_string(p) for p in products ]
+    # `products` is preserved as a whole: reachability through the vector keeps every
+    # element string (the bytes rp points into) alive across the ccall + wait.
+    GC.@preserve products rp begin
+        set = LibOVRTX.ovrtx_render_product_set_t(pointer(rp), Csize_t(length(rp)))
+        return _step_set!(r, set, dt, timeout_ns)
+    end
+end
+
+# Shared enqueue/wait/handle-recovery body; callers own the GC.@preserve of the
+# strings backing `set`.
+function _step_set!(r::Renderer, set::LibOVRTX.ovrtx_render_product_set_t,
+                    dt::Float64, timeout_ns::UInt64)
+    h = Ref{LibOVRTX.ovrtx_step_result_handle_t}(0)
+    try
+        enqueue_wait(r, "step"; timeout_ns) do
+            LibOVRTX.ovrtx_step(r.ptr, set, dt, h)
+        end
+    catch
+        # A1 made enqueue_wait a thunk: the enqueue ccall fills h[] BEFORE the wait.
+        # If the wait times out/fails (a finite-timeout M5 path), the results handle
+        # is live but no StepResult owns it — free it best-effort, then rethrow.
+        h[] != 0 && r.alive && LibOVRTX.ovrtx_destroy_results(r.ptr, h[])
+        rethrow()
+    end
+    sr = StepResult(r, h[], true)
+    finalizer(close, sr)
+    return sr
 end
 
 # ------------------------------------------------------------------
@@ -401,6 +443,138 @@ function unmap_cuda(sr::StepResult, map_handle; stream::Csize_t = Csize_t(0), do
     sync = LibOVRTX.ovrtx_cuda_sync_t(stream, done_event)
     sr.r.alive && LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, map_handle, sync)
     return nothing
+end
+
+# ==================================================================
+# Sensor point clouds — PointCloud composite render-var readback
+#
+# A sensor RenderProduct (OmniLidar/OmniRadar, `camera` rel → the sensor prim)
+# stepped via the vector `step!` yields 0–n frames each carrying a "PointCloud"
+# render var: one named tensor per requested channel plus the model-auto Counts/
+# Flags.  Tensors use the pick-path ABI (POINTER name + POINTER dl — deref both).
+# `Counts` holds the valid-point count; every per-point tensor is only meaningful
+# in its first Counts[1] entries along the POINT axis, which is DLPack's LAST dim
+# (row-major, point-minor: Coordinates is [3, N]) == Julia dim 1 after the
+# reversed-dims copy in `_dl_to_array`.
+# ==================================================================
+
+# DLPack dtype → Julia eltype for sensor-tensor copies (lanes must be 1).
+function _dl_eltype(dt::LibOVRTX.DLDataType)
+    dt.lanes == 1 || error("unsupported DLPack tensor: lanes=$(dt.lanes) (expected 1)")
+    code, bits = Int(dt.code), Int(dt.bits)
+    code == Int(LibOVRTX.kDLFloat) && (bits == 32 ? (return Float32) :
+                                       bits == 64 ? (return Float64) : nothing)
+    code == Int(LibOVRTX.kDLUInt)  && (bits == 8  ? (return UInt8)  :
+                                       bits == 16 ? (return UInt16) :
+                                       bits == 32 ? (return UInt32) :
+                                       bits == 64 ? (return UInt64) : nothing)
+    code == Int(LibOVRTX.kDLInt)   && (bits == 8  ? (return Int8)  :
+                                       bits == 16 ? (return Int16) :
+                                       bits == 32 ? (return Int32) :
+                                       bits == 64 ? (return Int64) : nothing)
+    error("unsupported DLPack dtype (code=$code, bits=$bits)")
+end
+
+"""
+    _dl_to_array(dlt::DLTensor; limit=nothing) -> Array
+
+Copy one still-mapped DLPack tensor into an owned Julia `Array`.  Row-major DLPack
+dims are REVERSED to Julia's column-major dims, so the bytes copy straight through:
+DLPack `[3, N]` (channel-major, point-minor) lands as a Julia `(N, 3)` Matrix.
+`limit` truncates Julia dim 1 (the point axis) during the copy — the validity slice
+costs one pass, not copy-then-slice.  Only compact tensors are supported (strides,
+when present, must equal the row-major products; PointCloud channels are delivered
+compact).
+"""
+function _dl_to_array(dlt::LibOVRTX.DLTensor; limit::Union{Nothing,Int}=nothing)
+    T  = _dl_eltype(dlt.dtype)
+    nd = Int(dlt.ndim)
+    p  = Ptr{T}(dlt.data + dlt.byte_offset)
+    nd == 0 && return T[unsafe_load(p)]
+    dims = ntuple(i -> Int(unsafe_load(dlt.shape, nd - i + 1)), nd)
+    if dlt.strides != C_NULL
+        expect = 1
+        for i in nd:-1:1
+            Int(unsafe_load(dlt.strides, i)) == expect ||
+                error("non-compact DLPack tensor (strided layouts unsupported)")
+            expect *= Int(unsafe_load(dlt.shape, i))
+        end
+    end
+    src = unsafe_wrap(Array, p, dims; own=false)
+    limit !== nothing && dims[1] > limit && return collect(selectdim(src, 1, 1:limit))
+    return copy(src)
+end
+
+"""
+    read_pointcloud(sr::StepResult, product::AbstractString) -> Vector{<:NamedTuple}
+
+Read every "PointCloud" frame `product` produced in the step: fetch results, walk
+the outputs SCOPED to `product` (a multi-product set carries other products' frames
+too), CPU-map each PointCloud var, copy each named channel tensor (validity-sliced
+to `Counts` along the point axis), and unmap in `finally`.  One NamedTuple per
+frame, keyed by the delivered tensor names (`:Coordinates`, `:Intensity`, `:Counts`,
+`:Flags`, …; radar adds `:RCS`, `:RadialVelocityMs`), values owned Julia arrays.
+
+Returns an EMPTY vector when `product` produced no PointCloud frame this step (a
+valid partial-scan outcome — and, per the silent-ignore hazard, the caller layer
+decides whether absence is an authoring error).  A frame with `Counts[1] == 0` is a
+valid empty scan (empty channel arrays), not an error.
+"""
+function read_pointcloud(sr::StepResult, product::AbstractString)
+    sr.r.alive || error("read_pointcloud on a closed Renderer")
+    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
+    frames = NamedTuple[]
+    o = outs[]
+    for i in 1:o.output_count
+        po = unsafe_load(o.outputs, i)                       # ovrtx_render_product_output_t
+        String(po.render_product_path) == product || continue
+        for f in 1:po.output_frame_count
+            fo = unsafe_load(po.output_frames, f)            # ..._frame_output_t
+            for v in 1:fo.render_var_count
+                vo = unsafe_load(fo.output_render_vars, v)   # ..._render_var_output_t
+                String(vo.render_var_name) == "PointCloud" || continue
+                push!(frames, _map_pointcloud_frame(sr, vo.output_handle))
+            end
+        end
+    end
+    return frames
+end
+
+# Map one PointCloud composite output to CPU and copy its channels.  Two passes over
+# the tensor table: locate Counts first (tiny tensor), then copy everything else with
+# the validity limit applied during the copy.  Counts itself is delivered unsliced.
+function _map_pointcloud_frame(sr::StepResult, h)
+    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
+    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro),
+                   "map_render_var_output(PointCloud)")
+    out = ro[]
+    try
+        _check_var_output(out, "map_render_var_output(PointCloud)")
+        valid = nothing                                      # Counts[1] when delivered
+        for t_i in 1:out.num_tensors
+            t = unsafe_load(out.tensors, t_i)                # POINTER name/dl — deref both
+            (t.name == C_NULL || t.dl == C_NULL) && continue
+            if String(unsafe_load(t.name)) == "Counts"
+                valid = Int(first(_dl_to_array(unsafe_load(t.dl))))
+                break
+            end
+        end
+        names  = Symbol[]
+        arrays = Any[]
+        for t_i in 1:out.num_tensors
+            t = unsafe_load(out.tensors, t_i)
+            (t.name == C_NULL || t.dl == C_NULL) && continue
+            name = String(unsafe_load(t.name))
+            push!(names, Symbol(name))
+            push!(arrays, _dl_to_array(unsafe_load(t.dl);
+                                       limit = name == "Counts" ? nothing : valid))
+        end
+        return NamedTuple{Tuple(names)}(Tuple(arrays))
+    finally
+        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, out.map_handle, LibOVRTX.NOSYNC)
+    end
 end
 
 # ==================================================================

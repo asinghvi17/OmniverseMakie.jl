@@ -21,10 +21,13 @@ include("translation/envlight.jl")   # IBL: EnvLightState / push_environment_ima
 include("compute.jl")            # OvrtxRObj (Screen.plot2robj references it) — before screen.jl
 include("screen.jl")             # Screen, open-stage colorbuffer, insert!/insertplots!, activate!
 include("translation/usdplot.jl")  # USDPlot recipe + bind_usd! (needs compute.jl + screen.jl); @recipe exports usdplot/usdplot!
+include("sensors.jl")            # Lidar/Radar recipes + step_sensors! (needs compute.jl + screen.jl + usdplot.jl's _usdplot_model hook)
 include("tonemap.jl")            # shared HDR tonemap math (Task 2)
 
 # usdplot bindings API (the recipe itself auto-exports USDPlot / usdplot / usdplot!).
 export bind_usd!, unbind_usd!
+# Sensor simulation (the recipes auto-export Lidar/lidar/lidar! and Radar/radar/radar!).
+export step_sensors!, sensor_returns
 # Environment-light image (IBL): set/live-swap the DomeLight environment map.
 export push_environment_image!
 
@@ -89,6 +92,7 @@ function __init__()
         accumulate_across_frames = false,  # realtime-style recording; off = per-frame reconverge
         accumulation_preroll = 40,   # first-frame warm-up steps when accumulate is on
         background = :default,       # :default (none) | :sky (procedural) | :domelight (env map)
+        sensors = false,             # force motion BVH on (needed only for post-display lidar!/radar!)
     )
     # M3.5: make `material=` a backend-universal attribute so Lines/Scatter/LineSegments accept it
     # too (Makie validates undocumented keywords; only mesh-like recipes document it natively).

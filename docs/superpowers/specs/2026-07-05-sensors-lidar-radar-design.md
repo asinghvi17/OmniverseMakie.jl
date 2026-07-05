@@ -164,9 +164,8 @@ explicit:
   Sensor scan history in `instant` mode doesn't depend on cross-step history, so the
   image steps' history-discard of sensor products is harmless (and is WHY
   `instant = true` is the default).
-- **Warmup**: the first `step_sensors!` after author runs the NVIDIA-recommended 3 warmup
-  sensor steps before the read (per-sensor one-shot flag; ⚠ SPIKE: whether instant mode
-  needs them at all).
+- ~~**Warmup**~~ — DROPPED (SPIKE RESULTS #3: the first step already returns a full scan;
+  no warmup bookkeeping exists in the implementation).
 - **Recording sugar**: `record_frame!(session; sensor_dt = nothing)` — when set, calls
   `step_sensors!` before the presenting tick. Offscreen `Makie.record` users call
   `step_sensors!(screen, dt)` inside their frame function (one line, documented in the
@@ -178,10 +177,10 @@ explicit:
 
 ### Error handling
 
-- `lidar!`/`radar!` on a screen whose renderer lacks motion BVH (config `sensors = false`)
-  → `OVRTXError` at author time telling the user to pass `sensors = true` to
-  `activate!`/`Screen` (config is creation-frozen — same fail-loud philosophy as
-  `:minimal`).
+- `lidar!`/`radar!` on a screen whose renderer lacks motion BVH → a one-time `@warn` at
+  author time (NOT a throw — SPIKE RESULTS: static scenes render correctly without BVH)
+  telling the user to pass `sensors = true` to `activate!`/`Screen`, plus constructor
+  auto-enable when sensors are already in the scene.
 - Unknown channels / radar channels on lidar / live writes to output-defining attrs →
   `ArgumentError` naming the valid set.
 - A step whose sensor product yields zero frames + zero counts is a valid empty scan
@@ -256,10 +255,61 @@ explicit:
   sensor pose (the coalesced xform write is user-rate already).
 - Mounting sugar (`follow!(sensor, plot)`) — parenting/updating transforms covers it.
 
-## Open questions (spike resolves)
+## SPIKE RESULTS (2026-07-05, A5000, 3 renderer creations — all 5 questions answered)
 
-1. Live RenderProduct authoring (post-display `lidar!`) — supported or author-before-display?
-2. Sensors-only step sets: is camera accumulation really discarded (include camera or not)?
-3. Warmup steps needed in instant mode? Do sensor steps at image-step `dt=1/60` interact?
-4. Returns on token-less materials — default nonvisual response or silence?
-5. `Coordinates` tensor dtype/layout confirmation on our build (`[3,N]` Float32 assumed).
+1. **Live RenderProduct authoring WORKS** (a live-referenced layer carrying OmniLidar +
+   RenderProduct + RenderVar produced full scans) — no author-before-display restriction.
+   Even relative rel targets composed; we still author layer-absolute per repo convention.
+2. **Camera accumulation IS discarded by sensors-only steps** (next camera frame 8× noisier:
+   masked diff 0.0602 vs 0.0076 control) — the camera product goes in every sensor step set,
+   as designed.
+3. **NO warmup needed** — the FIRST step returns a full 203k-point scan in BOTH default and
+   instant modes (NVIDIA's 3 warmup steps are defensive).  The warmup bookkeeping is DROPPED
+   from the design.  Default (non-instant) mode at `dt=1/60` yields clean proportional
+   partial scans (~203k/6 points per step, one frame per step); `instantLidar=true` yields a
+   FULL scan per step at any dt — confirming `instant = true` as the default.
+4. **Returns work with ZERO material bindings** (bare displayColor meshes) — nonvisual
+   tokens are a fidelity upgrade (Phase 3), not a requirement.
+5. **`Coordinates` = `[3,N]` row-major Float32** → lands as a Julia `(N,3)` `Matrix{Float32}`
+   via the reversed-dims copy, exactly as `OV.read_pointcloud` implements.  Delivered
+   channels = requested + auto `Flags`/`Counts`.  Output is SENSOR-frame by default
+   (ground plane at z=−1 with the sensor 1 m up).  The ~15.4 m ground-return radius is the
+   default elevation fan hitting the ground, NOT a range cap (`farRangeM` defaults to 200).
+
+6. **★★ SENSOR STAGES MUST BE METER STAGES** (found during test bring-up, probe chain
+   2026-07-05): ovrtx's sensor engine works in PHYSICAL METERS — range attributes
+   (`nearRangeM = 0.3`, `farRangeM = 200`), the ~±4° elevation fan, and the output
+   `Coordinates` (meters!) are all absolute physics.  On the M1 centimeter root stage
+   (`metersPerUnit = 0.01`) a typical Makie scene sits inside the 30-data-unit near-range
+   dead zone → ZERO returns; scaling the range attributes does NOT compensate (probe: scaled
+   near/far/minReflection/accuracy/resolution → still 0), while the SAME scene ×100 returns
+   the byte-identical 203k-point spike signature.  FIX: a screen with sensors (the same
+   `config.sensors || auto-detect` bit that enables motion BVH) authors the root stage at
+   `metersPerUnit = 1` — 1 data unit = 1 meter, sensor physics and returns coincide with data
+   units; sensor-free screens keep the cm stage byte-identically.  Post-display sensors on a
+   cm screen keep working only as "off the happy path" (warn covers both BVH and scale).
+   Along the way, ALSO fixed: sensors need NVIDIA's mount rotation `rotateXYZ(90,0,−90)`
+   (= `Rz(-90°)·Rx(90°)` innermost; the model spins about its native +Y axis — without it the
+   scan is a vertical fan) — baked into the written `omni:xform` while the reported `pose`
+   stays the clean mount (model ∘ origin) map, since the model's output frame aligns with the
+   mount frame.
+
+**Design amendments from the spike + Makie mechanics:**
+
+- **Motion BVH is NOT required for static scenes** (a no-BVH renderer returned full scans —
+  it's required for correct MOTION effects, per the SDK skill's fine print).  So: the
+  `Screen` constructor AUTO-ENABLES motion BVH when the displayed scene already contains
+  sensor plots; `ScreenConfig.sensors = true` FORCES it on (for post-display `lidar!`
+  workflows); authoring a sensor on a renderer without motion BVH is a one-time `@warn`
+  (moving-object returns may be wrong), NOT a throw.
+- Every `OV.reset!` (image-accumulation restart) is `ovrtx_reset(time)`, which also rewinds
+  sensor simulation time — harmless under `instant = true` (scan-phase-free), one more
+  reason it is the default; documented for `instant = false` users.
+- Makie rejects zero-positional-arg recipes, so the recipes take `(origin,)` — the sensor
+  position in data space (`lidar!(ax, Point3f(0,0,1.5))`), composed into the `omni:xform`
+  via the `_usdplot_model` hook; a hand-added zero-arg method defaults it to `Point3f(0)`.
+  Live origin changes are not diffed (use `translate!` for live moves) — documented.
+- `returns` is a plain `Observable` behind an accessor `sensor_returns(plot)` (WeakKeyDict,
+  the `_USD_BINDINGS` pattern) rather than a recipe attribute — plot attributes are
+  ComputePipeline `Computed`s, and a plain Observable keeps user-side `lift`/`on` free of
+  framework risk.

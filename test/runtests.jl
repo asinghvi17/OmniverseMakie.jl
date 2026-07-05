@@ -91,6 +91,9 @@ include("picking/resolver_test.jl") # path-resolver cache invalidation on compos
 include("picking/outline_test.jl")  # select!/clear_selection! outline pixels; flag-gated warn
 include("picking/attach_test.jl")   # attach_picking! click→hit flow; refusal + detach idempotency
 
+# --- sensors: lidar!/radar! through ovrtx's native RTX sensor pipeline ----------------------
+include("sensors/sensor_test.jl")   # recipe/emission contract + end-to-end GPU point clouds
+
 # --- volumes: UsdVol / NanoVDB through NVIDIA IndeX (env-gated, skip-if-libs-absent) --------
 include("volumes/index_config_synth_test.jl") # carb-config synthesis (JSON escape, app anchoring)
 include("volumes/index_config_test.jl")       # _ensure_index enable/idempotent; disabled-path guards

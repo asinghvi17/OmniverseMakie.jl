@@ -34,6 +34,12 @@ struct ScreenConfig
     #   :domelight — explicitly pin the dome/environment-light texture as the visible background
     #                (pairs with `EnvironmentLight` / `push_environment_image!`).
     background::Symbol
+    # Sensors (lidar!/radar!): FORCE the renderer's motion BVH on at creation (required for
+    # correct MOVING-object sensor returns; static scenes work without).  The Screen ALSO
+    # auto-enables it when the displayed scene already contains sensor plots, so this flag is
+    # only needed when sensors are added AFTER display.  Creation-frozen (a new Screen is
+    # needed to change it); default false = no BVH cost for sensor-free scenes.
+    sensors::Bool
 end
 
 """

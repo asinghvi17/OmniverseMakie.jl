@@ -20,10 +20,10 @@ import OmniverseMakie as OM
 # ---------------------------------------------------------------------------
 
 @testset "pathtracing pure: rendermode + samples emission" begin
-    # 8-field positional ctor (mode, samples, warmup, max_bounces, selection_outline,
-    # accumulate_across_frames, accumulation_preroll, background).
+    # 9-field positional ctor (mode, samples, warmup, max_bounces, selection_outline,
+    # accumulate_across_frames, accumulation_preroll, background, sensors).
     mk(mode; samples = 512, warmup = 64, mb = 4) =
-        OM.ScreenConfig(mode, samples, warmup, mb, false, false, 40, :default)
+        OM.ScreenConfig(mode, samples, warmup, mb, false, false, 40, :default, false)
 
     # :rt2 — RealTimePathTracing, NO pt: lines (default path stays byte-identical).
     rt2 = OM.rtx_settings_usda(mk(:rt2))

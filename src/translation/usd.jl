@@ -385,10 +385,20 @@ function author_render_root!(screen;
     hdr_var    = selection_outline ? "" :
         "        def RenderVar \"HdrColor\" (\n            hide_in_stage_window = true\n            no_delete = true\n        )\n        {\n            uniform string sourceName = \"HdrColor\"\n        }\n"
 
+    # Sensor stages are METER stages.  ovrtx's sensor engine works in physical meters
+    # (ranges like `nearRangeM = 0.3` / `farRangeM = 200`, output Coordinates in meters —
+    # probe-proven 2026-07-05: a cm-scale scene returns ZERO points, the same scene ×100
+    # returns the full 203k-point scan, and scaling the range attrs does NOT compensate).
+    # So a screen with sensors (`config.sensors` or scene auto-detect — the same bit that
+    # enables motion BVH, stored on the Renderer) authors `metersPerUnit = 1`: 1 data unit
+    # = 1 m, sensor physics and returns coincide with data units.  Sensor-free screens
+    # keep the M1 cm stage BYTE-IDENTICAL.
+    meters_per_unit = screen.renderer.motion_bvh ? "1" : "0.01"
+
     usda = """#usda 1.0
 (
     defaultPrim = "World"
-    metersPerUnit = 0.01
+    metersPerUnit = $(meters_per_unit)
     upAxis = "Z"
     startTimeCode = 0
     endTimeCode = 100

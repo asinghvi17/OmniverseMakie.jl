@@ -9,13 +9,13 @@ using OmniverseMakie: OV
 
 @testset "accumulate-across-frames: ScreenConfig plumbing (pure)" begin
     # Field order matters: Makie.merge_screen_config constructs ScreenConfig POSITIONALLY, so new
-    # fields must be trailing (selection_outline stays 5th; `background` is 8th/last).
+    # fields must be trailing (selection_outline stays 5th; `sensors` is 9th/last).
     @test fieldnames(OM.ScreenConfig) ==
           (:mode, :samples, :warmup, :max_bounces, :selection_outline,
-           :accumulate_across_frames, :accumulation_preroll, :background)
+           :accumulate_across_frames, :accumulation_preroll, :background, :sensors)
 
-    # Positional constructor over all 8 fields (the m3_material_prog site relies on this).
-    c = OM.ScreenConfig(:rt2, 512, 64, 4, false, true, 8, :default)
+    # Positional constructor over all 9 fields (the m3_material_prog site relies on this).
+    c = OM.ScreenConfig(:rt2, 512, 64, 4, false, true, 8, :default, false)
     @test c.accumulate_across_frames === true
     @test c.accumulation_preroll === 8
     @test c.background === :default

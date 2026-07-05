@@ -248,6 +248,52 @@ mesh!(ax, floor_rect; color = grass_texture,
       material = (; project_uvw = true, world_or_object = true, texture_scale = (8, 8)))
 ```
 
+### Sensor simulation: `lidar!` / `radar!` + `step_sensors!`
+
+ovrtx is NVIDIA's sensor-simulation renderer, and its native RTX sensors are first-class here:
+`lidar!`/`radar!` attach an `OmniLidar`/`OmniRadar` prim (plus its PointCloud RenderProduct) to
+the scene as an invisible plot, traced against the SAME stage the camera renders.
+
+```julia
+fig = Figure(size = (960, 480))
+ls  = LScene(fig[1, 1])
+mesh!(ls, ...)                                        # ordinary scene content
+sensor = lidar!(ls, Point3f(0, 0, 1.5);               # position in data space; +X = forward
+                channels = [:coordinates, :intensity])
+screen = display(fig)                                 # motion BVH auto-enabled (sensor in scene)
+
+# live point-cloud panel next to the RTX render:
+returns = sensor_returns(sensor)                      # plain Observable{NamedTuple}
+scatter(fig[1, 2], lift(r -> r.points, returns); color = lift(r -> r.intensity, returns))
+
+for t in timeline
+    # ... move scene objects (translate!/rotate!/observables) ...
+    step_sensors!(screen, 1/10)                       # one full scan → `returns` updates
+end
+```
+
+Sensor simulation time only advances through explicit `step_sensors!(screen, dt)` (or
+`record_frame!(session; sensor_dt = dt)` on a hybrid panel) — rendering alone never moves it.
+With the default `instant = true` every step yields one FULL scan of the current scene
+regardless of `dt`; `instant = false` gives time-resolved, dt-proportional partial scans
+(advanced).  Returns are SENSOR-frame by default (`output_frame = :world` for stage
+coordinates); each update carries `points`, the requested channels (radar: `rcs`,
+`radial_velocity`), `counts`, and the sensor's world `pose`.  Move a live sensor with
+`translate!`/`rotate!` (the `origin` argument is author-time).  Tune the sensor model with raw
+schema attributes, e.g. `usd_attributes = Dict("omni:sensor:Core:farRangeM" => 400f0)`.
+
+**Sensor scenes are meter stages**: displaying a scene that contains sensors authors the USD
+stage at `metersPerUnit = 1` (1 data unit = 1 meter) — ovrtx's sensor engine works in physical
+meters (default lidar range 0.3–200 m, ~±4° elevation fan), so sensor physics and your data
+units coincide.  Sensor-free scenes keep the default centimeter stage byte-identically.
+
+Correct returns for MOVING objects need the renderer's motion BVH, which is creation-frozen:
+scenes that already contain sensors at `display` get it automatically; to add sensors AFTER
+display, pass `sensors = true` to `activate!` (adding one anyway warns once — it stays on the
+centimeter stage, where sensor ranges are 100× off in data units).  Materials need nothing
+special — `omni:simready` nonvisual tokens (asphalt, concrete, …) are a fidelity upgrade, not
+a requirement.
+
 ---
 
 ## Feature status
@@ -269,6 +315,7 @@ surface is exercised by [`test/runtests.jl`](test/runtests.jl).
 | **Volumes M2** | Dense-array `volume!(x, y, z, array)` + live data edits — **grayscale**¹ | shipped |
 | **usdplot** | `usdplot!` external USD files (`.usda`/`.usdc`, payloads, textures, materials) as atomic plots + `bind_usd!` observable→prim/attribute bindings | shipped |
 | **IBL** | `EnvironmentLight` / `push_environment_image!` (live-swappable DomeLight env map), `background = :domelight`, OmniPBR UV-projection tiling — procedural `:sky` authored but Kit-only² | shipped |
+| **Sensors** | `lidar!` / `radar!` (native RTX sensor pipeline: OmniLidar/OmniRadar + PointCloud RenderProducts), `step_sensors!`, `sensor_returns` observable, motion-BVH auto-enable | shipped |
 
 ¹ **Volume colormaps render grayscale**, by design, not as a bug. In standalone `ovrtx`
 the only bundled volume path is **NVIDIA IndeX Direct**, which renders scalar density as
@@ -289,9 +336,10 @@ black here and warns once. `:domelight` works natively. Tripwire test in
 
 - **Exported:** `interactive_display`, `replace_scene!`, `usdplot` / `usdplot!` (place an
   external USD file), `bind_usd!` / `unbind_usd!` (tie observables to prims/attributes inside
-  it), `push_environment_image!` (set / live-swap the environment-light map). (Every exported
-  Makie name is re-exported too, so `using OmniverseMakie` gives you `Figure`, `mesh!`, `save`,
-  etc.)
+  it), `push_environment_image!` (set / live-swap the environment-light map),
+  `lidar` / `lidar!` / `radar` / `radar!` / `step_sensors!` / `sensor_returns` (RTX sensor
+  simulation). (Every exported Makie name is re-exported too, so `using OmniverseMakie` gives
+  you `Figure`, `mesh!`, `save`, etc.)
 - **Documented but unexported** (qualify with `OmniverseMakie.`): `Screen`,
   `Makie.colorbuffer`, `select!` (selection outline, offscreen), `author_vdb_volume!`
   (low-level VDB authoring), `reset_accumulation!` (force an RT2 reset in accumulate mode).

@@ -30,8 +30,8 @@ using Makie: RGBf, Vec2f, EnvironmentLight
 
 @testset "envlight pure: config / dome usda / texture sources / tiling keys" begin
     @testset "ScreenConfig background plumbing" begin
-        @test fieldnames(OM.ScreenConfig)[end] === :background   # trailing (positional ctor)
-        mk(bg) = OM.ScreenConfig(:rt2, 512, 64, 4, false, false, 40, bg)
+        @test :background in fieldnames(OM.ScreenConfig)         # positional ctor (sensors is last)
+        mk(bg) = OM.ScreenConfig(:rt2, 512, 64, 4, false, false, 40, bg, false)
         @test occursin("omni:rtx:background:source:type = \"sky\"", OM.rtx_settings_usda(mk(:sky)))
         @test occursin("omni:rtx:background:source:type = \"domeLight\"", OM.rtx_settings_usda(mk(:domelight)))
         @test !occursin("background", OM.rtx_settings_usda(mk(:default)))   # byte-identical default
