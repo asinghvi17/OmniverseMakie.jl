@@ -2,13 +2,12 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# Imperative open-stage insert! (formerly m2_insert_test.jl + the author-once /
-# stable-handle oracle from m2_openstage_test.jl):
-#   Scene + Makie.push_screen!(scene, screen); author the open stage; then a LIVE
-#   scatter!(scene, …) after attach → Makie calls insert!(screen, scene, plot) →
-#   plot2robj grows by one and the stage re-renders WITHOUT a re-open.  A poly!
-#   recipe (composite) registers its atomic children.  Stage authored ONCE, and a
-#   no-op re-render (unchanged camera) reuses the SAME usd_handle (no re-author).
+# Imperative open-stage insert!:
+#   Scene + Makie.push_screen!(scene, screen); author the open stage; then a
+#   LIVE scatter!(scene, …) after attach → Makie calls insert!(screen, scene,
+#   plot) → plot2robj grows by one and the stage re-renders WITHOUT a re-open.
+#   A poly! recipe (composite) registers its atomic children.  Stage authored
+#   ONCE; a no-op re-render (unchanged camera) reuses the SAME usd_handle.
 # ---------------------------------------------------------------------------
 
 const _M21_INSERT_PROG = """
@@ -23,7 +22,8 @@ update_cam!(scene, Vec3d(6, 6, 4), Vec3d(0, 0, 0), Vec3d(0, 0, 1))
 m = mesh!(scene, Rect3f(Point3f(-1, -1, -1), Vec3f(2)); color = :red)
 
 screen = OM.Screen(scene)
-Makie.push_screen!(scene, screen)   # attach: now push!(scene, plot) → insert!(screen, …)
+# attach: now push!(scene, plot) → insert!(screen, …)
+Makie.push_screen!(scene, screen)
 
 function nonblack(img)
     n = 0
@@ -41,8 +41,8 @@ println("NONBLACK_AUTHOR=\$(nonblack(img0))")
 @assert haskey(screen.plot2robj, objectid(m)) "mesh not registered at author time"
 @assert nonblack(img0) > 500 "author frame (near) black"
 
-# ---- degenerate no-op path (from the retired openstage test): a second colorbuffer
-#      with NOTHING changed does not re-author and reuses the SAME robj handle ----
+# ---- degenerate no-op path: a second colorbuffer with NOTHING changed
+#      does not re-author and reuses the SAME robj handle ----
 handle_a = screen.plot2robj[objectid(m)].usd_handle
 imgN = Makie.colorbuffer(screen)
 handle_b = screen.plot2robj[objectid(m)].usd_handle

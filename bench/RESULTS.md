@@ -138,7 +138,6 @@ just under the aspirational 30 Hz, same scoped escalation as the M2.6 note above
 *Path B run-to-run variance is large (single-digit ms frames); both runs clear the gate
 by two orders of magnitude.
 
-Note: `hot_path.jl` still prints the historical `SCATTER_ROUTE_DECISION=b_documented_carry`
-narrative from M2.6; the underlying gap is FIXED (see the B4 section above) — the printed
-comment is a stale echo in the bench script, kept because the m2_bench testset keys on the
-surrounding output tokens.
+Note: the historical `SCATTER_ROUTE_DECISION=b_documented_carry` narrative that `hot_path.jl`
+used to print has been removed — the underlying gap is FIXED (see the "Scatter / MeshScatter
+Gap — RESOLVED" section above), and no test keys on the bench output tokens anymore.

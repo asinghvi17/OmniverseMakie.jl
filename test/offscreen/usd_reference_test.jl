@@ -2,18 +2,14 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M1.2 — USD render-root authoring + OV reference add/remove wrappers
-#
-# Tests:
-#   1. author_render_root! + add_usd_reference! + render → 256×256, non-black > 1000
+# USD render-root authoring + OV reference add/remove wrappers:
+#   1. author_render_root! + add_usd_reference! + render → non-black > 1000
 #   2. remove_usd! + reset! + re-render → non-black drops sharply (< 500)
 # ---------------------------------------------------------------------------
 
-# Hardcoded cube USDA layer (geometry reused from m1.2-proven-stage.usda).
-# Defined here so repr() can embed it safely into the subprocess program string.
-# NOTE: reference layers must NOT include upAxis — the root stage's upAxis governs.
-# Including upAxis = "Z" here caused ovrtx to produce a black render (confirmed by
-# M1.2 diagnostics).  The root stage authored by author_render_root! sets upAxis="Z".
+# Hardcoded cube USDA reference layer. Reference layers must NOT set upAxis —
+# the root stage's upAxis governs (author_render_root! sets "Z"); an upAxis
+# here makes ovrtx render black.
 const _M12_CUBE_USDA = """#usda 1.0
 ( defaultPrim = "cube" )
 def Mesh "cube"

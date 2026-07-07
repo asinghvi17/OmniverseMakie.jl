@@ -1,10 +1,10 @@
-# Subprocess body for the M4 surface!-texture follow-up (read + run by
-# test/m4_surface_texture_test.jl via run_ovrtx_subprocess).
+# Subprocess body for the surface!-texture test (read + run by
+# materials/surface_texture_test.jl via run_ovrtx_subprocess).
 #
-# Proves a TEXTURED `surface!` (image `color`) now samples the grid's `st` UVs and renders the
-# texture — before the fix a materialized surface emitted its mesh WITHOUT `st`, so the bound
-# `diffuse_texture` sampled nothing and the surface rendered WHITE.  A flat grid surface textured
-# with a 2×2 red/blue checker must show BOTH colours sampled across it.
+# A TEXTURED `surface!` (image `color`) samples the grid's `st` UVs: a mesh
+# emitted WITHOUT `st` gives the bound `diffuse_texture` nothing to sample
+# and the surface renders WHITE.  A flat grid surface textured with a 2×2
+# red/blue checker must show BOTH colours sampled across it.
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
 const OM = OmniverseMakie
@@ -14,7 +14,8 @@ OM.activate!(warmup = 48)
 xs  = range(-1, 1; length = 24)
 ys  = range(-1, 1; length = 24)
 zs  = zeros(Float32, 24, 24)
-img = [RGBf(1, 0, 0) RGBf(0, 0, 1); RGBf(0, 0, 1) RGBf(1, 0, 0)]   # 2×2 red/blue checker
+# 2×2 red/blue checker
+img = [RGBf(1, 0, 0) RGBf(0, 0, 1); RGBf(0, 0, 1) RGBf(1, 0, 0)]
 
 fig = Figure(; size = (400, 400))
 ax  = LScene(fig[1, 1]; show_axis = false,
@@ -27,8 +28,8 @@ img_out = Makie.colorbuffer(screen)
 println("ELTYPE=", eltype(img_out))
 println("SIZE=", size(img_out))
 
-# Count strictly red-dominant and blue-dominant pixels — BOTH must appear (texture sampled,
-# not a white/flat surface).
+# Count strictly red-dominant and blue-dominant pixels — BOTH must appear
+# (texture sampled, not a white/flat surface).
 function dominant(img, which)
     count(img) do c
         r, g, b = Float32(red(c)), Float32(green(c)), Float32(blue(c))

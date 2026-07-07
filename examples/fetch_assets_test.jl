@@ -1,5 +1,6 @@
 # Tests the manifest + the :copy path (no network). Run with the examples env.
-include(joinpath(@__DIR__, "fetch_assets.jl"))   # defines MANIFEST, fetch_one, ASSETS_DIR, RPRN
+# defines MANIFEST, fetch_one, ASSETS_DIR, RPRN
+include(joinpath(@__DIR__, "fetch_assets.jl"))
 using Test
 
 @testset "fetch_assets manifest + copy" begin

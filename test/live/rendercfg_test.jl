@@ -2,28 +2,28 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M2.1 Step 4b — live render-config on ONE open stage (authored ONCE):
+# Live render-config on ONE open stage (authored ONCE):
 #   (i)   orbit the camera 180° → content reframes (red centroid shifts ≥20px);
 #         round-trip back → returns within RT2 noise.
 #   (ii)  scale a light's intensity → mean luminance shifts clearly and the
-#         change round-trips to baseline.  NOTE: the M1.2 camera carries
+#         change round-trips to baseline.  NOTE: the camera carries
 #         OmniRtxCameraAutoExposureAPI, which fully compensates a uniform
 #         *brightening* (the rendered mean is exposure-normalised), so the
 #         decisive, auto-exposure-immune signal is *dimming* one of two lights:
 #         removing illumination drops luminance (you cannot expose-amplify
-#         photons that aren't there).  We verify dim (luminance drops vs
-#         baseline), bright (image moves clearly away from the dim state), and a
-#         clean round-trip.
-#   (iii) swap the lights' color white→red → blue content collapses (a hue shift
-#         auto-exposure cannot mask); round-trip → returns to baseline.
+#         photons that aren't there).  Verify dim (luminance drops vs
+#         baseline), bright (image moves clearly away from the dim state),
+#         and a clean round-trip.
+#   (iii) swap the lights' color white→red → blue content collapses (a hue
+#         shift auto-exposure cannot mask); round-trip → returns to baseline.
 #   Throughout, the stage is opened exactly ONCE — camera + light *attribute*
 #   changes are live writes (write_xform! / inputs:intensity / inputs:color),
 #   NOT re-authors.
 #
 # Two DirectionalLights (one dimmed for the intensity test; AmbientLight is
-# excluded from scene.compute[:lights] by Makie).  Two distinctly-coloured boxes
-# at ±x make a 180° orbit swap their image sides and make white→red collapse the
-# blue box.
+# excluded from scene.compute[:lights] by Makie).  Two distinctly-coloured
+# boxes at ±x make a 180° orbit swap their image sides and make white→red
+# collapse the blue box.
 # ---------------------------------------------------------------------------
 
 const _M21_RENDERCFG_PROG = """
@@ -109,7 +109,7 @@ println("CAM_ROUNDTRIP_CHANGED=\$(ch_cam_rt) / \$(N)")
 
 # ======================= (ii) LIGHT INTENSITY =======================
 # DIM light 1 (auto-exposure-immune): luminance drops clearly vs baseline.
-Makie.set_light!(scene, 1; color = RGBf(0.05, 0.05, 0.05))   # ~0.017× of original
+Makie.set_light!(scene, 1; color = RGBf(0.05, 0.05, 0.05))  # ~0.017× original
 imgDim = Makie.colorbuffer(screen)
 lumDim = mean_lum(imgDim)
 ch_dim = changed(img0, imgDim)
@@ -167,24 +167,31 @@ println("OK_RENDERCFG")
     @test exitcode == 0
     @test contains(output, "OK_RENDERCFG")
 
+    # Round-trip "returned to baseline" tolerance: the child prints each
+    # `CHANGED=<px> / <N>` with its own pixel count N, so parse N from the
+    # output (single source of truth) instead of duplicating 400*400 here.
+    round_trip_ok(tag) = begin
+        m = match(Regex("$(tag)=(\\d+) / (\\d+)"), output)
+        m === nothing && return false
+        parse(Int, m.captures[1]) < 0.03 * parse(Int, m.captures[2])
+    end
+
     # (i) camera orbit reframes ≥20px.
     msh = match(r"CAM_SHIFT=([0-9.]+)", output)
     @test msh !== nothing && parse(Float64, msh.captures[1]) >= 20.0
     # camera round-trip returns within noise.
-    mcr = match(r"CAM_ROUNDTRIP_CHANGED=(\d+)", output)
-    @test mcr !== nothing && parse(Int, mcr.captures[1]) < 0.03 * 160000
+    @test round_trip_ok("CAM_ROUNDTRIP_CHANGED")
 
-    # (ii) intensity: dimming a light drops luminance clearly; round-trip returns.
+    # (ii) intensity: dimming a light drops luminance clearly; round-trip
+    # returns.
     mrd = match(r"RATIO_DIM=([0-9.]+)", output)
     @test mrd !== nothing && parse(Float64, mrd.captures[1]) < 0.85
-    mir = match(r"INT_ROUNDTRIP_CHANGED=(\d+)", output)
-    @test mir !== nothing && parse(Int, mir.captures[1]) < 0.03 * 160000
+    @test round_trip_ok("INT_ROUNDTRIP_CHANGED")
 
     # (iii) red light collapses blue content; round-trip returns.
     mbb = match(r"BLUE_BASE=([0-9.]+) BLUE_RED=([0-9.]+)", output)
     @test mbb !== nothing && parse(Float64, mbb.captures[2]) < parse(Float64, mbb.captures[1]) * 0.40
-    mcc = match(r"COLOR_ROUNDTRIP_CHANGED=(\d+)", output)
-    @test mcc !== nothing && parse(Int, mcc.captures[1]) < 0.03 * 160000
+    @test round_trip_ok("COLOR_ROUNDTRIP_CHANGED")
 
     # Stage authored exactly once across all live writes.
     mo = match(r"ROOT_OPENS=(\d+)", output)

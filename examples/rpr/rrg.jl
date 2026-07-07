@@ -1,10 +1,12 @@
 # Ported from references/RPRMakieNotes/scripts/rrg.jl (Lazaro Alonso).
-# Random Relational Graph in 3D: weighted edges via linesegments! + meshscatter! nodes.
-# DiffuseMaterial on the plane → dropped (plain color= / USD displayColor matte).
+# Random Relational Graph in 3D: weighted edges via linesegments! +
+# meshscatter! nodes. DiffuseMaterial on the plane → dropped (plain color= /
+# USD displayColor matte).
 # LinearAlgebra avoided: Diagonal and diag replaced with inline idioms.
 using OmniverseMakie, GeometryBasics, Colors, Random
 
-# Build a 3D random geometric adjacency matrix (pure base Julia, no graph package).
+# Build a 3D random geometric adjacency matrix (pure base Julia, no graph
+# package).
 # radius = 0.17 connects nodes whose Euclidean distance is within threshold.
 function _rrg_adjacency(; radius = 0.17, nodes = 500)
     xy = rand(nodes, 3)
@@ -61,7 +63,7 @@ function scene_rrg()
     segm, weights = _rrg_edges(adjacencyM3D, x, y, z)
 
     grey   = [colorant"grey90" for _ in 1:1, _ in 1:1]
-    # ★ PointLight: color first, then position
+    # PointLight: color first, then position
     lights = [EnvironmentLight(1.0, grey'), PointLight(RGBf(8.0, 6.0, 5.0), Vec3f(2, 0, 2.0))]
     plane  = Rect3f(Vec3f(-5, -2, -1.05), Vec3f(10, 4, 0.05))
 

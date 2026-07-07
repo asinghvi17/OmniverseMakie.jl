@@ -1,28 +1,25 @@
 using Test
 
 # ---------------------------------------------------------------------------
-# Review Track B / Task B4 — Scatter/MeshScatter live positions (subprocess, skip-if-absent).
+# Scatter/MeshScatter live positions (subprocess).
 #
-# A NON-materialized Scatter/MeshScatter authors a UsdGeomPointInstancer, whose per-instance
-# attribute is `positions` — NOT `points`.  `push_to_ovrtx!` used to route
-# `:positions_transformed_f32c` to a `points` write on EVERY plot type, which ovrtx SILENTLY
-# DROPS on an instancer (writes to a nonexistent attr → num_error_ops=0): a live per-instance
-# move was an invisible no-op that still burned an accumulation reset (bench/RESULTS.md carry).
+# A NON-materialized Scatter/MeshScatter authors a UsdGeomPointInstancer,
+# whose per-instance attribute is `positions` — NOT `points`.  ovrtx SILENTLY
+# DROPS a `points` write on an instancer (write to a nonexistent attr →
+# num_error_ops=0; the pixel centroid is the only oracle), so `push_to_ovrtx!`
+# routes `:positions_transformed_f32c` to `positions` there (zero-copy binding
+# when the instance count is unchanged, one-shot resize otherwise — the
+# frozen-size gate).  A MATERIALIZED scatter/meshscatter is a merged
+# tessellated UsdGeomMesh (n×~150 verts): a positions-sized write there is
+# size-mismatched corruption, so a live position edit is `@warn maxlog=1` +
+# `routed=false` (NO write, NO reset burn) — it needs a re-author.
 #
-# B4 (spike-verified — pixel-centroid oracle; absence of error proves nothing on this ovrtx
-# build): a one-shot AND a persistent-binding `positions` write BOTH move an authored instancer,
-# so non-materialized Scatter/MeshScatter now route to `positions` (zero-copy binding when the
-# instance count is unchanged, one-shot resize otherwise — the B2 frozen-size gate).  A
-# MATERIALIZED scatter/meshscatter is a merged tessellated UsdGeomMesh (n×~150 verts): a
-# positions-sized write there is size-mismatched corruption, so a live position edit is
-# `@warn maxlog=1` + `routed=false` (NO write, NO reset burn) — it needs a re-author.
-#
-# TEST 1 (non-materialized, same prog for scatter + meshscatter): a LEFT→RIGHT position edit
-#   MOVES the lit centroid (RED pre-B4: the `points` write is dropped → centroid unmoved), the
-#   push ROUTED, and the stage was NOT re-authored (in-place `positions` write).
-# TEST 2 (materialized): a live position edit leaves the image UNCHANGED, warns exactly once,
-#   the observer shows the push was NOT routed, and no RT2 reset is burned (`_sync_and_needs_reset!`
-#   returns false for the skip pull).
+# TEST 1 (non-materialized, same prog for scatter + meshscatter): a
+#   LEFT→RIGHT position edit MOVES the lit centroid, the push ROUTED, and the
+#   stage was NOT re-authored (in-place `positions` write).
+# TEST 2 (materialized): a live position edit leaves the image UNCHANGED,
+#   warns exactly once, the push was NOT routed, and no RT2 reset is burned
+#   (`_sync_and_needs_reset!` returns false for the skip pull).
 # ---------------------------------------------------------------------------
 
 const _B4_MOVE_PROG = raw"""
@@ -42,13 +39,15 @@ function stats(img)
     return (lit = lit, row = lit > 0 ? sr / lit : -1.0, col = lit > 0 ? sc / lit : -1.0)
 end
 
-# Author a LEFT cluster on an instancer, then live-edit positions to a RIGHT cluster: the lit
-# centroid column must MOVE right.  Assert the push ROUTED (observer) and the stage was NOT
-# re-authored (a live in-place `positions` write, _ROOT_OPEN_COUNT unchanged over the edit).
+# Author a LEFT cluster on an instancer, then live-edit positions to a RIGHT
+# cluster: the lit centroid column must MOVE right.  Assert the push ROUTED
+# (observer) and the stage was NOT re-authored (a live in-place `positions`
+# write, _ROOT_OPEN_COUNT unchanged over the edit).
 function run_move(label, mk!)
     scene = Scene(size = (240, 240)); cam3d!(scene)
     update_cam!(scene, Vec3f(0, 0, 14), Vec3f(0, 0, 0), Vec3f(0, 1, 0))
-    p0 = [Point3f(-3, -1.5, 0), Point3f(-3, 1.5, 0), Point3f(-3.6, 0, 0)]     # LEFT
+    # LEFT
+    p0 = [Point3f(-3, -1.5, 0), Point3f(-3, 1.5, 0), Point3f(-3.6, 0, 0)]
     plt = mk!(scene, p0)
     screen = OM.Screen(scene)
     s0 = stats(Makie.colorbuffer(screen))
@@ -57,7 +56,8 @@ function run_move(label, mk!)
     pushed = Symbol[]
     OM._PUSH_OBSERVER[] = name -> push!(pushed, name)
     opens_before = OM._ROOT_OPEN_COUNT[]
-    p1 = [Point3f(3, -1.5, 0), Point3f(3, 1.5, 0), Point3f(3.6, 0, 0)]        # RIGHT
+    # RIGHT
+    p1 = [Point3f(3, -1.5, 0), Point3f(3, 1.5, 0), Point3f(3.6, 0, 0)]
     plt[1][] = p1
     s1 = stats(Makie.colorbuffer(screen))
     OM._PUSH_OBSERVER[] = nothing
@@ -106,16 +106,18 @@ screen = OM.Screen(scene)
 
 imgA = Makie.colorbuffer(screen)
 robj = screen.plot2robj[objectid(sp)]
-println("MATERIAL_SHADER_SET=", robj.material_shader !== nothing)   # authored as the merged materialized mesh
+# authored as the merged materialized mesh
+println("MATERIAL_SHADER_SET=", robj.material_shader !== nothing)
 println("NONBLACK_A=", nonblack(imgA))
 
 cam_scene = something(OM._scene_for_camera(scene), scene)
 pushed = Symbol[]
 OM._PUSH_OBSERVER[] = name -> push!(pushed, name)
 
-# Two position edits under ONE logger (maxlog state is per-logger: a fresh SimpleLogger per edit
-# would reset it), each pulled via _sync_and_needs_reset! → two skip attempts → maxlog=1 logs
-# exactly ONE warn.  A skip writes nothing → _sync_and_needs_reset! must return FALSE (no reset burn).
+# Two position edits under ONE logger (maxlog state is per-logger: a fresh
+# SimpleLogger per edit would reset it), each pulled via _sync_and_needs_reset!
+# → two skip attempts → maxlog=1 logs exactly ONE warn.  A skip writes
+# nothing → _sync_and_needs_reset! must return FALSE (no reset burn).
 buf = IOBuffer()
 p1 = [Point3f(3, -1.5, 0), Point3f(3, 1.5, 0), Point3f(3.6, 0, 0)]
 p2 = [Point3f(0, -4, 0), Point3f(0, 4, 0), Point3f(0.5, 0, 0)]
@@ -147,18 +149,22 @@ println("OK_MATERIALIZED_SKIP")
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 @testset "B4 non-materialized scatter/meshscatter live positions MOVE (subprocess)" begin
-    # Retry past the known intermittent GeometryGroup::attachToContext startup crash.
+    # Retry past ovrtx's intermittent pre-render startup crash.
     ec, out = run_ovrtx_subprocess(_B4_MOVE_PROG; timeout = 900, retries = 4,
                                    ready_marker = "SCATTER_S0=")
     contains(out, "OK_SCATTER_MOVE") || @info "B4 scatter/meshscatter move output" out
-    @test ec == 0 && contains(out, "OK_SCATTER_MOVE")     # subprocess completed (no crash)
+    @test ec == 0 && contains(out, "OK_SCATTER_MOVE")     # completed (no crash)
     for label in ("SCATTER", "MESHSCATTER")
         @testset "$label" begin
-            @test contains(out, "$(label)_MOVED=true")    # RED pre-B4: `points` write dropped → centroid unmoved
-            @test contains(out, "$(label)_ROUTED=true")   # the :positions_transformed_f32c push routed a write
-            @test contains(out, "$(label)_REOPENED=0")    # live in-place `positions` write — NO re-author
+            # a dropped `points` write would leave the centroid unmoved
+            @test contains(out, "$(label)_MOVED=true")
+            # the :positions_transformed_f32c push routed a write
+            @test contains(out, "$(label)_ROUTED=true")
+            # live in-place `positions` write — NO re-author
+            @test contains(out, "$(label)_REOPENED=0")
             m = match(Regex("$(label)_DELTA=(-?[0-9.]+)"), out)
-            @test m !== nothing && parse(Float64, m.captures[1]) > 20   # centroid shifted right ≥ threshold
+            # centroid shifted right ≥ threshold
+            @test m !== nothing && parse(Float64, m.captures[1]) > 20
         end
     end
 end
@@ -168,12 +174,13 @@ end
                                    ready_marker = "NONBLACK_A=")
     contains(out, "OK_MATERIALIZED_SKIP") || @info "B4 materialized-skip output" out
     @test ec == 0 && contains(out, "OK_MATERIALIZED_SKIP")
-    @test contains(out, "MATERIAL_SHADER_SET=true")       # authored as a merged materialized mesh (not an instancer)
-    @test contains(out, "IMAGE_UNCHANGED=true")           # pixel-compare before/after: render did NOT change
-    @test contains(out, "POS_NOT_ROUTED=true")            # observer: the :positions push was NOT routed (skipped)
-    @test contains(out, "WARN_COUNT=1")                   # exactly one @warn across two edits (maxlog=1)
-    @test contains(out, "NEED1=false")                    # skip burns NO RT2 accumulation reset
+    @test contains(out, "MATERIAL_SHADER_SET=true")  # merged materialized mesh
+    @test contains(out, "IMAGE_UNCHANGED=true")      # render did NOT change
+    @test contains(out, "POS_NOT_ROUTED=true")       # :positions NOT routed
+    @test contains(out, "WARN_COUNT=1")              # one @warn for two edits
+    @test contains(out, "NEED1=false")               # skip burns NO RT2 reset
     @test contains(out, "NEED2=false")
     m = match(r"CHANGED_A_vs_B=(\d+)", out)
-    @test m !== nothing && parse(Int, m.captures[1]) < 100 # near-zero pixel delta (only convergence noise)
+    # near-zero pixel delta (only convergence noise)
+    @test m !== nothing && parse(Int, m.captures[1]) < 100
 end

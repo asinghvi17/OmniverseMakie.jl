@@ -1,4 +1,4 @@
-# examples/run_all.jl — the M4 gate. Subprocess-render every scene + property-assert.
+# examples/run_all.jl — subprocess-render every scene + property-assert.
 # Usage: julia --project=examples examples/run_all.jl            # all rpr/*.jl
 #        julia --project=examples examples/run_all.jl <scene…>   # subset
 const EXAMPLES_DIR = @__DIR__

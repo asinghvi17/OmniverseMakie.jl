@@ -2,21 +2,12 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M1.5 orientation — determine and lock the vertical orientation of the
-# ovrtx LdrColor readback via an ASYMMETRIC, color-coded fixture.
-#
-# Strategy: render TWO small meshes that differ only in world-Z:
-#   RED box  at world Z ≈ +1.0 (high)  → should appear near the TOP of img
-#   BLUE box at world Z ≈ -1.6 (low)   → should appear near the BOTTOM of img
-#
-# The default LScene camera (Camera3D) is Z-up, looking at the origin from a
-# 3/4 vantage (roughly +X+Y+Z side).  World +Z projects toward the TOP of the
-# rendered image for a right-side-up (top-left-origin) buffer.
-#
-# Decision rule: compute centroid ROW of red-dominant pixels and of blue-dominant
-# pixels.  In a right-side-up image row indices INCREASE downward, so
-#   red_row < blue_row  ⟹  red is ABOVE blue  ⟹  top-left-origin (no flip needed)
-#   red_row > blue_row  ⟹  red is BELOW blue  ⟹  bottom-left-origin (flip needed)
+# Locks the vertical orientation of the ovrtx LdrColor readback with an
+# asymmetric fixture: a RED box high in world Z, a BLUE box low. The default
+# LScene camera is Z-up, so world +Z projects toward the top of a
+# top-left-origin buffer. Decision rule (dominant-color centroid rows):
+#   red_row < blue_row  =>  top-left-origin, no flip needed
+#   red_row > blue_row  =>  the readback is vertically flipped
 # ---------------------------------------------------------------------------
 
 const _M15_ORIENT_PROG = """

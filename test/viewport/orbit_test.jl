@@ -1,9 +1,8 @@
 using Test
 
-# M5 Task 5 — orbit-forwarding test.
-#
-# Proves that forwarding input to the DISPLAY scene (glscene, campixel!) drives
-# the ovrtx Camera3D via the input_listeners chain wired in interactive_display.
+# Orbit forwarding: input on the DISPLAY scene (glscene, campixel!) drives
+# the ovrtx Camera3D via the input_listeners chain wired in
+# interactive_display.
 #
 # Mechanism:
 #   glscene.events.<f>[] = v
@@ -12,24 +11,23 @@ using Test
 #   → Camera3D's own listener fires synchronously
 #   → cam.eyeposition[] updates (for scroll/zoom)
 #
-# Controller-verified: scroll moved eye [3,3,3]→[3.99,3.99,3.99].
-# Left-drag: see note below on mouseposition handling.
+# Deterministic: tick_listener is detached before event injection so
+# auto-ticks cannot reset the camera state between assertions.
 #
-# Deterministic: tick_listener is detached before event injection so auto-ticks
-# cannot reset the camera state between assertions.
-#
-# NOTE on mouseposition during drag test:
-#   GLMakie's render loop updates glscene.events.mouseposition from GLFW callbacks
-#   on a background thread (the real cursor position).  These concurrent writes race
-#   with our test injections, so by the time Camera3D's drag-start handler reads
-#   cam_scene.events.mouseposition it may have been overwritten.
+# NOTE on mouseposition during the drag test:
+#   GLMakie's render loop updates glscene.events.mouseposition from GLFW
+#   callbacks on a background thread (the real cursor position).  These
+#   concurrent writes race with the test injections, so by the time
+#   Camera3D's drag-start handler reads cam_scene.events.mouseposition it may
+#   have been overwritten.
 #
 #   cam_scene.events is the FIGURE's shared events object (different from
-#   glscene.events), which GLMakie's GLFW callbacks do NOT touch.  We therefore
-#   set cam_scene.events.mouseposition[] directly for drag setup and movement, while
-#   forwarding mousebutton press/release via glscene to exercise the forwarding path.
-#   mouseposition forwarding is separately proved by capturing the value synchronously
-#   inside an on() listener before the background thread can overwrite it.
+#   glscene.events), which GLMakie's GLFW callbacks do NOT touch.  Drag setup
+#   and movement therefore set cam_scene.events.mouseposition[] directly,
+#   while mousebutton press/release is forwarded via glscene to exercise the
+#   forwarding path.  mouseposition forwarding is separately proved by
+#   capturing the value synchronously inside an on() listener before the
+#   background thread can overwrite it.
 
 const _M5_ORBIT_PROG = """
 using OmniverseMakie, GLMakie, ColorTypes
@@ -62,7 +60,7 @@ eye_scroll = copy(cam.eyeposition[])
 println("EYE_SCROLL=", eye_scroll)
 @assert eye_scroll != eye0 "scroll did not change eyeposition: still \$(eye0)"
 
-# ── MOUSEPOSITION FORWARDING proof ─────────────────────────────────────────────
+# ── MOUSEPOSITION FORWARDING proof ──────────────────────────────────────────
 # Capture the cam_scene mouseposition value INSIDE an on() listener, which fires
 # synchronously before the GLMakie background thread can overwrite it.
 mp_captured = Ref{Tuple{Float64,Float64}}((0.0, 0.0))
@@ -75,16 +73,16 @@ println("MP_FORWARDED=", mp_captured[])
 @assert mp_captured[] == (42.0, 42.0) "mouseposition not forwarded to cam_scene"
 
 # ── DRAG test: left-button press + move + release → orbit ─────────────────────
-# GLMakie's GLFW callbacks race-update glscene.events.mouseposition from a background
-# thread.  We set cam_scene.events.mouseposition directly (GLMakie does not update
-# this) to ensure is_mouseinside(cam_scene) returns true.
-# mousebutton press/release is forwarded via glscene, exercising the forwarding path.
+# GLMakie's GLFW callbacks race-update glscene.events.mouseposition from a
+# background thread, so cam_scene.events.mouseposition is set directly
+# (GLMakie does not update it) to keep is_mouseinside(cam_scene) true;
+# mousebutton press/release is forwarded via glscene.
 #
-# LIMITATION: because mouseposition is set directly on cam_scene here, this drag
-# @assert does NOT by itself prove the glscene→cam_scene mouseposition forwarding path.
-# That path is proven by the MOUSEPOSITION FORWARDING proof above (synchronous capture)
-# and by interactive LIVE verification.  This subtest proves mousebutton forwarding and
-# that Camera3D orbits on a drag — do not read it as end-to-end mouseposition coverage.
+# LIMITATION: because mouseposition is set directly on cam_scene here, this
+# drag assert does NOT by itself prove the glscene→cam_scene mouseposition
+# forwarding path — that is the MOUSEPOSITION FORWARDING proof above.  This
+# subtest proves mousebutton forwarding and that Camera3D orbits on a drag —
+# do not read it as end-to-end mouseposition coverage.
 eye_before_drag = copy(cam.eyeposition[])
 session.cam_scene.events.mouseposition[] = (150.0, 150.0)   # inside viewport
 session.glscene.events.mousebutton[] =

@@ -1,5 +1,6 @@
 # examples/common/harness.jl — shared render harness + property-assert helpers.
-# Loaded by common/run_one.jl inside each render subprocess (and by harness_test.jl).
+# Loaded by common/run_one.jl inside each render subprocess (and by
+# harness_test.jl).
 using OmniverseMakie
 using ColorTypes, FixedPointNumbers, FileIO
 
@@ -22,13 +23,13 @@ function asset(scene::AbstractString, relpath::AbstractString)
 end
 
 """
-    run_example(name, scene_fn; size, out) -> Matrix
+    run_example(name, scene_fn; out) -> Matrix
 
 Activate OmniverseMakie, build the figure via `scene_fn()`, `Makie.save` it to `out`
 (routes through our colorbuffer), and return the saved image read back for asserts.
+The render size is set by the `Figure(; size=…)` inside `scene_fn`, not here.
 """
 function run_example(name::AbstractString, scene_fn;
-                     size = (900, 900),
                      out  = joinpath(RENDERS_DIR, name * ".png"))
     OmniverseMakie.activate!()
     fig = scene_fn()
@@ -37,7 +38,7 @@ function run_example(name::AbstractString, scene_fn;
     return FileIO.load(out)
 end
 
-# --- property-assert helpers (M1–M3 idiom) -----------------------------------
+# --- property-assert helpers --------------------------------------------------
 lum(c) = 0.2126f0 * Float32(red(c)) + 0.7152f0 * Float32(green(c)) + 0.0722f0 * Float32(blue(c))
 
 nonblack_count(img; thresh = 0.02f0) = count(c -> lum(c) > thresh, img)

@@ -52,8 +52,10 @@ handlers), writes the PNG to `examples/renders/`, and property-asserts the resul
 
 ## Port status
 
-All 14 portable RPRMakieNotes scenes are ported (✅). Four are **blocked** on a render path
-OmniverseMakie does not implement yet, and the `raydemo` gallery is **deferred** (see below).
+All 14 portable RPRMakieNotes scenes are ported (✅). Three need plot types OmniverseMakie
+does not implement yet (`text!` / `arrows!` / `image!`); `volumeM` is unported because its
+colored volume needs a Kit composite runtime (grayscale `volume!` has shipped). The
+`raydemo` gallery is **deferred** (see below).
 
 | Scene | Status | Note |
 |---|---|---|
@@ -61,7 +63,7 @@ OmniverseMakie does not implement yet, and the `raydemo` gallery is **deferred**
 | betterview | ⛔ blocked | needs `text!` + `arrows!` |
 | freetype_text | ⛔ blocked | needs `text!` |
 | saveRPR | ⛔ blocked | needs `image!` (also a post-render compositor, not a scene) |
-| volumeM | ⛔ blocked | needs `volume!` |
+| volumeM | ⚠ unported | `volume!` ships **grayscale** (small UsdVol + dense-Array→.nvdb); volume COLORS need a Kit composite runtime, so this colormapped scene has no faithful standalone port |
 | **`raydemo/` gallery** | ⏸ deferred | built on a different renderer (Hikari / RayMakie) needing participating-media volumes, PBRT/GDML scene-graph import, and heavy domain libraries — out of scope for this milestone |
 
 ## Porting notes
@@ -71,16 +73,19 @@ adaptations:
 
 - **Materials** map RPR materials to our OmniPBR `material=` escape hatch:
   `DiffuseMaterial` → plain `color=` (USD displayColor matte); `EmissiveMaterial(c)` →
-  `material=(; emissive=c)`; `Glass` → `material=(; opacity=…, roughness=0, metallic=0)`
-  (best-effort — no true refraction/IOR); `UberMaterial` metalness/roughness/transparency →
-  `material=(; metallic, roughness, opacity)`.
+  `material=(; emissive=c)`; `Glass` → `material=(; glass=true, ior=…)` (TRUE refractive
+  OmniGlass — a real `UsdShade` glass shader with `glass_ior`, not an alpha cut-out);
+  `UberMaterial` metalness/roughness/transparency → `material=(; metallic, roughness, opacity)`.
 - **Image textures** are passed in **natural orientation** (`color = img`). RPRMakie's UV
   convention is transposed relative to ours, so the originals' `img'` transpose is dropped —
   with it, the texture renders rotated 90°. Image textures are carried through both `mesh!`
   and `surface!` (the surface samples a `diffuse_texture` over its grid's parametric `st` UVs).
 - **Lights** keep `PointLight`/`EnvironmentLight`; note `PointLight` is `PointLight(color,
-  position)` here. Image-based environment maps are best-effort (a neutral dome) — the key/
-  fill point lights carry the scenes' lighting.
+  position)` here. Image-based environment maps ARE honored: a scene `EnvironmentLight`
+  image is authored into a DomeLight at author time (`src/screen.jl` `_author_env_light!`;
+  a matrix goes through a temp PNG, an `.exr`/`.hdr` path is used directly for true HDR).
+  These ports pass a neutral 1×1 grey dome for simplicity and let the key/fill point lights
+  carry the lighting — swap in a real EXR/HDR to drive image-based lighting.
 - **Assets** are fetched once into the gitignored `examples/assets/` by `fetch_assets.jl`
   (never downloaded at render time); scenes resolve them via `asset(scene, relpath)`.
 

@@ -1,20 +1,16 @@
-# IndeX enablement (_ensure_index OncePerProcess + carb-config injection) — formerly
-# volumes_index_config_test.jl, plus the disabled-author error path folded in from the
-# retired volumes_usda test.
-#
-# Enabled path (env-gated, skip-if-libs-absent): with OMNIVERSEMAKIE_INDEX_LIBS forwarded,
-# OV._ensure_index() enables NVIDIA IndeX (idempotent) and OV._index_enabled() flips true.
-# Disabled path (ALWAYS runs, no libs needed): no volume env → _ensure_index() is a no-op
-# returning false, _index_enabled() stays false, a normal offscreen render still works
-# (the zero-overhead / no-regression guard), and author_vdb_volume! throws a clear
-# "IndeX"-naming error rather than silently authoring a black volume.
+# IndeX enablement (_ensure_index OncePerProcess + carb-config injection).
+# Enabled path (env-gated, skips if libs absent): with
+# OMNIVERSEMAKIE_INDEX_LIBS forwarded, _ensure_index() enables NVIDIA IndeX
+# (idempotent) and _index_enabled() flips true. Disabled path (always runs):
+# _ensure_index() no-ops to false, a normal offscreen render still works,
+# and author_vdb_volume! throws a clear IndeX-naming error.
 
 using Test
 
 const _IDX_ON_PROG = """
 using OmniverseMakie: OV
 println("ENABLED=", OV._ensure_index())
-println("ENABLED2=", OV._ensure_index())     # idempotent (memoized OncePerProcess)
+println("ENABLED2=", OV._ensure_index())   # idempotent (OncePerProcess memo)
 println("QUERY=", OV._index_enabled())
 """
 
@@ -25,9 +21,9 @@ using OmniverseMakie: OV
 delete!(ENV, "OMNIVERSEMAKIE_INDEX_LIBS"); delete!(ENV, "OMNIVERSEMAKIE_OVRTX_CONFIG")
 println("ENABLED=", OV._ensure_index())
 println("QUERY=", OV._index_enabled())
-# non-volume render still works (mirror the existing mesh render tests: size ≥ 64², and
-# `_author_screen!` — NOT `author_root_from_scene!` — since the latter bakes only camera/lights
-# while the former ALSO insertplots! the mesh, as colorbuffer does; a lit red cube is non-black):
+# A non-volume render still works: _author_screen! (not
+# author_root_from_scene!, which bakes only camera/lights) also inserts the
+# mesh, as colorbuffer does; a lit red cube renders non-black.
 scene = Scene(size=(128,128)); cam3d!(scene)
 mesh!(scene, Rect3f(Point3f(-1), Vec3f(2)); color=:red)
 screen = OM.Screen(scene)
@@ -49,8 +45,9 @@ println("OK_IDX_OFF")
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 @testset "Volumes: IndeX enablement (subprocess)" begin
-    # The IndeX-enabled assertions need the Kit libs present; skip cleanly if absent so CI
-    # without them stays green.  The disabled-path guard below ALWAYS runs (needs no libs).
+    # The IndeX-enabled assertions need the Kit libs present; skip cleanly
+    # if absent so CI without them stays green.  The disabled-path guard
+    # below ALWAYS runs (needs no libs).
     libs = get(ENV, "OMNIVERSEMAKIE_INDEX_LIBS", "")
     if isempty(libs) || !isdir(libs)
         @test_skip "OMNIVERSEMAKIE_INDEX_LIBS unset/absent — IndeX-enabled check skipped"
@@ -69,7 +66,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     @test contains(out_off, "ENABLED=false")
     @test contains(out_off, "QUERY=false")
     @test contains(out_off, "NONVOL_OK=true")
-    # author_vdb_volume! fails loud when IndeX is disabled (folded from volumes_usda).
+    # author_vdb_volume! fails loud when IndeX is disabled.
     @test contains(out_off, "RESULT=ERROR")
     @test contains(out_off, "ERRMSG_HAS_INDEX=true")
 end

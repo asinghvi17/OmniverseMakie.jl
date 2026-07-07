@@ -1,22 +1,13 @@
 using Test
+import OmniverseMakie   # bind the module name so this file runs standalone too
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M1.4 — Lights translation: UsdLux lights affect the rendered image.
-#
-# Tests:
-#   Unit:    usda_light dispatches to correct USD prim types;
-#            lights_usda returns default "Sun" for an empty lights vector.
-#   Subprocess (≥300px, warmup=48):
-#     Scene A — bright DirectionalLight(RGBf(1,1,1), Vec3f(-1,-1,-1), false)
-#               + faint AmbientLight(RGBf(0.1,0.1,0.1))
-#     Scene B — faint AmbientLight(RGBf(0.1,0.1,0.1)) only (no directional)
-#     Both use author_root_from_scene! (bakes camera + lights together).
-#     Assert Scene A mean luminance over non-black pixels ≥ 1.2× Scene B's.
-#     Subprocess exits 0.
-#
-# Composition refactor validated separately by re-running m1_camera_test.jl
-# (author_camera! now delegates to author_root_from_scene!).
+# UsdLux lights affect the rendered image.
+# Unit: usda_light dispatches to the right USD prim types; lights_usda falls
+# back to a default Sun for an empty lights vector.
+# Subprocess: render a grey cube with vs without a bright DirectionalLight
+# and assert the lit scene's mean luminance is >= 1.2x the ambient-only one.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -24,7 +15,8 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 # ---------------------------------------------------------------------------
 
 @testset "M1.4 usda_light type dispatch" begin
-    # Use OmniverseMakie-qualified names: RGBf, Vec3f, Vec2f are re-exported from Makie.
+    # Use OmniverseMakie-qualified names: RGBf, Vec3f, Vec2f are re-exported
+    # from Makie.
     # DirectionalLight → DistantLight prim
     dl = OmniverseMakie.DirectionalLight(OmniverseMakie.RGBf(1f0, 1f0, 1f0), OmniverseMakie.Vec3f(-1f0, -1f0, -1f0), false)
     s  = OmniverseMakie.usda_light(dl, 0)
@@ -47,7 +39,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     @test contains(s3, "DomeLight")
     @test contains(s3, "AmbientLight_0")
 
-    # Intensity scaling: max-channel × scale (750 × 0.5 = 375.0) — scales recalibrated 4× down
+    # Intensity scaling: max-channel × scale (750 × 0.5 = 375.0)
     dl_dim = OmniverseMakie.DirectionalLight(OmniverseMakie.RGBf(0.5f0, 0.5f0, 0.5f0), OmniverseMakie.Vec3f(-1f0, 0f0, 0f0), false)
     s4 = OmniverseMakie.usda_light(dl_dim, 1)
     @test contains(s4, "375.0")
@@ -63,6 +55,28 @@ end
     @test contains(OmniverseMakie._DEFAULT_LIGHTS_STR, "DistantLight")
     @test contains(OmniverseMakie._DEFAULT_LIGHTS_STR, "\"Sun\"")
     @test contains(OmniverseMakie._DEFAULT_LIGHTS_STR, "3000")
+
+    # (a) A genuinely light-less scene falls back to the default Sun so the
+    # render stays lit. lights_usda reads scene.compute[:lights][].
+    empty_scene = OmniverseMakie.Scene(lights = OmniverseMakie.AbstractLight[])
+    @test contains(OmniverseMakie.lights_usda(empty_scene), "\"Sun\"")
+
+    # (b) A scene lit ONLY by an EnvironmentLight must NOT get the Sun: the env
+    # dome is authored separately (envlight.jl) and lights it. usda_light emits
+    # "" for it, so before the fix isempty(result) wrongly injected the Sun.
+    env = OmniverseMakie.EnvironmentLight(1f0, fill(OmniverseMakie.RGBf(0f0, 1f0, 0f0), 4, 4))
+    env_scene = OmniverseMakie.Scene(lights = OmniverseMakie.AbstractLight[env])
+    env_usda  = OmniverseMakie.lights_usda(env_scene)
+    @test !contains(env_usda, "\"Sun\"")   # no Sun injected over the env dome
+    @test isempty(env_usda)                 # env dome authored elsewhere → ""
+
+    # A real DirectionalLight still emits its own block (no Sun needed).
+    dl_scene = OmniverseMakie.Scene(lights = OmniverseMakie.AbstractLight[
+        OmniverseMakie.DirectionalLight(OmniverseMakie.RGBf(1f0, 1f0, 1f0),
+                                        OmniverseMakie.Vec3f(-1f0, -1f0, -1f0), false)])
+    dl_usda = OmniverseMakie.lights_usda(dl_scene)
+    @test contains(dl_usda, "DirectionalLight_0")
+    @test !contains(dl_usda, "\"Sun\"")
 end
 
 # ---------------------------------------------------------------------------
@@ -74,7 +88,7 @@ using OmniverseMakie, ColorTypes
 
 const W, H = 400, 400
 
-# ---- Cube geometry (matching m1_camera_test.jl) ----
+# ---- Cube geometry ----
 cube_pts = [
     (-100f0,-100f0,-100f0), ( 100f0,-100f0,-100f0),
     ( 100f0, 100f0,-100f0), (-100f0, 100f0,-100f0),

@@ -1,11 +1,11 @@
-# Subprocess body for the M4 numeric-colormap LIVE-edit follow-up (read + run by
-# test/m4_colormap_test.jl via run_ovrtx_subprocess).
+# Subprocess body for the numeric-colormap LIVE-edit test (read + run by
+# materials/colormap_test.jl via run_ovrtx_subprocess).
 #
-# Proves the LIVE diff path also colormap-maps a numeric `scaled_color`: a live `plot.color[]`
-# edit (new numeric vector) on a colour-mapped meshscatter re-renders through
-# push_to_ovrtx!→_push_displaycolor!→_scaled_to_display (NOT the old raw
-# `_displaycolor_from_scaled`, which threw `MethodError: red(::Vector{Float32})`).  Renders
-# frame A, edits the colour values live, renders frame B; B must be non-black and DIFFER from A.
+# The LIVE diff path colormap-maps a numeric `scaled_color`: a live
+# `plot.color[]` edit (new numeric vector) on a colour-mapped meshscatter
+# re-renders through push_to_ovrtx!→_push_displaycolor!→_scaled_to_display.
+# Renders frame A, edits the colour values live, renders frame B; B must be
+# non-black and DIFFER from A.
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
 const OM = OmniverseMakie
@@ -24,8 +24,8 @@ update_cam!(ax.scene, Vec3f(0, 0, 4), Vec3f(0, 0, 0), Vec3f(0, 1, 0))
 screen = OM.Screen(ax.scene)
 imgA   = Makie.colorbuffer(screen)
 
-# LIVE numeric-colour edit — reverse the per-point values so the colormap maps each point to a
-# different colour.  Pre-fix this push crashed in _push_displaycolor! on the Vector{Float32}.
+# LIVE numeric-colour edit — reverse the per-point values so the colormap
+# maps each point to a different colour.
 p.color[] = Float32.(n:-1:1)
 imgB = Makie.colorbuffer(screen)
 

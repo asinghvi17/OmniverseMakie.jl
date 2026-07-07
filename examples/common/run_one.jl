@@ -1,4 +1,5 @@
-# examples/common/run_one.jl — render ONE scene in this (subprocess) child + assert.
+# examples/common/run_one.jl — render ONE scene in this (subprocess) child
+# + assert.
 # Usage: julia --project=examples examples/common/run_one.jl <scene>
 include(joinpath(@__DIR__, "harness.jl"))
 

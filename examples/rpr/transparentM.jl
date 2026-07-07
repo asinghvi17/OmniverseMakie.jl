@@ -1,6 +1,8 @@
 # Ported from references/RPRMakieNotes/scripts/transparentM.jl (Lazaro Alonso).
-# Nested transparent spheres over a gainsboro plane: outer shell (opacity=0.2) + inner sphere (opacity=0.95).
-# UberMaterial transparency mapped as opacity = 1 - transparency. DiffuseMaterial plane dropped to plain color=.
+# Nested transparent spheres over a gainsboro plane: outer shell
+# (opacity=0.2) + inner sphere (opacity=0.95). UberMaterial transparency
+# mapped as opacity = 1 - transparency. DiffuseMaterial plane dropped to
+# plain color=.
 using OmniverseMakie, GeometryBasics, Colors
 
 SphereTess(; o = Point3f(0), r = 1, tess = 64) = uv_normal_mesh(Tesselation(Sphere(o, r), tess))
@@ -37,5 +39,6 @@ end
 
 function assert_transparentM(img)
     assert_nonblack(img, "transparentM"; frac = 0.03)
-    # (the transparent spheres render too desaturated for a robust colour-fraction floor)
+    # (the transparent spheres render too desaturated for a robust
+    # colour-fraction floor)
 end

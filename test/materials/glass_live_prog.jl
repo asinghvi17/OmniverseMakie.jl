@@ -1,9 +1,10 @@
-# Subprocess body for the M4 glass LIVE-edit follow-up (read + run by test/m4_glass_test.jl).
+# Subprocess body for the glass LIVE-edit test (read + run by
+# materials/glass_test.jl).
 #
-# Proves a LIVE `plot.material[]` edit on a GLASS plot routes to OmniGlass input names. A clear
-# glass sphere is rendered (frame A), then its material is edited live to a strongly RED-tinted
-# glass; frame B must DIFFER (the edit wrote `glass_color`).  Pre-fix the live push wrote OmniPBR
-# names (`diffuse_color_constant`) to the OmniGlass shader → a silent no-op → imgB == imgA.
+# A LIVE `plot.material[]` edit on a GLASS plot routes to OmniGlass input
+# names: a clear glass sphere renders (frame A), its material is edited live
+# to strongly RED-tinted glass, and frame B must DIFFER (the edit wrote
+# `glass_color`; OmniPBR names on an OmniGlass shader are a silent no-op).
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
 const OM = OmniverseMakie
@@ -16,16 +17,17 @@ fig    = Figure(; size = (400, 400))
 lights = [AmbientLight(RGBf(0.7, 0.7, 0.7)), PointLight(RGBf(8, 8, 8), Vec3f(2, 2, 5))]
 ax     = LScene(fig[1, 1]; show_axis = false, scenekw = (; lights = lights))
 
-mesh!(ax, Rect3f(Vec3f(-3, -3, -2), Vec3f(6, 6, 0.1)); color = RGBf(0.85, 0.85, 0.85))  # grey wall
-gp = mesh!(ax, SphereTess((0, 0, 0.5), 0.9); material = (; glass = true, ior = 1.5f0))   # clear glass
+# grey wall + clear glass sphere
+mesh!(ax, Rect3f(Vec3f(-3, -3, -2), Vec3f(6, 6, 0.1)); color = RGBf(0.85, 0.85, 0.85))
+gp = mesh!(ax, SphereTess((0, 0, 0.5), 0.9); material = (; glass = true, ior = 1.5f0))
 
 update_cam!(ax.scene, Vec3f(0, 0, 4), Vec3f(0, 0, 0), Vec3f(0, 1, 0))
 
 screen = OM.Screen(ax.scene)
 imgA   = Makie.colorbuffer(screen)
 
-# LIVE glass material edit — strongly tint the glass RED.  (plot.material[] live-set needs a
-# Makie.Attributes, not a bare NamedTuple — the M3.4 quirk.)
+# LIVE glass material edit — strongly tint the glass RED.  (plot.material[]
+# live-set needs a Makie.Attributes, not a bare NamedTuple.)
 gp.material[] = Makie.Attributes(; glass = true, ior = 1.5f0, base_color = RGBf(1.0, 0.0, 0.0))
 imgB = Makie.colorbuffer(screen)
 
@@ -39,7 +41,8 @@ function meanabsdiff(a, b)
     end
     return s / (3 * length(a))
 end
-# red-dominant pixels in the central glass region (the red tint should raise this A→B)
+# red-dominant pixels in the central glass region (the red tint should
+# raise this A→B)
 function red_center(img)
     H, W = size(img); cnt = 0
     for h in round(Int, 0.35H):round(Int, 0.65H), w in round(Int, 0.35W):round(Int, 0.65W)

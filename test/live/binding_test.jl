@@ -2,24 +2,20 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M2.4 — persistent hot-path bindings (map_attribute / bind_array_attribute).
+# Persistent hot-path bindings (map_attribute / bind_array_attribute).
 #
-# The per-frame plot writes for the HOT attributes must go through persistent
-# ovrtx attribute bindings created ONCE (`bind_hot_attributes!`) and reused, NOT a
-# fresh `write_attribute` each frame:
-#   :model_f32c (omni:xform)            → map_attribute zero-copy binding (OPTIMIZE)
-#   :positions_transformed_f32c (points)→ bind_array_attribute + write (mesh tier)
+# Per-frame plot writes for the HOT attributes must go through persistent
+# ovrtx attribute bindings created ONCE (`bind_hot_attributes!`) and reused,
+# NOT a fresh `write_attribute` each frame:
+#   :model_f32c (omni:xform)             → map_attribute zero-copy binding
+#   :positions_transformed_f32c (points) → bind_array_attribute + write
 #
-# The test animates a mesh's omni:xform for 100 frames through the MAPPED binding
-# and asserts:
+# The test animates a mesh's omni:xform for 100 frames through the MAPPED
+# binding and asserts:
 #   (a) each frame moves the rendered content,
-#   (b) NO per-frame USDA authoring — the binding object identity is STABLE across
-#       all 100 frames (created once, reused) AND `_ROOT_OPEN_COUNT` is unchanged,
+#   (b) NO per-frame USDA authoring — the binding object identity is STABLE
+#       across all 100 frames AND `_ROOT_OPEN_COUNT` is unchanged,
 #   plus bindings are destroyed on `close(screen)`.
-#
-# RED (M2.3, empty `robj.bindings`): the `haskey(robj.bindings, :model_f32c)`
-#   assertion fails right after the first colorbuffer — no persistent binding exists.
-# GREEN (M2.4): bind_hot_attributes! creates them; push_to_ovrtx! routes through them.
 # ---------------------------------------------------------------------------
 
 const _M24_BINDING_PROG = """
@@ -48,12 +44,14 @@ function changed(x, y; thr = 0.15)
 end
 nonblack(img) = count(c -> (Float32(red(c)) + Float32(green(c)) + Float32(blue(c))) > 0.05, img)
 
-# ---- Frame 1: author stage + build plot reference + create persistent bindings ----
+# ---- Frame 1: author stage + plot reference + persistent bindings ----
 img1 = Makie.colorbuffer(screen)
+println("BINDING_PROG_READY")   # early marker: after 1st render, before any pixel @assert
 @assert nonblack(img1) > 200 "build frame (near) black"
 robj = screen.plot2robj[objectid(m)]
 
-# Persistent omni:xform binding created ONCE on the referenced prim (the hot tier).
+# Persistent omni:xform binding created ONCE on the referenced prim (the hot
+# tier).
 @assert haskey(robj.bindings, :model_f32c) "no persistent :model_f32c binding (M2.4 hot path)"
 xb = robj.bindings[:model_f32c]
 @assert xb isa OM.OV.Binding "xform binding is not an OV.Binding: \$(typeof(xb))"
@@ -72,7 +70,8 @@ pb = robj.bindings[:positions_transformed_f32c]
 opens_before = OM._ROOT_OPEN_COUNT[]
 @assert opens_before == 1 "stage opened \$(opens_before)× before the loop (expected 1)"
 
-# Per-name push counter: every routed write fires the observer regardless of tier.
+# Per-name push counter: every routed write fires the observer regardless
+# of tier.
 counter = Dict{Symbol,Int}()
 OM._PUSH_OBSERVER[] = name -> (counter[name] = get(counter, name, 0) + 1)
 
@@ -94,7 +93,8 @@ println("XFORM_WRITES=\$(get(counter, :model_f32c, 0))")
 # (a) each frame moved the content through the binding.
 @assert movers >= 95 "frames did not move through the mapped binding (movers=\$(movers))"
 
-# (b) NO re-author + binding identity STABLE across all 100 frames (created once, reused).
+# (b) NO re-author + binding identity STABLE across all 100 frames (created
+# once, reused).
 xb2 = screen.plot2robj[objectid(m)].bindings[:model_f32c]
 @assert objectid(xb2) == bind_id1 "xform binding object identity changed across frames (re-created)"
 @assert xb2.handle == bind_handle1 "xform binding handle changed across frames"
@@ -112,7 +112,7 @@ println("OK_BINDING")
 """
 
 @testset "M2.4 persistent map/bind hot-path bindings (subprocess)" begin
-    exitcode, output = run_ovrtx_subprocess(_M24_BINDING_PROG; timeout = 900, retries = 2, ready_marker = "BIND_OK=")
+    exitcode, output = run_ovrtx_subprocess(_M24_BINDING_PROG; timeout = 900, retries = 2, ready_marker = "BINDING_PROG_READY")
     @info "M2.4 binding subprocess output" output
     @test exitcode == 0
     @test contains(output, "OK_BINDING")

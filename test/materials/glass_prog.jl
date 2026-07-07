@@ -1,10 +1,11 @@
-# Subprocess body for the M4 refractive-glass follow-up (read + run by test/m4_glass_test.jl).
+# Subprocess body for the refractive-glass test (read + run by
+# materials/glass_test.jl).
 #
-# Proves `material=(; glass=true, …)` authors + binds a TRUE OmniGlass material that REFRACTS.
-# A clear glass sphere in front of a bright-red wall has the unmistakable glass SIGNATURE in its
-# body: a sharp bright SPECULAR highlight AND DARK refraction/total-internal-reflection — both
-# present at once.  A flat opaque sphere (or the surrounding red wall) shows neither.  Rendered
-# through the full Screen/colorbuffer pipeline.
+# `material=(; glass=true, …)` authors + binds a TRUE OmniGlass material that
+# REFRACTS.  A clear glass sphere in front of a bright-red wall shows the
+# glass SIGNATURE in its body: a sharp bright SPECULAR highlight AND DARK
+# refraction/total-internal-reflection, both at once.  A flat opaque sphere
+# (or the red wall) shows neither.  Full Screen/colorbuffer pipeline.
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
 const OM = OmniverseMakie
@@ -17,8 +18,9 @@ fig    = Figure(; size = (400, 400))
 lights = [AmbientLight(RGBf(0.6, 0.6, 0.6)), PointLight(RGBf(8, 8, 8), Vec3f(2, 2, 5))]
 ax     = LScene(fig[1, 1]; show_axis = false, scenekw = (; lights = lights))
 
-mesh!(ax, Rect3f(Vec3f(-3, -3, -2), Vec3f(6, 6, 0.1)); color = RGBf(0.9, 0.05, 0.05))  # red wall
-mesh!(ax, SphereTess((0, 0, 0.5), 0.9); material = (; glass = true, ior = 1.5f0))       # glass sphere
+# red wall + glass sphere
+mesh!(ax, Rect3f(Vec3f(-3, -3, -2), Vec3f(6, 6, 0.1)); color = RGBf(0.9, 0.05, 0.05))
+mesh!(ax, SphereTess((0, 0, 0.5), 0.9); material = (; glass = true, ior = 1.5f0))
 
 update_cam!(ax.scene, Vec3f(0, 0, 4), Vec3f(0, 0, 0), Vec3f(0, 1, 0))
 
@@ -30,9 +32,10 @@ println("SIZE=", size(img))
 lum(c) = Float32(red(c)) + Float32(green(c)) + Float32(blue(c))
 nb = count(c -> lum(c) > 0.06f0, img)
 
-# Glass signature in the central sphere region: a SHARP bright specular highlight (near-white,
-# lum≈3) AND DARK refraction/TIR (lum<0.4) both present.  The red wall (lum≈1.0) triggers
-# neither, so this isolates the glass body.
+# Glass signature in the central sphere region: a SHARP bright specular
+# highlight (near-white, lum≈3) AND DARK refraction/TIR (lum<0.4) both
+# present.  The red wall (lum≈1.0) triggers neither, so this isolates the
+# glass body.
 function center_signature(img)
     H, W = size(img); bright = 0; dark = 0
     for h in round(Int, 0.30H):round(Int, 0.70H), w in round(Int, 0.30W):round(Int, 0.70W)

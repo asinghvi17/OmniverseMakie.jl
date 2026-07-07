@@ -1,9 +1,10 @@
-# Ported from references/RPRMakieNotes/scripts/submarineCables.jl (Lazaro Alonso).
-# Textured earth globe with submarine-cable landing points (meshscatter, :plasma) + cable
-# routes (lines!, cycled DEFAULT_PALETTES) + ground plane.
-# DiffuseMaterial on ground plane → dropped (color=:gainsboro only, USD displayColor matte).
-# PointLight arg order: color-first (OmniverseMakie convention), position-second.
-# GeoInterface.features → GeoInterface.getfeature (modern API, returns generator).
+# Ported from references/RPRMakieNotes/scripts/submarineCables.jl (Lazaro
+# Alonso). Textured earth globe with submarine-cable landing points
+# (meshscatter, :plasma) + cable routes (lines!, cycled DEFAULT_PALETTES) +
+# ground plane. DiffuseMaterial on ground plane → dropped (color=:gainsboro
+# only, USD displayColor matte). PointLight arg order: color-first
+# (OmniverseMakie convention), position-second. GeoInterface.features →
+# GeoInterface.getfeature (modern API, returns generator).
 using OmniverseMakie, GeometryBasics, Colors, FileIO, GeoMakie, GeoInterface, GeoJSON
 
 """
@@ -26,13 +27,13 @@ function scene_submarineCables()
     # Landing points → Vector{Point2}
     toPoints = GeoMakie.geo2basic(landPoints)
 
-    # Cable routes → collect features, then extract MultiLineString coordinate arrays.
-    # GeoInterface 1.x uses getfeature (no-index form returns a generator); GeoJSON
-    # FeatureCollection is also directly iterable.
-    feat = GeoInterface.getfeature(landCables)          # lazy generator over features
+    # Cable routes → collect features, then extract MultiLineString
+    # coordinate arrays. GeoInterface 1.x uses getfeature (no-index form
+    # returns a generator); GeoJSON FeatureCollection is directly iterable.
+    feat = GeoInterface.getfeature(landCables)   # lazy feature generator
     toLines = [GeoInterface.coordinates(GeoInterface.geometry(f))
                for f in feat
-               if !isnothing(GeoInterface.geometry(f))]  # skip null-geometry features
+               if !isnothing(GeoInterface.geometry(f))]  # skip null geoms
 
     # ── Sphere surface coordinates (lon/lat parametric) ───────────────────────
     n  = 1024 ÷ 4
@@ -42,7 +43,7 @@ function scene_submarineCables()
     ye = [sin(φ) * sin(θ) for θ in θ, φ in φ]
     ze = [cos(θ)           for θ in θ, φ in φ]
 
-    # ── Convert landing points to 3-D Cartesian ────────────────────────────────
+    # ── Convert landing points to 3-D Cartesian ───────────────────────
     toPoints3D = [Point3f([toCartesian(point[1], point[2])...]) for point in toPoints]
 
     # ── Convert cable MultiLineStrings to 3-D line-segment arrays ─────────────
@@ -68,9 +69,10 @@ function scene_submarineCables()
     earth_img = FileIO.load(asset("submarineCables", "earth.jpg"))
 
     # ── Lights ────────────────────────────────────────────────────────────────
-    # EnvironmentLight: 1×1 grey90 swatch (neutral dome; full EXR not needed here).
+    # EnvironmentLight: 1×1 grey90 swatch (neutral dome; full EXR not
+    # needed here).
     img    = [colorant"grey90" for _ in 1:1, _ in 1:1]
-    # ★ PointLight: color-first (OmniverseMakie convention), position-second
+    # PointLight: color-first (OmniverseMakie convention), position-second
     lights = [EnvironmentLight(1.0, img'), PointLight(RGBf(8.0, 6.0, 5.0), Vec3f(2, 0, 2.0))]
 
     plane  = Rect3f(Vec3f(-5, -2, -1.05), Vec3f(10, 4, 0.05))
@@ -79,8 +81,9 @@ function scene_submarineCables()
     fig = Figure(; size = (1000, 1000))
     ax  = LScene(fig[1, 1]; show_axis = false, scenekw = (; lights = lights))
 
-    # Earth sphere via surface! — color=earth_img → an OmniPBR diffuse_texture sampled over the
-    # grid's parametric st UVs (textured globe), with the coloured cable routes overlaid.
+    # Earth sphere via surface! — color=earth_img → an OmniPBR
+    # diffuse_texture sampled over the grid's parametric st UVs (textured
+    # globe), with the coloured cable routes overlaid.
     surface!(ax, xe, ye, ze; color = earth_img)
 
     # Landing points: colored by index with :plasma colormap
@@ -89,12 +92,14 @@ function scene_submarineCables()
         colormap   = :plasma,
         markersize = 0.005)
 
-    # Cable routes: one lines! call per segment, colours cycled from the default palette
+    # Cable routes: one lines! call per segment, colours cycled from the
+    # default palette
     colors = Makie.DEFAULT_PALETTES.color[]
     c      = Iterators.cycle(colors)
     foreach(((l, col),) -> lines!(ax, l; linewidth = 2, color = col), zip(splitLines3D, c))
 
-    # Ground plane: RPR.DiffuseMaterial → dropped (plain color= / USD displayColor matte)
+    # Ground plane: RPR.DiffuseMaterial → dropped (plain color= / USD
+    # displayColor matte)
     mesh!(ax, plane; color = :gainsboro)
 
     # Camera: eyeposition=Vec3f(1.5) per original (all 3 components = 1.5)

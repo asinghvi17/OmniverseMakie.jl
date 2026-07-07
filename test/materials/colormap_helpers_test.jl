@@ -1,29 +1,28 @@
 using Test
 
 # ---------------------------------------------------------------------------
-# Review Task B1 — one colormap mapper (`_map_through_colormap`) + one colorrange
-# resolver (`_resolve_colorrange`), NaN-safe.
+# One colormap mapper (`_map_through_colormap`) + one colorrange resolver
+# (`_resolve_colorrange`), NaN-safe — shared by materials `_displaycolor`,
+# primitives `_surface_colors`, compute `_scaled_to_display`, and the
+# `_colorrange` / `_volume_colorrange` resolvers.
 #
-# Consolidates the 3 duplicate `to_colormap` + `interpolated_getindex` sites
-# (materials `_displaycolor`, primitives `_surface_colors`, compute
-# `_scaled_to_display`) and the 2 divergent colorrange resolvers (`_colorrange`,
-# `_volume_colorrange`) into the two helpers above.
+# GOLDEN regression anchors: the surface displayColor USDA, the
+# numeric-scatter colours, and the volume colorrange stay byte/value-identical.
+# NaN safety: a NaN-masked surface colour path must NOT throw (the mesh path
+# deliberately drops non-finite cells) and must yield finite RGB for every
+# vertex — a non-finite value maps to `plot.nan_color`, not an error.
 #
-# Regression anchors (GOLDEN, captured from the PRE-refactor code on FINITE data):
-#   the surface displayColor USDA, the numeric-scatter colours, and the volume
-#   colorrange must stay byte/value-identical.
-# New behavior: a NaN-masked surface colour path must NOT throw (the mesh path
-#   deliberately drops non-finite cells) and must yield finite RGB for every
-#   vertex — a non-finite value maps to `plot.nan_color`, not an error.
-#
-# PURE (no GPU): plot construction + USDA string emission + resolver calls only.
+# PURE (no GPU): plot construction + USDA string emission + resolver calls.
 # ---------------------------------------------------------------------------
 
 import OmniverseMakie as OM
+# Bring Makie's re-exports used bare below into scope so this file runs
+# standalone too (runtests.jl otherwise `using`s OmniverseMakie globally).
+using OmniverseMakie: Figure, LScene, surface!, meshscatter!, volume!, Point3f, RGBf, (..)
 
-# Byte-for-byte USDA of a 2×2 finite surface (z = [0 .5; .5 1], colormap = :viridis,
-# explicit colorrange = (0, 1)), captured from the pre-refactor `_surface_colors` +
-# `usda_mesh`.  Regression anchor for the surface displayColor path.
+# Byte-for-byte USDA of a 2×2 finite surface (z = [0 .5; .5 1], :viridis,
+# explicit colorrange = (0, 1)) via `_surface_colors` + `usda_mesh`.
+# Regression anchor for the surface displayColor path.
 const _GOLDEN_SURFACE_USDA = """#usda 1.0
 ( defaultPrim = "mesh" )
 def Mesh "mesh"
@@ -44,7 +43,7 @@ def Mesh "mesh"
 """
 
 # Per-vertex colours for a numeric meshscatter (color = 1:5, :viridis,
-# colorrange = (1, 5)), captured from the pre-refactor `_scaled_to_display`.
+# colorrange = (1, 5)) via `_scaled_to_display`.
 const _GOLDEN_SCATTER_VALS = NTuple{3,Float32}[
     (0.267004f0, 0.004874f0, 0.329415f0),
     (0.23022275f0, 0.32129723f0, 0.545488f0),
@@ -78,13 +77,14 @@ end
     @test all(v -> v isa NTuple{3,Float32}, vals)
     @test all(v -> all(isfinite, v), vals)
 
-    # explicit colorrange + a NaN VALUE is fine too; the NaN vertex takes nan_color.
-    # zvec is i-major → [zs[1,1], zs[1,2], zs[2,1], zs[2,2]] so the NaN lands at index 2.
+    # explicit colorrange + a NaN VALUE is fine too; the NaN vertex takes
+    # nan_color.  zvec is i-major → [zs[1,1], zs[1,2], zs[2,1], zs[2,2]] so
+    # the NaN lands at index 2.
     pe = surface!(ls, xs, ys, zs; colormap = :viridis, colorrange = (0.0, 1.0), nan_color = :red)
     valse, _ = OM._surface_colors(pe, zs)
     @test all(v -> all(isfinite, v), valse)
     @test valse[2] == (1.0f0, 0.0f0, 0.0f0)               # nan_color = :red
-    @test valse[1] != valse[2] && valse[3] != valse[2]     # finite vertices still mapped
+    @test valse[1] != valse[2] && valse[3] != valse[2]  # finite vertices mapped
 end
 
 @testset "B1 _resolve_colorrange: explicit verbatim / finite extrema / empty fallback" begin
@@ -93,10 +93,14 @@ end
     pe = surface!(ls, xs, ys, zs; colormap = :viridis, colorrange = (0.0, 1.0))
     pa = surface!(ls, xs, ys, zs; colormap = :viridis)
 
-    @test OM._resolve_colorrange(pe, Float32[0, 0.5, 1]) === (0.0f0, 1.0f0)      # explicit honored
-    @test OM._resolve_colorrange(pa, Float32[2, 5, 9]) === (2.0f0, 9.0f0)        # automatic extrema
-    @test OM._resolve_colorrange(pa, Float32[2, NaN, 9]) === (2.0f0, 9.0f0)      # finite-only extrema
-    @test OM._resolve_colorrange(pa, Float32[NaN, Inf, -Inf]) === (0.0f0, 1.0f0) # no finite → (0,1)
+    # explicit honored
+    @test OM._resolve_colorrange(pe, Float32[0, 0.5, 1]) === (0.0f0, 1.0f0)
+    # automatic extrema
+    @test OM._resolve_colorrange(pa, Float32[2, 5, 9]) === (2.0f0, 9.0f0)
+    # finite-only extrema
+    @test OM._resolve_colorrange(pa, Float32[2, NaN, 9]) === (2.0f0, 9.0f0)
+    # no finite → (0,1)
+    @test OM._resolve_colorrange(pa, Float32[NaN, Inf, -Inf]) === (0.0f0, 1.0f0)
     @test eltype(OM._resolve_colorrange(pe, Float32[0, 1])) === Float32
 end
 
@@ -108,9 +112,9 @@ end
     out = OM._map_through_colormap(p, Float32[0.0, NaN, 1.0])
     @test out isa Vector{NTuple{3,Float32}}
     @test length(out) == 3
-    @test out[2] == (1.0f0, 0.0f0, 0.0f0)                 # NaN → nan_color = :red
+    @test out[2] == (1.0f0, 0.0f0, 0.0f0)  # NaN → nan_color = :red
     @test all(isfinite, out[1]) && all(isfinite, out[3])
-    @test out[1] != out[3]                                # real colormap lookup at the ends
+    @test out[1] != out[3]  # real colormap lookup at the ends
 end
 
 @testset "B1 regression: numeric-scatter colours unchanged" begin
@@ -123,7 +127,8 @@ end
     @test sdi == "vertex"
     @test sd == _GOLDEN_SCATTER_VALS
 
-    # a Colorant `scaled_color` still resolves to ONE constant colour (unchanged path)
+    # a Colorant `scaled_color` still resolves to ONE constant colour
+    # (unchanged path)
     cv, ci = OM._scaled_to_display(sp, RGBf(1, 0, 0), length(svals))
     @test ci == "constant"
     @test cv == (1.0f0, 0.0f0, 0.0f0)
@@ -136,6 +141,6 @@ end
     vp_a = volume!(ls, 0 .. 1, 0 .. 1, 0 .. 1, vol)
 
     @test OM._volume_colorrange(vp_e, vol) === (0.0, 2.0)   # explicit, Float64
-    @test OM._volume_colorrange(vp_a, vol) === (0.0, 7.0)   # automatic extrema, Float64
+    @test OM._volume_colorrange(vp_a, vol) === (0.0, 7.0)   # automatic Float64
     @test eltype(OM._volume_colorrange(vp_e, vol)) === Float64
 end

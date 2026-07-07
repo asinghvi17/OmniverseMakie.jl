@@ -1,5 +1,6 @@
-# Ported from references/RPRMakieNotes/scripts/sphere_source_light.jl (Lazaro Alonso).
-# Yellow diffuse sphere + three emissive sphere lights (white, red, dodgerblue) on a gainsboro plane.
+# Ported from references/RPRMakieNotes/scripts/sphere_source_light.jl
+# (Lazaro Alonso). Yellow diffuse sphere + three emissive sphere lights
+# (white, red, dodgerblue) on a gainsboro plane.
 # DiffuseMaterial → color= only; EmissiveMaterial → material=(; emissive=c).
 using OmniverseMakie, GeometryBasics, Colors
 
@@ -27,5 +28,6 @@ end
 
 function assert_sphere_source_light(img)
     assert_nonblack(img, "sphere_source_light")
-    # (emissive sources render near-white/tiny — colour-fraction is not a robust floor here)
+    # (emissive sources render near-white/tiny — colour-fraction is not a
+    # robust floor here)
 end

@@ -1,32 +1,36 @@
 using Test
+import OmniverseMakie   # bind the module name so this file runs standalone too
+using OmniverseMakie: Vec2f
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M4 follow-up — image textures on `surface!`.
+# Image textures on `surface!`.
 #
-# A materialized surface (image `color`) is a UsdGeomMesh bound to an OmniPBR `diffuse_texture`
-# material, but the grid mesh was emitted WITHOUT `st` UVs, so the texture sampled nothing and
-# the surface rendered white.  `_surface_texcoords` now emits per-vertex parametric `st`.
+# A materialized surface (image `color`) is a UsdGeomMesh bound to an OmniPBR
+# `diffuse_texture` material; `_surface_texcoords` emits the per-vertex
+# parametric `st` UVs the texture samples (without `st` the surface renders
+# white).
 #
-# Unit (parent, NO render): `_surface_texcoords(nx, ny)` lays out u=(j-1)/(ny-1) (2nd grid axis),
-# v=(nx-i)/(nx-1) (1st axis, FLIPPED) — GLMakie's surface-texture convention — in the same i-major
-# order as `_surface_mesh`.  (A `u←i, v←j` layout rotates textures 90°: the submarineCables bug.)
+# Unit (parent, NO render): `_surface_texcoords(nx, ny)` lays out
+# u=(j-1)/(ny-1) (2nd grid axis), v=(nx-i)/(nx-1) (1st axis, FLIPPED) —
+# GLMakie's surface-texture convention — in the same i-major order as
+# `_surface_mesh`.  (A `u←i, v←j` layout rotates textures 90°.)
 #
-# Integration (subprocess, ★): a checker-textured flat surface renders BOTH colours sampled
-# (not white) through the full Screen/colorbuffer pipeline.  Body `test/m4_surface_texture_prog.jl`.
+# Integration (subprocess): a checker-textured flat surface renders BOTH
+# colours sampled (not white) through the full Screen/colorbuffer pipeline.
+# Body: `surface_texture_prog.jl`.
 # ---------------------------------------------------------------------------
 
 @testset "M4 _surface_texcoords parametric UVs (unit)" begin
-    # Convention (matches GLMakie; VERIFIED by comparing a GLMakie equirectangular-earth
-    # render against ours): u = (j-1)/(ny-1) along the 2nd grid axis; v = (nx-i)/(nx-1)
-    # along the 1st, FLIPPED (i=1 → v=1 = the image's top row).  A `u←i, v←j` layout
-    # rotates every textured surface 90° — the submarineCables earth-on-its-side bug.
+    # Convention (matches GLMakie): u = (j-1)/(ny-1) along the 2nd grid axis;
+    # v = (nx-i)/(nx-1) along the 1st, FLIPPED (i=1 → v=1 = the image's top
+    # row).  A `u←i, v←j` layout rotates every textured surface 90°.
     st = OmniverseMakie._surface_texcoords(3, 5)
     @test length(st) == 15
     @test st[1] isa Vec2f
     # i-major order: index (i-1)*ny + j
-    @test st[(1 - 1) * 5 + 1] == Vec2f(0, 1)        # (i=1,j=1) → u=0, v=1 (image top-left)
-    @test st[(3 - 1) * 5 + 5] == Vec2f(1, 0)        # (i=3,j=5) → u=1, v=0 (image bottom-right)
+    @test st[(1 - 1) * 5 + 1] == Vec2f(0, 1)        # u=0, v=1 (top-left)
+    @test st[(3 - 1) * 5 + 5] == Vec2f(1, 0)        # u=1, v=0 (bottom-right)
     @test st[(3 - 1) * 5 + 1] == Vec2f(0, 0)        # (i=3,j=1) → u=0, v=0
     @test st[(1 - 1) * 5 + 5] == Vec2f(1, 1)        # (i=1,j=5) → u=1, v=1
     # degenerate single-row/col → 0 (no division by zero)

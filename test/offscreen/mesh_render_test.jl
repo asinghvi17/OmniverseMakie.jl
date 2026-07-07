@@ -2,21 +2,11 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# Integration capstone (formerly m1_mesh_render_test.jl): a real Makie Scene with a
-# mesh renders through ovrtx via Makie.colorbuffer.
-#
-# Subprocess (carb signals + renderer live only in a child process):
-#   fig = Figure(); ax = LScene(fig[1,1]); mesh!(ax, Rect3f(...); color=:red)
-#   img = Makie.colorbuffer(ax.scene)   # lazy setup → author root → insert! → RT2
-#     assert backend registered, eltype == RGBA{N0f8}, size ≥ 300², non-black > 1000,
-#     red-dominant
-# (The PNG-save half moved out — save/record round-trips live in save_record_test.jl.)
-#
-# Notes:
-#   - ax.scene is a NON-root child scene, so Makie's colorbuffer(fig) crops it via
-#     get_sub_picture using the LScene viewport (root coords) — our Screen renders
-#     at ROOT size so the crop is in-bounds and returns the LScene sub-image.
-#   - warmup=48 is plenty for RT2 to show the red cube.
+# Integration capstone: a real Makie Scene with a mesh renders through ovrtx
+# via Makie.colorbuffer (subprocess: carb + renderer live only in a child
+# process). Save/record round-trips live in save_record_test.jl.
+# ax.scene is a non-root child scene: colorbuffer crops it via get_sub_picture
+# in root coords; the Screen renders at root size, so the crop is in-bounds.
 # ---------------------------------------------------------------------------
 
 const _M15_MESH_PROG = """
@@ -24,7 +14,7 @@ using OmniverseMakie, ColorTypes, FixedPointNumbers   # FixedPointNumbers: N0f8
 
 OmniverseMakie.activate!()
 
-# activate! installs the backend (formerly its own subprocess test).
+# activate! installs the backend.
 @assert Makie.current_backend() === OmniverseMakie "backend not registered after activate!()"
 println("BACKEND_REGISTERED=true")
 
@@ -57,7 +47,7 @@ function analyze(img)
             corners = (lum(img[1, 1]), lum(img[1, W]), lum(img[H, 1]), lum(img[H, W])))
 end
 
-# --- Integration render through Makie.colorbuffer (lazy USD setup → ovrtx RT2) ---
+# --- Integration render through Makie.colorbuffer (lazy USD → ovrtx RT2) ---
 img = Makie.colorbuffer(ax.scene; warmup = 48)
 st  = analyze(img)
 println("ELTYPE=", eltype(img))

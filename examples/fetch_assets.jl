@@ -1,4 +1,5 @@
-# examples/fetch_assets.jl — one-time setup: populate examples/assets/ from references/ + downloads.
+# examples/fetch_assets.jl — one-time setup: populate examples/assets/ from
+# references/ + downloads.
 # Usage: julia --project=examples examples/fetch_assets.jl            # all
 #        julia --project=examples examples/fetch_assets.jl <scene…>   # subset
 # NOT run at render time. assets/ is gitignored.
@@ -10,13 +11,15 @@ const REFS = get(ENV, "OM_REFERENCES_DIR", normpath(joinpath(EXAMPLES_DIR, "..",
 const RPRN = joinpath(REFS, "RPRMakieNotes")
 
 const EARTH8K = "https://www.solarsystemscope.com/textures/download/8k_earth_daymap.jpg"
-# Earthquake CSVs from the USGS FDSN event API (BeautifulMakie's _assets/data CSVs were
-# removed upstream). Columns: time,latitude,longitude,depth,mag,… — the scene reads
+# Earthquake CSVs from the USGS FDSN event API (BeautifulMakie's
+# _assets/data CSVs were removed upstream). Columns:
+# time,latitude,longitude,depth,mag,… — the scene reads
 # latitude/longitude/depth/mag, so this is a drop-in source.
 const USGS_H1 = "https://earthquake.usgs.gov/fdsnws/event/1/query?format=csv&starttime=2021-01-01&endtime=2021-06-01&minmagnitude=4.5"
 const USGS_H2 = "https://earthquake.usgs.gov/fdsnws/event/1/query?format=csv&starttime=2021-06-01&endtime=2022-01-01&minmagnitude=4.5"
 
-# (scene, dest_relpath, kind, src)   kind=:copy → src under RPRMakieNotes; :url → download
+# (scene, dest_relpath, kind, src)
+# kind=:copy → src under RPRMakieNotes; :url → download
 const MANIFEST = [
     ("reflections_glass_material", "envLightImage.exr", :copy, "lights/envLightImage.exr"),
     ("materials_julia_room", "makie_logo.png", :copy, "imgs/makie_logo_transparent.png"),
@@ -33,7 +36,8 @@ const MANIFEST = [
     ("earthquakes",      "2021_06_2022_01.csv", :url, USGS_H2),
     ("earthquakesLight", "2021_01_2021_05.csv", :url, USGS_H1),
     ("earthquakesLight", "2021_06_2022_01.csv", :url, USGS_H2),
-    # telegeography's GitHub raw path is gone; the live site serves the same GeoJSON API.
+    # telegeography's GitHub raw path is gone; the live site serves the
+    # same GeoJSON API.
     ("submarineCables", "landing-point-geo.json", :url, "https://www.submarinecablemap.com/api/v3/landing-point/landing-point-geo.json"),
     ("submarineCables", "cable-geo.json", :url, "https://www.submarinecablemap.com/api/v3/cable/cable-geo.json"),
 ]

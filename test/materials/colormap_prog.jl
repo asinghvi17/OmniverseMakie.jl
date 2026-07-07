@@ -1,11 +1,10 @@
-# Subprocess body for the M4 numeric-color+colormap follow-up (read + run by
-# test/m4_colormap_test.jl via run_ovrtx_subprocess).  Kept as a standalone .jl file.
+# Subprocess body for the numeric-color+colormap test (read + run by
+# materials/colormap_test.jl via run_ovrtx_subprocess).
 #
-# Proves the backend now colormap-maps a NUMERIC `color` vector on meshscatter!/linesegments!
-# (before the M4 follow-up this threw `MethodError: no method matching red(::Vector{Float32})`
-# during `_displaycolor_from_scaled`).  Renders a ring of colormapped points + colormapped line
-# segments and asserts the render is non-black and shows MANY distinct colours (the colormap
-# gradient was sampled, not collapsed to one colour or thrown away).
+# The backend colormap-maps a NUMERIC `color` vector on meshscatter! and
+# linesegments!.  Renders a ring of colormapped points + colormapped line
+# segments and asserts the render is non-black and shows MANY distinct
+# colours (the colormap gradient was sampled, not collapsed to one colour).
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
 const OM = OmniverseMakie
@@ -38,8 +37,8 @@ lum(c) = Float32(red(c)) + Float32(green(c)) + Float32(blue(c))
 nb = count(c -> lum(c) > 0.06f0, img)
 println("NONBLACK=", nb)
 
-# Distinct colour buckets among lit pixels — a colormap gradient spans many; a single
-# flat colour (or a failure) would not.
+# Distinct colour buckets among lit pixels — a colormap gradient spans many;
+# a single flat colour (or a failure) would not.
 function color_buckets(img)
     s = Set{NTuple{3,Int}}()
     for c in img

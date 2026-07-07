@@ -1,11 +1,12 @@
-# Image-texture fresh-path fix (subprocess behavioral proof).
+# Image-texture fresh path (subprocess behavioral proof).
 #
-# An image `color` writes a temp PNG for the OmniPBR `diffuse_texture`.  The old name was STABLE
-# (`tex_<objectid(plot)>_<key>.png`), so re-authoring the SAME plot (a multi-still loop / a second
-# Screen) OVERWROTE it → ovrtx flagged the changed on-disk file a "video texture" and DISABLED it
-# (and raced its async read → "Corrupt PNG"), so only the first still kept its texture.  The fix
-# writes a FRESH unique path per write, so every render keeps its texture.
-# (The pure `_texture_asset_for` fresh-path unit lives in authoring/usd_hygiene_test.jl.)
+# An image `color` writes a temp PNG for the OmniPBR `diffuse_texture`.  The
+# path must be FRESH and unique per write: re-authoring the SAME plot onto a
+# stable path overwrites the on-disk file, which ovrtx flags as a "video
+# texture" and DISABLES (and races its async read → "Corrupt PNG"), so only
+# the first still keeps its texture.
+# (The pure `_texture_asset_for` fresh-path unit lives in
+# authoring/usd_hygiene_test.jl.)
 
 using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
@@ -36,8 +37,8 @@ function red_frac(im)
     return (nb, nr)
 end
 
-# Render the SAME plot with TWO Screens in ONE process (same objectid → old code overwrote one
-# stable temp path → still 2 lost its texture).  Both must render the red texture.
+# Render the SAME plot with TWO Screens in ONE process (same objectid → a
+# stable temp path would be overwritten).  Both must render the red texture.
 s1 = OM.Screen(ax.scene); a = red_frac(Makie.colorbuffer(s1)); close(s1)
 s2 = OM.Screen(ax.scene); b = red_frac(Makie.colorbuffer(s2)); close(s2)
 println("STILL_A_NONBLACK=", a[1]); println("STILL_A_RED=", a[2])
@@ -46,15 +47,18 @@ println("OK_TEXFRESH")
 """
 
 @testset "image-texture survives re-author (subprocess)" begin
-    _, out = run_ovrtx_subprocess(_TEXFRESH_PROG; timeout = 600, retries = 4,
-                                  ready_marker = "OK_TEXFRESH")
+    exitcode, out = run_ovrtx_subprocess(_TEXFRESH_PROG; timeout = 600, retries = 4,
+                                         ready_marker = "OK_TEXFRESH")
     contains(out, "OK_TEXFRESH") || @info "texture fresh-path output" out
+    @test exitcode == 0   # a teardown segfault after OK_TEXFRESH must not pass
     @test contains(out, "OK_TEXFRESH")
-    # BOTH stills of the same plot render the red texture (still 2 is not disabled).
+    # BOTH stills of the same plot render the red texture (still 2 is not
+    # disabled).
     for still in ("A", "B")
         m_nb = match(Regex("STILL_$(still)_NONBLACK=(\\d+)"), out)
         m_r  = match(Regex("STILL_$(still)_RED=(\\d+)"), out)
         @test m_nb !== nothing && parse(Int, m_nb.captures[1]) > 300
-        @test m_r  !== nothing && parse(Int, m_r.captures[1])  > 300   # red-dominant = texture applied
+        # red-dominant = texture applied
+        @test m_r  !== nothing && parse(Int, m_r.captures[1])  > 300
     end
 end

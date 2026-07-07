@@ -1,38 +1,18 @@
 using Test
 
 # ---------------------------------------------------------------------------
-# Review Task B6 — USD string hygiene + texture-name collision.
-#
-# User-supplied strings enter authored USDA in two shapes that were previously
-# unvalidated/unescaped:
-#   • IDENTIFIERS — a VDB `field` name (`def OpenVDBAsset "$(field)"`, volume.jl)
-#     and camera-path segments (`_validate_camera_path` only checked depth, so
-#     "/World/My Camera" passed and authored a broken prim).
-#   • `@asset@` PATHS — texture inputs + the MDL source (materials.jl) and the
-#     `.vdb`/`.nvdb` `filePath` (volume.jl); a literal `@` in the path broke the
-#     reference.
-# Two new guards in usd.jl fix this: `_usd_identifier` (assert
-# [A-Za-z_][A-Za-z0-9_]*, error naming the offender) and `_usd_asset_path`
-# (wrap `@…@`, or `@@@…@@@` when the path contains `@`; error on an embedded `@@@`).
-#
-# Separately, `_texture_asset_for` named its temp PNG by `objectid(plot)`, but
-# `_merge_material_input!` passed `plot = nothing` — so EVERY image `*_texture`
-# landed at `tex_<objectid(nothing)>.png` (a process constant): two plots
-# overwrote each other. The fix threads the real `plot` AND suffixes the filename
-# with the input key, so files are unique per input per plot.
-#
-# Regression anchor (GOLDEN, captured from the PRE-change code): the volume USDA
-# for a CLEAN field name must stay byte-identical.
-#
-# PURE (no GPU): USDA string emission + path/identifier validation + texture-file
-# naming are all directly assertable.
+# USD string hygiene + texture-name collision (pure, no GPU).
+# `_usd_identifier` asserts [A-Za-z_][A-Za-z0-9_]* on identifiers (VDB field
+# names, camera-path segments), naming the offender; `_usd_asset_path` wraps
+# `@…@`, or `@@@…@@@` when the path contains `@`, erroring on an embedded
+# `@@@`. Texture temp PNGs are unique per plot per input key. Golden: the
+# volume USDA for a clean field name stays byte-identical.
 # ---------------------------------------------------------------------------
 
 import OmniverseMakie as OM
 
-# Byte-for-byte volume USDA for a clean field ("density"), captured from the
-# PRE-change `_vdb_volume_usda`. Regression anchor: the field-validation +
-# asset-path wrapping must be identity-preserving on clean input.
+# Byte-for-byte volume USDA for a clean field ("density"): field validation
+# + asset-path wrapping must be identity-preserving on clean input.
 const _GOLDEN_VOLUME_USDA = """#usda 1.0
 (
     defaultPrim = "Volume"
@@ -78,30 +58,33 @@ def Volume "Volume" (
 _errmsg(f) = try; f(); ""; catch e; e isa ErrorException ? e.msg : sprint(showerror, e); end
 
 @testset "B6 _usd_identifier accept / reject (offender named)" begin
-    # Accept legal USD identifiers; the returned value is a String equal to input.
+    # Accept legal USD identifiers; the returned value is a String equal to
+    # input.
     for good in ("density", "_private", "Camera", "torus_fog", "Mat_123", "A")
         @test OM._usd_identifier(good) == good
         @test OM._usd_identifier(good) isa String
     end
 
     # Reject space, dash, leading-digit, unicode, dot, and empty — each error
-    # message must NAME the offending string and carry the `what` context.
-    # Trailing/embedded newlines are rejected too: PCRE `$` matches BEFORE a final
-    # newline, so "density\n" bypassed the guard until the end anchor became `\z`.
+    # must name the offending string and carry the `what` context. Newlines
+    # are rejected too: PCRE `$` matches before a trailing newline, so the
+    # end anchor must be `\z`.
     for bad in ("my name", "my-name", "1name", "café", "naïve", "field.x", "",
                 "density\n", "density\r\n", "\ndensity")
         msg = _errmsg(() -> OM._usd_identifier(bad; what = "volume `field` name"))
         @test !isempty(msg)                       # it threw
-        @test occursin(bad, msg) || bad == ""     # names the offender (empty string is unprintable)
+        # names the offender (empty string is unprintable)
+        @test occursin(bad, msg) || bad == ""
         @test occursin("volume `field` name", msg)   # names WHERE it came from
         @test occursin("valid USD identifier", msg)
     end
-    # Empty string still errors (message names the context even if offender is "").
+    # Empty string still errors (message names the context even if offender
+    # is "").
     @test !isempty(_errmsg(() -> OM._usd_identifier("")))
 end
 
 @testset "B6 _usd_asset_path wrap / escape / reject" begin
-    # Clean path → plain `@path@` (byte-identical to the old hand-written form).
+    # Clean path → plain `@path@`.
     @test OM._usd_asset_path("/data/torus.vdb") == "@/data/torus.vdb@"
     @test OM._usd_asset_path("OmniPBR.mdl") == "@OmniPBR.mdl@"
 
@@ -118,14 +101,14 @@ end
 end
 
 @testset "B6 volume USDA golden byte-identity + hostile field + `@` path" begin
-    # CLEAN field: byte-identical to the pre-change emit (regression anchor).
+    # Clean field: byte-identical to the golden (regression anchor).
     got = OM._vdb_volume_usda("/data/torus.vdb"; prim_path = "/World/Volume",
                               field = "density", field_dtype = "float",
                               colormap = :viridis, colorrange = (0.0, 1.0))
     @test got == _GOLDEN_VOLUME_USDA
 
-    # A HOSTILE grid name (space) errors clearly, naming the offender — instead of
-    # authoring a corrupt `def OpenVDBAsset "torus fog"` prim.
+    # A HOSTILE grid name (space) errors clearly, naming the offender —
+    # instead of authoring a corrupt `def OpenVDBAsset "torus fog"` prim.
     msg = _errmsg(() -> OM._vdb_volume_usda("/data/x.vdb"; field = "torus fog"))
     @test occursin("torus fog", msg)
     @test occursin("field", msg)
@@ -140,12 +123,12 @@ end
 end
 
 @testset "B6 material asset-path emit golden + `@` escaping" begin
-    # OmniPBR: clean texture + MDL source emit the plain `@…@` form (unchanged).
+    # OmniPBR: clean texture + MDL source emit the plain `@…@` form.
     m = OM.usda_omnipbr_material("Mat_x", Dict{String,Any}("diffuse_texture" => "/abs/tex.png"))
     @test occursin("uniform asset info:mdl:sourceAsset = @OmniPBR.mdl@", m)
     @test occursin("asset inputs:diffuse_texture = @/abs/tex.png@", m)
 
-    # Glass: MDL source is OmniGlass.mdl (unchanged).
+    # Glass: MDL source is OmniGlass.mdl.
     g = OM.usda_glass_material("Mat_g", Dict{String,Any}("glass_ior" => 1.491f0))
     @test occursin("uniform asset info:mdl:sourceAsset = @OmniGlass.mdl@", g)
 
@@ -159,7 +142,8 @@ end
     @test OM._validate_camera_path("/World/Camera") == "/World/Camera"
     @test OM._validate_camera_path("/World/MyCam_2") == "/World/MyCam_2"
 
-    # A space in the name has the right DEPTH but is not a legal identifier → clear error.
+    # A space in the name has the right DEPTH but is not a legal identifier
+    # → clear error.
     msg = _errmsg(() -> OM._validate_camera_path("/World/My Camera"))
     @test occursin("My Camera", msg)
     @test occursin("valid USD identifier", msg)
@@ -168,8 +152,7 @@ end
     # Dash likewise rejected as an identifier.
     @test occursin("valid USD identifier", _errmsg(() -> OM._validate_camera_path("/World/Cam-1")))
 
-    # Pre-existing DEPTH/shape checks still hold (these are the "shape" error, not
-    # the identifier error).
+    # Depth/shape checks give the "shape" error, not the identifier error.
     for badshape in ("/Foo/Bar", "/World/A/B", "World/Camera", "/World/")
         m = _errmsg(() -> OM._validate_camera_path(badshape))
         @test occursin("direct /World/<name> child", m)
@@ -183,12 +166,18 @@ end
     img1 = RGBf[RGBf(1, 0, 0) RGBf(0, 1, 0); RGBf(0, 0, 1) RGBf(1, 1, 0)]
     img2 = RGBf[RGBf(0, 0, 0) RGBf(1, 1, 1); RGBf(1, 1, 1) RGBf(0, 0, 0)]
 
-    # Two DIFFERENT plots, each with an image `base_color_texture` (even the SAME
-    # image) → DIFFERENT on-disk paths (previously both → tex_<objectid(nothing)>.png).
+    # Track every temp PNG this testset writes so it is reaped at the end: the
+    # texture temp dir is process-stable with cleanup=false (ovrtx reads assets
+    # lazily during render), so a pure run would otherwise leak these forever.
+    created = String[]
+
+    # Two different plots, each with an image `base_color_texture` (even the
+    # same image) → different on-disk paths.
     p1 = mesh!(ax, quad; material = (; base_color_texture = img1))
     p2 = mesh!(ax, quad; material = (; base_color_texture = img1))
     t1 = OM.material_inputs_from(p1)["diffuse_texture"]
     t2 = OM.material_inputs_from(p2)["diffuse_texture"]
+    append!(created, (t1, t2))
     @test t1 != t2
     @test isfile(t1) && isfile(t2)
     @test isabspath(t1) && isabspath(t2)
@@ -198,6 +187,7 @@ end
     # two DISTINCT paths (keyed by the input name, not just the plot).
     p3 = mesh!(ax, quad; material = (; base_color_texture = img1, normal_texture = img2))
     i3 = OM.material_inputs_from(p3)
+    append!(created, (i3["diffuse_texture"], i3["normalmap_texture"]))
     @test i3["diffuse_texture"] != i3["normalmap_texture"]
     @test isfile(i3["diffuse_texture"]) && isfile(i3["normalmap_texture"])
 
@@ -205,15 +195,31 @@ end
     # from a `*_texture` input on the same plot.
     p4 = mesh!(ax, quad; color = img1, material = (; normal_texture = img2))
     i4 = OM.material_inputs_from(p4)
+    append!(created, (i4["diffuse_texture"], i4["normalmap_texture"]))
     @test i4["diffuse_texture"] != i4["normalmap_texture"]
 
-    # Direct `_texture_asset_for`: EVERY call returns a FRESH unique path (the fresh-path fix —
-    # a stable per-(plot,key) name that a re-author overwrote made ovrtx disable the texture as a
-    # "video texture"; see texture_freshpath_test.jl). So even the same plot+key never collides;
-    # different key / different plot are trivially distinct too.
-    @test OM._texture_asset_for(img1, p1, :color) != OM._texture_asset_for(img1, p1, :color)
-    @test OM._texture_asset_for(img1, p1, :color) != OM._texture_asset_for(img1, p1, :normal_texture)
-    @test OM._texture_asset_for(img1, p1, :color) != OM._texture_asset_for(img1, p2, :color)
-    # A String path is still returned AS-IS regardless of plot/key (no temp write).
-    @test OM._texture_asset_for("/abs/x.png", p1, :color) == "/abs/x.png"
+    # Direct `_texture_asset_for`: every call returns a fresh unique path — a
+    # stable per-(plot,key) name that a re-author overwrites makes ovrtx
+    # disable the texture as a "video texture" (see texture_freshpath_test.jl).
+    # Same plot+key never collides; different key/plot are distinct too.
+    a_pk1 = OM._texture_asset_for(img1, p1, :color)
+    a_pk2 = OM._texture_asset_for(img1, p1, :color)
+    a_key = OM._texture_asset_for(img1, p1, :normal_texture)
+    a_plt = OM._texture_asset_for(img1, p2, :color)
+    append!(created, (a_pk1, a_pk2, a_key, a_plt))
+    @test a_pk1 != a_pk2         # same plot+key, two calls → fresh each time
+    @test a_pk1 != a_key         # same plot, different key
+    @test a_pk1 != a_plt         # different plot, same key
+    # An EXISTING String path is validated + absolutized and returned (no temp
+    # write, so nothing to reap); a MISSING path throws (a dangling asset ref
+    # would render silently untextured).
+    @test OM._texture_asset_for(t1, p1, :color) == abspath(t1)
+    @test_throws ArgumentError OM._texture_asset_for("/no/such/texture.png", p1, :color)
+
+    # Reap ONLY the temp PNGs this testset wrote (leave the shared dir + any
+    # sibling process's textures intact).
+    for f in created
+        isfile(f) && rm(f)
+    end
+    @test !any(isfile, created)
 end

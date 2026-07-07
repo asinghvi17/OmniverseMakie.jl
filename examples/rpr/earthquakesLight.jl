@@ -1,8 +1,10 @@
-# Ported from references/RPRMakieNotes/scripts/earthquakesLight.jl (Lazaro Alonso).
-# Earthquake globe (meshscatter + :nuuk colormap) + earth-textured sphere + emissive indicator boxes.
-# PointLight arg order swapped: original was position-first; OmniverseMakie wants color-first.
-# Earth sphere activated via SphereTess (was commented-out surface! in original).
-# EmissiveMaterial boxes → material=(; emissive=c). DiffuseMaterial planes → drop material=.
+# Ported from references/RPRMakieNotes/scripts/earthquakesLight.jl (Lazaro
+# Alonso). Earthquake globe (meshscatter + :nuuk colormap) + earth-textured
+# sphere + emissive indicator boxes. PointLight arg order swapped: original
+# was position-first; OmniverseMakie wants color-first. Earth sphere
+# activated via SphereTess (was commented-out surface! in original).
+# EmissiveMaterial boxes → material=(; emissive=c). DiffuseMaterial planes
+# → drop material=.
 using OmniverseMakie, GeometryBasics, Colors, CSV, DataFrames, FileIO
 
 SphereTess(; o = Point3f(0), r = 1, tess = 64) = uv_normal_mesh(Tesselation(Sphere(o, r), tess))
@@ -39,7 +41,7 @@ function scene_earthquakesLight()
     # 1×1 grey10 env image (background/sky colour as in original)
     grey10 = [colorant"grey10" for _ in 1:1, _ in 1:1]
 
-    # ★ PointLight: color-first (OmniverseMakie convention), position-second
+    # PointLight: color-first (OmniverseMakie convention), position-second
     lights = [
         EnvironmentLight(1.0, grey10'),
         PointLight(RGBf(8.0, 6.0, 5.0), Vec3f(2, 2, 0.0)),
@@ -50,7 +52,8 @@ function scene_earthquakesLight()
     fig = Figure(; size = (1080, 1080))
     ax  = LScene(fig[1, 1]; show_axis = false, scenekw = (; lights = lights))
 
-    # Earthquake scatter: numeric colour → :nuuk colormap, sized by normalised magnitude
+    # Earthquake scatter: numeric colour → :nuuk colormap, sized by
+    # normalised magnitude
     meshscatter!(ax, toPoints3D;
         markersize = ms ./ 14 .+ 0.004,
         color      = mag,
@@ -64,14 +67,16 @@ function scene_earthquakesLight()
     mesh!(ax, Rect3f(Vec3f(-5, -2, 2.05), Vec3f(10, 4, 0.05)); color = :white)
     mesh!(ax, Rect3f(Vec3f(-5, -2, -1.05), Vec3f(10, 0.05, 2.15)); color = :gainsboro)
 
-    # Emissive indicator boxes: RPR.EmissiveMaterial(matsys) → material=(; emissive=c)
+    # Emissive indicator boxes: RPR.EmissiveMaterial(matsys) →
+    # material=(; emissive=c)
     mesh!(ax, Rect3f(Vec3f(-3, -1, -0.5), Vec3f(0.5, 0.5, 0.5));
         material = (; emissive = 10colorant"orange"))
     mesh!(ax, Rect3f(Vec3f(3, -1, -0.5), Vec3f(0.5, 0.5, 0.5));
         material = (; emissive = 10colorant"red"))
 
-    # Camera: pulled back from the original's eyeposition=(2,2,1.5) (too close → the floor
-    # plane occluded the globe) to frame the earth + indicator lights from outside the room.
+    # Camera: pulled back from the original's eyeposition=(2,2,1.5) (too
+    # close → the floor plane occluded the globe) to frame the earth +
+    # indicator lights from outside the room.
     update_cam!(ax.scene, Vec3f(4.0, 4.0, 2.6), Vec3f(0, 0, 0.2), Vec3f(0, 0, 1))
 
     return fig

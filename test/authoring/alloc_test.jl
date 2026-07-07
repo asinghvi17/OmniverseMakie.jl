@@ -1,23 +1,11 @@
 using Test
 
 # ---------------------------------------------------------------------------
-# Review Track B / Task B7 — authoring-path allocations.
-#
-# Mesh conversion allocated one `Int[]` per face in three identical comprehensions
-# (author_usd_prim! for Mesh / materialized Scatter / materialized MeshScatter) only
-# for the USDA emitters to re-flatten; the emitters then built one temporary String
-# per vertex/index before `join`.  The refactor (a) flattens faces ONCE via
-# `_flat_faces` and has emitters take flat `(counts, indices)`, and (b) streams every
-# USDA number list through one reused IOBuffer instead of per-element Strings + join.
-#
-# BYTE-IDENTITY IS THE BAR.  These goldens were captured from the PRE-refactor emitters
-# (this testset is GREEN against pre-refactor code — it is the regression anchor) and
-# MUST stay byte-for-byte identical afterwards.  Julia's `print`/`string` of Float32 has
-# no `f0` suffix (already relied on); the non-allocating writers reproduce it exactly.
-#
-# PURE (no GPU): USDA string emission + `_flat_faces` + the reinterpret-view push are all
-# directly assertable.  The live binding write path (`_push_points_binding!` through
-# `write_binding!`) is exercised by the B2/B4 GPU testsets.
+# Authoring-path allocations (pure, no GPU): USDA emitters take flat
+# (counts, indices) from `_flat_faces` and stream number lists through one
+# reused IOBuffer. Byte-identity is the bar: the goldens below must stay
+# byte-for-byte identical (Julia's print/string of Float32 has no f0 suffix;
+# the non-allocating writers reproduce it exactly).
 # ---------------------------------------------------------------------------
 
 import OmniverseMakie as OM
@@ -32,7 +20,8 @@ const _B7_MERGED = "#usda 1.0\n( defaultPrim = \"mesh\" )\ndef Mesh \"mesh\"\n{\
 const _B7_P3F = "(1.0, 2.0, 0.0), (3.0, 4.0, 5.0)"
 # Shared fixtures (identical values to the golden captures).
 const _B7_MPTS  = [(0.0f0,0.0f0,0.0f0),(1.0f0,0.0f0,0.0f0),(1.0f0,1.0f0,0.0f0),(0.0f0,1.0f0,0.0f0)]
-const _B7_FACES = [[0,1,2],[0,2,3]]                     # nested, 0-based (counts [3,3], idx [0,1,2,0,2,3])
+# nested, 0-based (counts [3,3], idx [0,1,2,0,2,3])
+const _B7_FACES = [[0,1,2],[0,2,3]]
 const _B7_NRM   = [(0.0f0,0.0f0,1.0f0),(0.0f0,1.0f0,0.0f0),(1.0f0,0.0f0,0.0f0),(0.0f0,0.0f0,-1.0f0)]
 const _B7_PVCOL = [(1.0f0,0.0f0,0.0f0),(0.0f0,1.0f0,0.0f0),(0.0f0,0.0f0,1.0f0),(0.5f0,0.5f0,0.5f0)]
 const _B7_TC    = [OM.Vec2f(0,0),OM.Vec2f(1,0),OM.Vec2f(1,1),OM.Vec2f(0,1)]
@@ -44,7 +33,7 @@ const _B7_ICOL  = [(1.0f0,0.0f0,0.0f0),(0.0f0,1.0f0,0.0f0)]
 const _B7_MPOS  = [(10.0f0,0.0f0,0.0f0),(0.0f0,10.0f0,0.0f0)]
 
 @testset "B7 golden USDA byte-identity (flat emitters + IOBuffer streaming)" begin
-    fc, fi = OM._flat_faces(_B7_FACES)                     # flat (counts, indices), as the callers now build
+    fc, fi = OM._flat_faces(_B7_FACES)   # flat (counts, indices)
     @test OM.usda_mesh(_B7_MPTS, fc, fi, _B7_NRM, (0.2f0,0.4f0,0.6f0);
                        normal_interpolation="vertex") == _B7_MESH_CONST
     @test OM.usda_mesh(_B7_MPTS, fc, fi, _B7_NRM, _B7_PVCOL;
@@ -60,15 +49,16 @@ const _B7_MPOS  = [(10.0f0,0.0f0,0.0f0),(0.0f0,10.0f0,0.0f0)]
 end
 
 @testset "B7 _flat_faces → flat (counts, 0-based indices), built once" begin
-    # Plain-Int nested faces (surface re-mesh / merged markers): raw is identity on Int.
+    # Plain-Int nested faces (surface re-mesh / merged markers): raw is
+    # identity on Int.
     c, i = OM._flat_faces([[0,1,2],[0,2,3]])
     @test (c, i) == ([3, 3], [0, 1, 2, 0, 2, 3])
     @test eltype(c) === Int && eltype(i) === Int
     # Ragged arity (per-face count preserved).
     c2, i2 = OM._flat_faces([[5],[7,8],[1,2,3,4]])
     @test (c2, i2) == ([1, 2, 4], [5, 7, 8, 1, 2, 3, 4])
-    # GeometryBasics faces (OffsetInteger, presented 1-based) → raw gives 0-based indices,
-    # byte-for-byte what the three replaced comprehensions produced.
+    # GeometryBasics faces (OffsetInteger, presented 1-based) → raw gives
+    # 0-based indices.
     m = GB.normal_mesh(GB.Tesselation(GB.Sphere(GB.Point3f(0), 1f0), 4))
     gc, gi = OM._flat_faces(GB.faces(m))
     @test length(gc) == length(GB.faces(m)) && length(gi) == sum(gc)
@@ -78,12 +68,13 @@ end
 
 @testset "B7 _push_points_binding! writes through the reinterpret VIEW (no full-buffer copy)" begin
     v = OM.Point3f[OM.Point3f(1,2,3), OM.Point3f(4,5,6), OM.Point3f(7,8,9)]
-    data = reinterpret(Float32, v)                        # exactly what _push_points_binding! now passes
-    # pointer() on a ReinterpretArray-over-Vector equals the parent buffer pointer, so
-    # write_binding!'s `pointer(data)` under GC.@preserve is valid AND zero-copy.
+    data = reinterpret(Float32, v)   # what _push_points_binding! passes
+    # pointer() on a ReinterpretArray-over-Vector equals the parent buffer
+    # pointer, so write_binding!'s `pointer(data)` under GC.@preserve is
+    # valid AND zero-copy.
     @test pointer(data) == Ptr{Float32}(pointer(v))
     @test collect(data) == Float32[1,2,3,4,5,6,7,8,9]     # flattened components
-    @test length(v) == 3                                  # shape is npoints (3 lanes each), not 3*npoints
+    @test length(v) == 3   # shape is npoints (3 lanes each), not 3*npoints
     # Round-trip through the pointer under preserve, as write_binding! reads it.
     got = GC.@preserve data [unsafe_load(pointer(data), k) for k in 1:length(data)]
     @test got == Float32[1,2,3,4,5,6,7,8,9]
@@ -95,10 +86,12 @@ end
     nrm   = [OM.Vec3f(0, 0, 1) for _ in 1:N]
     faces = [[mod(3k, N), mod(3k+1, N), mod(3k+2, N)] for k in 0:ntri-1]
     fc, fi = OM._flat_faces(faces)
-    OM.usda_mesh(pts, fc, fi, nrm, (0.5f0,0.5f0,0.5f0); normal_interpolation="vertex")   # warm/compile
+    # warm/compile
+    OM.usda_mesh(pts, fc, fi, nrm, (0.5f0,0.5f0,0.5f0); normal_interpolation="vertex")
     GC.gc()
     a = @allocated OM.usda_mesh(pts, fc, fi, nrm, (0.5f0,0.5f0,0.5f0); normal_interpolation="vertex")
     @info "B7 usda_mesh @allocated (10k verts / 20k tris)" bytes=a
-    # Pre-refactor baseline was 40_345_128 B on this fixture (Julia 1.12.6); ≥5× means ≤ ~8.07 MB.
+    # The 8 MB ceiling: a regression to per-element String building on this
+    # fixture lands well above it.
     @test a ≤ 8_000_000
 end

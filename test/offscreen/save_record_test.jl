@@ -2,27 +2,13 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M1.6 — save/record/offscreen plumbing
-#
-# RED checks (before M1.6 fixes):
-#   - `Base.showable(MIME"image/jpeg", fig) == false` (RED without backend_showable(jpeg)=true)
-#   - Re-author centroid: calling colorbuffer twice on the same Screen with different camera
-#     positions → centroid of red pixels MUST SHIFT.  Without the re-author fix the stage
-#     is stale (camera not updated in USD) → centroid stays put → ASSERT FAILS → RED.
-#
-# GREEN checks (after M1.6 fixes):
-#   1. backend_showable(jpeg)=true  → showable check passes
-#   2. re-author-per-call fix: always call setup_scene!(screen) + empty!(plot2usd) first
-#      → each colorbuffer re-authors the stage → centroid shifts when camera moves → GREEN
-#
-# FileIO.save bypasses backend_showable (goes directly getscreen → backend_show) so
-# save(fig, "x.jpg") already worked in M1.5 via the FileIO/JPEG encode path.  The
-# backend_showable(jpeg) addition is still correct for Base.showable / Jupyter display.
-#
-# Per-frame change strategy (camera orbit):
-#   `cam.eyeposition[]` is read directly by `author_root_from_scene!`, so setting it
-#   before each colorbuffer / record frame is the guaranteed re-author trigger.
-#   Scene-transform composition (`scene.transformation.model[]`) is a M2 forward-carry.
+# save/record/offscreen plumbing: PNG + JPEG save, Base.showable(jpeg),
+# per-call stage re-authoring (the red-cube centroid shifts when the camera
+# moves between colorbuffer calls), and Makie.record to MP4.
+# FileIO.save bypasses backend_showable (getscreen -> backend_show);
+# backend_showable(jpeg) serves Base.showable / Jupyter display.
+# `cam.eyeposition[]` is read directly by `author_root_from_scene!`, so
+# setting it before each colorbuffer / record frame triggers the re-author.
 # ---------------------------------------------------------------------------
 
 const _M16_SAVE_RECORD_PROG = """
@@ -41,7 +27,7 @@ ax  = LScene(fig[1, 1])
 mesh!(ax, Rect3f(Point3f(0), Vec3f(1)); color = :red)
 
 # -----------------------------------------------------------------------
-# Test 1: save PNG (sanity — already worked in M1.5)
+# Test 1: save PNG
 # -----------------------------------------------------------------------
 save(png_path, fig)
 @assert isfile(png_path) "save(png) wrote no file"
@@ -52,7 +38,7 @@ println("PNG_BYTES=\$(length(png_bytes))")
 println("SAVE_PNG_OK")
 
 # -----------------------------------------------------------------------
-# Test 2: save JPEG via FileIO (works via FileIO path regardless of backend_showable)
+# Test 2: save JPEG via FileIO (works regardless of backend_showable)
 # -----------------------------------------------------------------------
 save(jpg_path, fig)
 @assert isfile(jpg_path) "save(jpg) wrote no file"
@@ -63,9 +49,8 @@ println("JPG_BYTES=\$(length(jpg_bytes))")
 println("SAVE_JPG_OK")
 
 # -----------------------------------------------------------------------
-# Test 3: Base.showable(MIME"image/jpeg", fig)
-# RED without backend_showable(jpeg)=true: showable returns false.
-# GREEN with fix: returns true, so Jupyter / Base.show dispatch works.
+# Test 3: Base.showable(MIME"image/jpeg", fig) is true, so Jupyter /
+# Base.show dispatch works.
 # -----------------------------------------------------------------------
 jpeg_showable = Base.showable(MIME("image/jpeg"), fig)
 println("JPEG_SHOWABLE=\$(jpeg_showable)")
@@ -73,14 +58,10 @@ println("JPEG_SHOWABLE=\$(jpeg_showable)")
 println("JPEG_SHOWABLE_OK")
 
 # -----------------------------------------------------------------------
-# Test 4: re-author per call (centroid-based, robust against RT2 noise)
-# Create ONE Screen, call colorbuffer twice with different camera positions.
-# Without re-author fix: USD stage is stale (camera not updated) → cube appears at
-# the SAME image position in both renders → centroid diff ≈ 0 → ASSERT FAILS.
-# With fix: stage re-authored each call → cube shifts in image → centroid diff > 30px.
-#
-# Camera change: 180° horizontal orbit ((x,y,z) → (-x,-y,z)) guarantees a large
-# shift (cube appears on opposite side of image).  expected ≥30px in practice; threshold is 20px.
+# Test 4: re-author per call (centroid-based, robust against RT2 noise).
+# One Screen, two colorbuffer calls with different camera positions: each
+# call re-authors the stage, so the cube shifts in the image. A 180-degree
+# orbit ((x,y,z) → (-x,-y,z)) shifts the centroid well past the 20px bar.
 # -----------------------------------------------------------------------
 screen = OmniverseMakie.Screen(ax.scene)
 cam    = Makie.cameracontrols(ax.scene)
@@ -95,7 +76,7 @@ println("NEW_EYE=\$(cam.eyeposition[])")
 
 imgB = Makie.colorbuffer(screen)
 
-# Centroid of red-dominant pixels (function scope to avoid soft-scope for-loop issue)
+# Centroid of red-dominant pixels (function scope avoids soft-scope for-loop)
 function red_centroid(img)
     H, W = size(img)
     sr = 0.0; sc = 0.0; n = 0
@@ -124,9 +105,8 @@ Base.close(screen)
 println("REAUTHOR_OK")
 
 # -----------------------------------------------------------------------
-# Test 5: Makie.record → MP4
-# Three-frame orbit.  Each frame: record callback → Makie calls colorbuffer(io.screen)
-# → with fix, re-authors per frame so each reflects the current camera.
+# Test 5: Makie.record → MP4. Three-frame orbit; each record callback sets
+# the camera, and colorbuffer re-authors per frame to reflect it.
 # -----------------------------------------------------------------------
 cam_r = Makie.cameracontrols(ax.scene)
 Makie.record(fig, mp4_path, 1:3; framerate = 1) do i

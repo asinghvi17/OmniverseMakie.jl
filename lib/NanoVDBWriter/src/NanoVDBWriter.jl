@@ -1,29 +1,20 @@
-# NanoVDBWriter.jl — dense `Array{Float32,3}` → uncompressed (`Codec::NONE`),
-# major-version-32 NanoVDB (`.nvdb`) file that NVIDIA IndeX (via ovrtx) renders.
+# NanoVDBWriter.jl — dense `Array{Float32,3}` → uncompressed (`Codec::NONE`)
+# major-version-32 NanoVDB (`.nvdb`) files that NVIDIA IndeX (ovrtx) renders.
 #
-# The optional ZIP-codec path (Hikari's `compress_zlib` zlib FFI) was removed as
-# dead code — this writer emits `Codec::NONE` only; it lives in git history.
-#
-# ── ATTRIBUTION (license requirement — keep) ─────────────────────────────────
-# The byte-level tree serialisation (`build_nanovdb_from_dense`, `save_nanovdb`
-# grid authoring, the coord hashers, `write_buf!`/`bitmask_set!`) is LIFTED from
-# `JuliaGraphics/Hikari.jl` (branch `sd/vk-hw-accel`,
-# `src/integrators/volpath/nanovdb.jl`) by Simon Danisch and Anton Smirnov, with
-# the author's verbal permission.  Hikari.jl carries no license file; this
-# vendored subset is used by that permission.
+# ── ATTRIBUTION (license requirement — keep) ────────────────────────────────
+# The byte-level tree serialisation (`build_nanovdb_from_dense`,
+# `save_nanovdb` grid authoring, the coord hashers,
+# `write_buf!`/`bitmask_set!`) is lifted from `JuliaGraphics/Hikari.jl`
+# (branch `sd/vk-hw-accel`, `src/integrators/volpath/nanovdb.jl`) by Simon
+# Danisch and Anton Smirnov, with the author's verbal permission.  Hikari.jl
+# carries no license file; this vendored subset is used by that permission.
 # The NanoVDB binary format (struct offsets; Root→Upper 32³→Lower 16³→Leaf 8³
 # layout; the `io::writeUncompressedGrid` framing) is NanoVDB
 # (AcademySoftwareFoundation/openvdb), MPL-2.0.
 #
-# ── Deliberate changes vs the Hikari writer (for ovrtx / IndeX) ──────────────
-#   1. Codec::NONE — payload UNCOMPRESSED (Hikari used ZIP=1): codec fields 0,
-#      no 8-byte size prefix — NanoVDB's `io::writeUncompressedGrid` framing.
-#   2. mChecksum = disabled sentinel ~UInt64(0) (NanoVDB's default; IndeX ok).
-#   3. Double-precision Map (mMatD/mInvMatD/mVecD) populated; Hikari left it 0
-#      (a null world→index transform for any double-precision reader — IndeX
-#      very likely uses it).
-#   4. TreeData::mVoxelCount + FileMetaData::voxelCount hold active-voxel count.
-#   5. Clear error on all-background input (no active voxels), not a crash.
+# Format choices: Codec::NONE payload (io::writeUncompressedGrid framing, no
+# size prefix); mChecksum = disabled sentinel; Map populated in single and
+# double precision; active-voxel count in TreeData and FileMetaData.
 
 module NanoVDBWriter
 
@@ -32,14 +23,14 @@ using Base: ENDIAN_BOM
 
 export save_nanovdb
 
-# NanoVDB is a little-endian on-disk format, and `write_buf!` stores host-endian
-# bytes via `unsafe_store!`; this writer is correct only on a little-endian host.
-# Fail loudly at load time on a big-endian one rather than emit swapped bytes.
+# NanoVDB is little-endian on disk and `write_buf!` stores host-endian bytes
+# via `unsafe_store!`, so this writer is correct only on a little-endian host.
+# Fail loudly at load time rather than emit byte-swapped output.
 @assert ENDIAN_BOM == 0x04030201 "NanoVDBWriter requires a little-endian host"
 
 # ============================================================================
-# NanoVDB format constants (pinned to file-format MAJOR version 32 — IndeX's
-# Version::isCompatible() requires an equal major, and this box ships v32.8)
+# NanoVDB format constants (pinned to file-format major version 32; IndeX's
+# Version::isCompatible() requires an equal major version)
 # ============================================================================
 
 # magic "NanoVDB0" as a little-endian UInt64 (NANOVDB_MAGIC_NUMB)
@@ -51,6 +42,11 @@ const CHECKSUM_DISABLED = typemax(UInt64)
 const GRIDTYPE_FLOAT  = UInt32(1)   # GridType::Float
 const GRIDCLASS_FOG   = UInt32(2)   # GridClass::FogVolume (density)
 const GRID_NAME       = "density"
+
+# GridData::mFlags bits (GridFlags): set only the ones whose fields we populate.
+# bbox fields (tree + world/index bbox) and per-node min/max are both written.
+const GRIDFLAG_HAS_BBOX   = UInt32(1) << 1   # HasBBox
+const GRIDFLAG_HAS_MINMAX = UInt32(1) << 2   # HasMinMax (over ACTIVE voxels)
 
 # GridData structure size (NanoVDB.h: sizeof(GridData) == 672B)
 const NANOVDB_GRIDDATA_SIZE = 672
@@ -91,6 +87,7 @@ const VOXELSIZE_OFFSET = 608 + 1  # 609
 const GRIDDATA_MAGIC_OFFSET     = 1
 const GRIDDATA_CHECKSUM_OFFSET  = 9
 const GRIDDATA_VERSION_OFFSET   = 17
+const GRIDDATA_FLAGS_OFFSET     = 21   # mFlags (GridData byte 20)
 const GRIDDATA_GRIDCOUNT_OFFSET = 29
 const GRIDDATA_GRIDSIZE_OFFSET  = 33
 const GRIDDATA_GRIDNAME_OFFSET  = 40   # name bytes go at OFFSET + i (i = 1…)
@@ -101,7 +98,6 @@ const GRIDDATA_GRIDTYPE_OFFSET  = 637
 # Root → Upper (32³, LOG2DIM=5) → Lower (16³, LOG2DIM=4) → Leaf (8³, LOG2DIM=3)
 const LEAF_LOG2DIM = 3
 const LEAF_DIM     = 1 << LEAF_LOG2DIM        # 8
-const LEAF_MASK    = (1 << LEAF_LOG2DIM) - 1  # 7
 
 const LOWER_LOG2DIM = 4
 const LOWER_DIM     = 1 << LOWER_LOG2DIM       # 16
@@ -126,19 +122,22 @@ const LEAFDATA_SIZE           = 2144
 # InternalData (Upper 32³): header 8240B → aligned 8256; Tile[32768]×8
 const UPPER_BBOX_OFFSET      = 0
 const UPPER_VALUEMASK_OFFSET = 32
-const UPPER_CHILDMASK_OFFSET = 32 + 4096   # 4128
+const UPPER_CHILDMASK_OFFSET = 32 + 4096         # 4128
+const UPPER_MIN_OFFSET       = 32 + 4096 + 4096  # 8224 — mMinimum, +4 mMaximum
 const UPPER_TABLE_OFFSET     = 8256
 
 # InternalData (Lower 16³): header 1072B → aligned 1088; Tile[4096]×8
 const LOWER_BBOX_OFFSET      = 0
 const LOWER_VALUEMASK_OFFSET = 32
-const LOWER_CHILDMASK_OFFSET = 32 + 512    # 544
+const LOWER_CHILDMASK_OFFSET = 32 + 512     # 544
+const LOWER_MIN_OFFSET       = 32 + 512 + 512  # 1056 — mMinimum, +4 mMaximum
 const LOWER_TABLE_OFFSET     = 1088
 
 # RootData: header 48B → aligned 64; Tile[mTableSize]×32
 const ROOTDATA_BBOX_OFFSET       = 0
 const ROOTDATA_TABLESIZE_OFFSET  = 24
 const ROOTDATA_BACKGROUND_OFFSET = 28
+const ROOTDATA_MIN_OFFSET        = 32   # mMinimum, +4 mMaximum
 const ROOTDATA_HEADER_SIZE       = 64
 
 # Root Tile (32B): key(8) child(8) state(4) value(4) padding(8)
@@ -184,12 +183,17 @@ end
     return ox | oy | oz
 end
 
-@inline function leaf_coord_to_offset(ijk::NTuple{3, Int32})::Int32
-    x, y, z = ijk
-    ox = (x & LEAF_MASK) << (2 * LEAF_LOG2DIM)
-    oy = (y & LEAF_MASK) << LEAF_LOG2DIM
-    oz = z & LEAF_MASK
-    return ox | oy | oz
+# NanoVDB stringHash (util): 64-bit rolling hash, ×67 per byte with a top-byte
+# carry.  Written as FileMetaData.nameKey so a grid can be looked up by name.
+# Verified: string_hash("density") == 9184452543000, the reference nameKey
+# (references/Hikari.jl/src/integrators/volpath/nanovdb.jl).
+@inline function string_hash(s::AbstractString)::UInt64
+    h = UInt64(0)
+    for c in codeunits(s)
+        overflow = h >> (64 - 8)
+        h = h * UInt64(67) + UInt64(c) + overflow
+    end
+    return h
 end
 
 # ============================================================================
@@ -229,11 +233,10 @@ end
 # Dense Array{Float32,3} → in-memory NanoVDB tree buffer
 # ============================================================================
 
-# Fill `scratch` (length 512, leaf-local layout) with the 8³ voxel block whose
-# index-space origin is `base`, reading `data` and padding out-of-range voxels
-# with `background`; return the number of active (non-background) voxels.  Shared
-# by Phase 1 (activeness + voxel count) and Phase 5 (re-read a leaf's values with
-# NO retained per-leaf copy — the memory win of D2).
+# Fill `scratch` (length 512, leaf-local layout) with the 8³ block at index
+# origin `base`, padding out-of-range voxels with `background`; returns the
+# active (non-background) voxel count.  Shared by Phase 1 (activeness scan)
+# and Phase 5 (value writes), so no per-leaf value copy is ever retained.
 @inline function fill_leaf_scratch!(
     scratch::Vector{Float32},
     data::Array{Float32, 3},
@@ -257,13 +260,14 @@ end
 end
 
 """
-    build_nanovdb_from_dense(data, origin, extent; background=0f0) -> (buffer, metadata)
+    build_nanovdb_from_dense(data, origin, extent; background=0f0)
 
-Dense 3-D `Float32` array → NanoVDB node buffer (`Root|Upper|Lower|Leaf`); only
-8³ leaf blocks holding non-`background` voxels are stored.  `origin` = world
-origin, `extent` = world size (voxel size = `extent ./ size(data)`).  Returns the
-node `buffer` (`Vector{UInt8}`, WITHOUT the 736-byte GridData+TreeData header) and
-a `metadata` NamedTuple.  Errors on all-background input.
+Dense 3-D `Float32` array → NanoVDB node buffer (`Root|Upper|Lower|Leaf`);
+only 8³ leaf blocks holding non-`background` voxels are stored.  `origin` =
+world origin, `extent` = world size (voxel size = `extent ./ size(data)`).
+Returns `(buffer, metadata)`: the node buffer (`Vector{UInt8}`, without the
+736-byte GridData+TreeData header) and a `metadata` NamedTuple.  Errors on
+all-background input.
 """
 function build_nanovdb_from_dense(
     data::Array{Float32, 3},
@@ -271,9 +275,9 @@ function build_nanovdb_from_dense(
     extent::Vec3f;
     background::Float32 = 0f0,
 )
-    # Up-front guards: a non-finite voxel would count as active (`!= background`)
-    # and poison min/max; a zero extent would silently write an Inf voxel size;
-    # a zero-length axis would otherwise fall through to the all-background error.
+    # Guards: a non-finite voxel would count as active and poison min/max; a
+    # zero extent would silently write an Inf voxel size; a zero-length axis
+    # would fall through to the misleading all-background error.
     all(isfinite, data) || throw(ArgumentError(
         "build_nanovdb_from_dense: `data` has non-finite (NaN/Inf) voxels — a " *
         "non-finite value would count as active and poison the value range."))
@@ -284,11 +288,13 @@ function build_nanovdb_from_dense(
         "(voxel size = extent ./ size(data)), got $extent."))
 
     nx, ny, nz = size(data)
-    dx, dy, dz = extent[1] / nx, extent[2] / ny, extent[3] / nz
+    # Voxel size in Float64 so the double-precision Map/voxelSize are exact
+    # rather than reconstructed from Float32 fields.
+    dx, dy, dz = Float64(extent[1]) / nx, Float64(extent[2]) / ny, Float64(extent[3]) / nz
 
     # ---- Phase 1: collect active leaf blocks (8³) + count active voxels ----
-    # Only the leaf coords are retained; each leaf's 512 values are re-read from
-    # `data` in Phase 5 (fill_leaf_scratch!) — no per-leaf copy is held (D2).
+    # Only leaf coords are retained; each leaf's 512 values are re-read from
+    # `data` in Phase 5 (fill_leaf_scratch!) — no per-leaf copy is held.
     n_bx = cld(nx, LEAF_DIM)
     n_by = cld(ny, LEAF_DIM)
     n_bz = cld(nz, LEAF_DIM)
@@ -317,7 +323,7 @@ function build_nanovdb_from_dense(
         lb = (coord[1] & ~Int32(LOWER_MASK),
               coord[2] & ~Int32(LOWER_MASK),
               coord[3] & ~Int32(LOWER_MASK))
-        push!(get!(lower_to_leaves, lb, Int[]), li)
+        push!(get!(() -> Int[], lower_to_leaves, lb), li)
     end
     lower_bases = sort!(collect(keys(lower_to_leaves)))
     n_lowers = length(lower_bases)
@@ -328,7 +334,7 @@ function build_nanovdb_from_dense(
         ub = (lb[1] & ~Int32(UPPER_MASK),
               lb[2] & ~Int32(UPPER_MASK),
               lb[3] & ~Int32(UPPER_MASK))
-        push!(get!(upper_to_lowers, ub, Int[]), low_i)
+        push!(get!(() -> Int[], upper_to_lowers, ub), low_i)
     end
     upper_bases = sort!(collect(keys(upper_to_lowers)))
     n_uppers = length(upper_bases)
@@ -354,10 +360,14 @@ function build_nanovdb_from_dense(
     end
 
     # ---- Phase 5: leaf nodes ----
+    # Per-node min/max (over ACTIVE voxels) is propagated up to lower/upper/root
+    # so the HasMinMax flag is honest at every level.
+    leaf_min = Vector{Float32}(undef, n_leaves)
+    leaf_max = Vector{Float32}(undef, n_leaves)
     for li in 1:n_leaves
         coord = leaf_coords[li]
         off = leaf_buf_pos[li]
-        fill_leaf_scratch!(scratch, data, coord, background, nx, ny, nz)  # re-read values
+        fill_leaf_scratch!(scratch, data, coord, background, nx, ny, nz)
 
         write_buf!(buffer, off + LEAFDATA_BBOXMIN_OFFSET, coord[1])
         write_buf!(buffer, off + LEAFDATA_BBOXMIN_OFFSET + 4, coord[2])
@@ -366,28 +376,33 @@ function build_nanovdb_from_dense(
         buffer[off + 13] = 0x07
         buffer[off + 14] = 0x07
 
+        # min/max over ACTIVE (non-background) voxels only; a stored leaf always
+        # has ≥1 active voxel, so both are well-defined.
         vmin = typemax(Float32)
         vmax = typemin(Float32)
         for i in 0:511
             v = scratch[i + 1]
             if v != background
                 bitmask_set!(buffer, off + LEAFDATA_MASK_OFFSET, i)
+                vmin = min(vmin, v)
+                vmax = max(vmax, v)
             end
-            vmin = min(vmin, v)
-            vmax = max(vmax, v)
         end
+        leaf_min[li] = vmin
+        leaf_max[li] = vmax
         write_buf!(buffer, off + LEAFDATA_MIN_OFFSET, vmin)
         write_buf!(buffer, off + LEAFDATA_MIN_OFFSET + 4, vmax)
 
-        # Bulk-copy the 512 Float32 payload in one shot: host Float32 memory layout
-        # equals the little-endian on-disk layout (guaranteed by the module-load
-        # endianness assert), so this is byte-identical to 512 scalar write_buf!s.
+        # Bulk-copy the 512-Float32 payload: host Float32 memory layout equals
+        # the little-endian on-disk layout (module-load endianness assert).
         GC.@preserve buffer scratch unsafe_copyto!(
             reinterpret(Ptr{Float32}, pointer(buffer, off + LEAFDATA_VALUES_OFFSET)),
             pointer(scratch), 512)
     end
 
     # ---- Phase 6: lower nodes ----
+    lower_min = Vector{Float32}(undef, n_lowers)
+    lower_max = Vector{Float32}(undef, n_lowers)
     for (low_i, lb) in enumerate(lower_bases)
         off = lower_pos(low_i)
         write_buf!(buffer, off + LOWER_BBOX_OFFSET, lb[1])
@@ -397,21 +412,29 @@ function build_nanovdb_from_dense(
         write_buf!(buffer, off + LOWER_BBOX_OFFSET + 16, lb[2] + Int32(LEAF_DIM * LOWER_DIM - 1))
         write_buf!(buffer, off + LOWER_BBOX_OFFSET + 20, lb[3] + Int32(LEAF_DIM * LOWER_DIM - 1))
 
+        lmin = typemax(Float32)
+        lmax = typemin(Float32)
         for li in lower_to_leaves[lb]
             coord = leaf_coords[li]
             n = lower_coord_to_offset(coord)
-            # mChildMask and mValueMask are DISJOINT (NanoVDB invariant): a tile
-            # is a child XOR an active constant value.  Child tile ⇒ set ONLY
-            # mChildMask (NanoVDB leaves mValueMask=0 for children; traversal
-            # checks mChildMask first).  Setting both made IndeX read it as a
-            # constant tile whose "value" is child-offset bytes as a tiny float.
+            # NanoVDB invariant: mChildMask and mValueMask are disjoint (a
+            # tile is a child XOR an active constant value); a child tile
+            # sets only mChildMask, leaving mValueMask 0.
             bitmask_set!(buffer, off + LOWER_CHILDMASK_OFFSET, n)
             child_off = Int64(leaf_buf_pos[li] - off)
             write_buf!(buffer, off + LOWER_TABLE_OFFSET + n * 8, child_off)
+            lmin = min(lmin, leaf_min[li])
+            lmax = max(lmax, leaf_max[li])
         end
+        lower_min[low_i] = lmin
+        lower_max[low_i] = lmax
+        write_buf!(buffer, off + LOWER_MIN_OFFSET, lmin)
+        write_buf!(buffer, off + LOWER_MIN_OFFSET + 4, lmax)
     end
 
     # ---- Phase 7: upper nodes ----
+    upper_min = Vector{Float32}(undef, n_uppers)
+    upper_max = Vector{Float32}(undef, n_uppers)
     for (up_i, ub) in enumerate(upper_bases)
         off = upper_pos(up_i)
         write_buf!(buffer, off + UPPER_BBOX_OFFSET, ub[1])
@@ -421,24 +444,35 @@ function build_nanovdb_from_dense(
         write_buf!(buffer, off + UPPER_BBOX_OFFSET + 16, ub[2] + Int32(LEAF_DIM * LOWER_DIM * UPPER_DIM - 1))
         write_buf!(buffer, off + UPPER_BBOX_OFFSET + 20, ub[3] + Int32(LEAF_DIM * LOWER_DIM * UPPER_DIM - 1))
 
+        umin = typemax(Float32)
+        umax = typemin(Float32)
         for low_i in upper_to_lowers[ub]
             lb = lower_bases[low_i]
             n = upper_coord_to_offset(lb)
-            # child tile → set ONLY mChildMask (disjoint); see Phase 6 note.
+            # child tile → set only mChildMask (disjoint); see Phase 6 note.
             bitmask_set!(buffer, off + UPPER_CHILDMASK_OFFSET, n)
             child_off = Int64(lower_pos(low_i) - off)
             write_buf!(buffer, off + UPPER_TABLE_OFFSET + n * 8, child_off)
+            umin = min(umin, lower_min[low_i])
+            umax = max(umax, lower_max[low_i])
         end
+        upper_min[up_i] = umin
+        upper_max[up_i] = umax
+        write_buf!(buffer, off + UPPER_MIN_OFFSET, umin)
+        write_buf!(buffer, off + UPPER_MIN_OFFSET + 4, umax)
     end
 
     # ---- Phase 8: root node ----
+    # NanoVDB CoordBBox max is INCLUSIVE — the far corner is the last voxel of
+    # the last active leaf block (coord + LEAF_DIM - 1), matching the +127/+4095
+    # inclusive maxima written for the lower/upper nodes above.
     idx_min = (typemax(Int32), typemax(Int32), typemax(Int32))
     idx_max = (typemin(Int32), typemin(Int32), typemin(Int32))
     for coord in leaf_coords
         idx_min = (min(idx_min[1], coord[1]), min(idx_min[2], coord[2]), min(idx_min[3], coord[3]))
-        idx_max = (max(idx_max[1], coord[1] + Int32(LEAF_DIM)),
-                   max(idx_max[2], coord[2] + Int32(LEAF_DIM)),
-                   max(idx_max[3], coord[3] + Int32(LEAF_DIM)))
+        idx_max = (max(idx_max[1], coord[1] + Int32(LEAF_DIM - 1)),
+                   max(idx_max[2], coord[2] + Int32(LEAF_DIM - 1)),
+                   max(idx_max[3], coord[3] + Int32(LEAF_DIM - 1)))
     end
 
     write_buf!(buffer, root_pos + ROOTDATA_BBOX_OFFSET, idx_min[1])
@@ -449,6 +483,9 @@ function build_nanovdb_from_dense(
     write_buf!(buffer, root_pos + ROOTDATA_BBOX_OFFSET + 20, idx_max[3])
     write_buf!(buffer, root_pos + ROOTDATA_TABLESIZE_OFFSET, UInt32(root_n_tiles))
     write_buf!(buffer, root_pos + ROOTDATA_BACKGROUND_OFFSET, background)
+    # Root min/max = min/max over the whole tree (its upper children).
+    write_buf!(buffer, root_pos + ROOTDATA_MIN_OFFSET, minimum(upper_min))
+    write_buf!(buffer, root_pos + ROOTDATA_MIN_OFFSET + 4, maximum(upper_max))
 
     tile_base = root_pos + ROOTDATA_HEADER_SIZE
     for (ti, ub) in enumerate(upper_bases)
@@ -459,18 +496,23 @@ function build_nanovdb_from_dense(
         write_buf!(buffer, t_off + ROOTTILE_VALUE_OFFSET, background)
     end
 
-    # ---- metadata (world↔index: p_index = inv_mat * (p_world - vec)) ----
-    vec = (Float32(origin[1] + dx/2), Float32(origin[2] + dy/2), Float32(origin[3] + dz/2))
-    inv_mat = (Float32(1/dx), 0f0, 0f0,
-               0f0, Float32(1/dy), 0f0,
-               0f0, 0f0, Float32(1/dz))
-    world_min = (Float32(origin[1]), Float32(origin[2]), Float32(origin[3]))
-    world_max = (Float32(origin[1] + extent[1]), Float32(origin[2] + extent[2]), Float32(origin[3] + extent[3]))
+    # ---- metadata (world↔index affine: p_index = inv_mat * (p_world - vec)) ----
+    # `voxel` and `vec` are Float64 so save_nanovdb builds the double-precision
+    # Map/voxelSize directly rather than reconstructing them from Float32.
+    voxel = (dx, dy, dz)
+    vec = (Float64(origin[1]) + dx/2, Float64(origin[2]) + dy/2, Float64(origin[3]) + dz/2)
+    # worldBBox spans the full input domain: IndeX uses it as the volume's
+    # world bounds (the authored UsdVol prim carries no explicit extent), so a
+    # tight active-only box clips off-origin data to black (live_test octant B).
+    world_min = (Float64(origin[1]), Float64(origin[2]), Float64(origin[3]))
+    world_max = (Float64(origin[1]) + Float64(extent[1]),
+                 Float64(origin[2]) + Float64(extent[2]),
+                 Float64(origin[3]) + Float64(extent[3]))
 
     metadata = (
         world_min = world_min,
         world_max = world_max,
-        inv_mat = inv_mat,
+        voxel = voxel,
         vec = vec,
         root_offset = Int64(root_pos),
         upper_offset = Int64(upper_pos(1)),
@@ -492,24 +534,25 @@ end
 # ============================================================================
 
 """
-    save_nanovdb(filepath, buffer::Vector{UInt8}, metadata::NamedTuple) -> String
+    save_nanovdb(filepath, buffer::Vector{UInt8}, metadata::NamedTuple)
 
-Prepend the 736-byte `GridData`+`TreeData` header to the node `buffer` and write an
-UNCOMPRESSED (`Codec::NONE`) NanoVDB file (`io::writeUncompressedGrid` framing:
-`[16B FileHeader][176B FileMetaData][nameSize B name][raw grid]`).  Returns `filepath`.
+Prepend the 736-byte `GridData`+`TreeData` header to the node `buffer` and
+write an uncompressed (`Codec::NONE`) NanoVDB file with
+`io::writeUncompressedGrid` framing:
+`[16B FileHeader][176B FileMetaData][nameSize B name][raw grid]`.
+Returns `filepath`.
 """
 function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata::NamedTuple)
     header_size = NANOVDB_GRIDDATA_SIZE + TREEDATA_SIZE   # 736
-    # Author GridData+TreeData into a 736-byte header, then stream the io header,
-    # this grid header, and the node buffer as three sequential writes — no
-    # whole-buffer copy just to prepend the header (D2).  grid_size is the total
-    # grid byte length (header + node buffer), computed arithmetically.
+    # Author GridData+TreeData into a 736-byte header, then stream io header,
+    # grid header, and node buffer as three sequential writes (no whole-buffer
+    # copy).  grid_size = total grid byte length (header + node buffer).
     grid_header = zeros(UInt8, header_size)
     grid_size = UInt64(header_size + length(buffer))
 
     # ---- GridData scalar fields ----
     write_buf!(grid_header, GRIDDATA_MAGIC_OFFSET,     NANOVDB_MAGIC)
-    write_buf!(grid_header, GRIDDATA_CHECKSUM_OFFSET,  CHECKSUM_DISABLED)   # (change #2)
+    write_buf!(grid_header, GRIDDATA_CHECKSUM_OFFSET,  CHECKSUM_DISABLED)
     write_buf!(grid_header, GRIDDATA_VERSION_OFFSET,   NANOVDB_VERSION)
     write_buf!(grid_header, GRIDDATA_GRIDCOUNT_OFFSET, UInt32(1))
     write_buf!(grid_header, GRIDDATA_GRIDSIZE_OFFSET,  grid_size)
@@ -518,25 +561,25 @@ function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata:
     end
     write_buf!(grid_header, GRIDDATA_GRIDCLASS_OFFSET, GRIDCLASS_FOG)
     write_buf!(grid_header, GRIDDATA_GRIDTYPE_OFFSET,  GRIDTYPE_FLOAT)
+    # mFlags: bbox fields and per-node min/max are populated.
+    write_buf!(grid_header, GRIDDATA_FLAGS_OFFSET, GRIDFLAG_HAS_BBOX | GRIDFLAG_HAS_MINMAX)
 
-    # ---- Map: single- AND double-precision (change #3) ----
-    # inv_mat = world→index (mInvMat); invert (cofactors/det) → mat = mMat.
-    inv_mat = metadata.inv_mat
-    m = inv_mat   # the matrix being inverted
-    cof = (m[5]*m[9] - m[6]*m[8], m[3]*m[8] - m[2]*m[9], m[2]*m[6] - m[3]*m[5],
-           m[6]*m[7] - m[4]*m[9], m[1]*m[9] - m[3]*m[7], m[3]*m[4] - m[1]*m[6],
-           m[4]*m[8] - m[5]*m[7], m[2]*m[7] - m[1]*m[8], m[1]*m[5] - m[2]*m[4])
-    det = m[1]*cof[1] + m[2]*cof[4] + m[3]*cof[7]
-    mat = ntuple(i -> cof[i] / det, 9)                # mMat (index→world)
-    vec = metadata.vec
+    # ---- Map: diagonal affine in double, truncated to single ----
+    # The double Map is built straight from the Float64 voxel size (no Float32
+    # round-trip); the single Map is its truncation.
+    voxel = metadata.voxel                     # (dx, dy, dz), Float64
+    vec = metadata.vec                         # translation, Float64
+    inv = (1.0/voxel[1], 1.0/voxel[2], 1.0/voxel[3])
+    matd    = (voxel[1], 0.0, 0.0,  0.0, voxel[2], 0.0,  0.0, 0.0, voxel[3])   # mMat: index→world
+    invmatd = (inv[1],   0.0, 0.0,  0.0, inv[2],   0.0,  0.0, 0.0, inv[3])     # mInvMat: world→index
 
-    for i in 1:9;  write_buf!(grid_header, MAP_OFFSET        + (i-1)*4, Float32(mat[i]));     end
-    for i in 1:9;  write_buf!(grid_header, MAP_INVMATF_OFFSET + (i-1)*4, Float32(inv_mat[i])); end
+    for i in 1:9;  write_buf!(grid_header, MAP_OFFSET        + (i-1)*4, Float32(matd[i]));    end
+    for i in 1:9;  write_buf!(grid_header, MAP_INVMATF_OFFSET + (i-1)*4, Float32(invmatd[i])); end
     for i in 1:3;  write_buf!(grid_header, MAP_VECF_OFFSET    + (i-1)*4, Float32(vec[i]));     end
     write_buf!(grid_header, MAP_TAPERF_OFFSET, 1.0f0)
-    for i in 1:9;  write_buf!(grid_header, MAP_MATD_OFFSET    + (i-1)*8, Float64(mat[i]));     end
-    for i in 1:9;  write_buf!(grid_header, MAP_INVMATD_OFFSET + (i-1)*8, Float64(inv_mat[i])); end
-    for i in 1:3;  write_buf!(grid_header, MAP_VECD_OFFSET    + (i-1)*8, Float64(vec[i]));     end
+    for i in 1:9;  write_buf!(grid_header, MAP_MATD_OFFSET    + (i-1)*8, matd[i]);    end
+    for i in 1:9;  write_buf!(grid_header, MAP_INVMATD_OFFSET + (i-1)*8, invmatd[i]); end
+    for i in 1:3;  write_buf!(grid_header, MAP_VECD_OFFSET    + (i-1)*8, vec[i]);     end
     write_buf!(grid_header, MAP_TAPERD_OFFSET, 1.0)
 
     # ---- worldBBox (6×Float64) + voxelSize (3×Float64) ----
@@ -544,8 +587,7 @@ function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata:
     for (i, v) in enumerate((wmin[1], wmin[2], wmin[3], wmax[1], wmax[2], wmax[3]))
         write_buf!(grid_header, WORLDBBOX_OFFSET + (i-1)*8, Float64(v))
     end
-    voxel_size = (Float64(1f0 / inv_mat[1]), Float64(1f0 / inv_mat[5]), Float64(1f0 / inv_mat[9]))
-    for (i, v) in enumerate(voxel_size)
+    for (i, v) in enumerate(voxel)
         write_buf!(grid_header, VOXELSIZE_OFFSET + (i-1)*8, Float64(v))
     end
 
@@ -559,9 +601,9 @@ function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata:
     for (i, n) in enumerate((metadata.leaf_count, metadata.lower_count, metadata.upper_count))
         write_buf!(grid_header, TREEDATA_NODE_COUNT_START + (i-1)*4, UInt32(n))
     end
-    write_buf!(grid_header, TREEDATA_VOXELCOUNT_OFFSET, UInt64(metadata.voxel_count))  # (change #4)
+    write_buf!(grid_header, TREEDATA_VOXELCOUNT_OFFSET, UInt64(metadata.voxel_count))
 
-    # ---- FileHeader(16)+FileMetaData(176)+name(8), Codec::NONE (#1) ----
+    # ---- FileHeader(16)+FileMetaData(176)+name(8), Codec::NONE ----
     io_hdr = zeros(UInt8, 200)
     # FileHeader: magic(0) version(8) gridCount(12) codec(14)
     write_buf!(io_hdr,  1, NANOVDB_MAGIC)
@@ -569,10 +611,11 @@ function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata:
     write_buf!(io_hdr, 13, UInt16(1))       # gridCount
     write_buf!(io_hdr, 15, UInt16(0))       # codec = NONE
 
-    m0 = 17  # FileMetaData base (1-indexed); field offsets relative to file byte 16
+    # FileMetaData base (1-indexed); field offsets relative to file byte 16
+    m0 = 17
     write_buf!(io_hdr, m0 +   0, grid_size)                        # gridSize
     write_buf!(io_hdr, m0 +   8, grid_size)                        # fileSize == gridSize (NONE)
-    write_buf!(io_hdr, m0 +  16, UInt64(0))                        # nameKey (0 for uncompressed)
+    write_buf!(io_hdr, m0 +  16, string_hash(GRID_NAME))          # nameKey = stringHash(name)
     write_buf!(io_hdr, m0 +  24, UInt64(metadata.voxel_count))     # voxelCount
     write_buf!(io_hdr, m0 +  32, GRIDTYPE_FLOAT)                   # gridType
     write_buf!(io_hdr, m0 +  36, GRIDCLASS_FOG)                    # gridClass
@@ -583,7 +626,7 @@ function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata:
                               metadata.index_max[1], metadata.index_max[2], metadata.index_max[3]))
         write_buf!(io_hdr, m0 + 88 + (i-1)*4, Int32(v))            # indexBBox
     end
-    for (i, v) in enumerate(voxel_size)
+    for (i, v) in enumerate(voxel)
         write_buf!(io_hdr, m0 + 112 + (i-1)*8, Float64(v))         # voxelSize
     end
     write_buf!(io_hdr, m0 + 136, UInt32(length(GRID_NAME) + 1))    # nameSize ("density\0" = 8)
@@ -599,7 +642,7 @@ function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata:
     end
 
     open(filepath, "w") do io
-        write(io, io_hdr)        # 200B file-IO header (FileHeader+FileMetaData+name)
+        write(io, io_hdr)        # 200B FileHeader+FileMetaData+name
         write(io, grid_header)   # 736B GridData + TreeData
         write(io, buffer)        # raw node buffer, uncompressed, no size prefix
     end
@@ -607,12 +650,12 @@ function save_nanovdb(filepath::AbstractString, buffer::Vector{UInt8}, metadata:
 end
 
 """
-    save_nanovdb(path::AbstractString, data::Array{Float32,3}, origin, extent) -> String
+    save_nanovdb(path::AbstractString, data::Array{Float32,3}, origin, extent)
 
-Build a NanoVDB tree from a dense 3-D array and write it to `path`: uncompressed
-(`Codec::NONE`), major-32, grid name `"density"`, `GridClass::FogVolume`,
-background `0f0`.  `origin`/`extent` accept `Point3f`/`Vec3f` (voxel size =
-`extent ./ size(data)`).  Returns `path`.
+Build a NanoVDB tree from a dense 3-D array and write it to `path`:
+uncompressed (`Codec::NONE`), major-32, grid name `"density"`,
+`GridClass::FogVolume`, background `0f0`.  `origin`/`extent` accept
+`Point3f`/`Vec3f` (voxel size = `extent ./ size(data)`).  Returns `path`.
 """
 function save_nanovdb(path::AbstractString, data::Array{Float32,3}, origin, extent)
     buffer, metadata = build_nanovdb_from_dense(data, Point3f(origin...), Vec3f(extent...))
@@ -620,29 +663,47 @@ function save_nanovdb(path::AbstractString, data::Array{Float32,3}, origin, exte
 end
 
 # ============================================================================
-# Minimal reader — reads only the file-IO header (FileHeader + FileMetaData),
-# used by the round-trip test.  Works for any codec (header is uncompressed).
+# Minimal reader — parses only the file-IO header (FileHeader + FileMetaData);
+# works for any codec (the file-IO header is never compressed).
 # ============================================================================
 
 """
     parse_nanovdb_header(path) -> NamedTuple
 
-Read the NanoVDB file-IO header of `path` and return
-`(; magic::String, version_major::Int, grid_type::UInt32, voxel_count::Int)`.
+Read the NanoVDB file-IO header of `path` and return the FileHeader/FileMetaData
+fields plus the GridData `mFlags`:
+`(; magic, version_major, grid_type, voxel_count, name_key, world_bbox_min,
+   world_bbox_max, index_bbox_min, index_bbox_max, voxel_size, grid_flags)`.
+`index_bbox_max` is INCLUSIVE and `world_bbox_*` is the index bbox mapped through
+the voxel transform.
 """
 function parse_nanovdb_header(path::AbstractString)
     bytes = open(path, "r") do io
-        read(io, 52)
+        read(io, 224)
     end
-    length(bytes) >= 52 || error("parse_nanovdb_header: file too short to be a NanoVDB file: $path")
+    length(bytes) >= 224 || error("parse_nanovdb_header: file too short to be a NanoVDB file: $path")
     magic = String(bytes[1:8])
     version = only(reinterpret(UInt32, bytes[9:12]))
     version_major = Int(version >> 21)
-    # FileMetaData starts at file byte 16: voxelCount at +24 (byte 40),
-    # gridType at +32 (byte 48)
+    # FileMetaData starts at file byte 16 (1-indexed 17); field offsets: nameKey
+    # (+16), voxelCount (+24), gridType (+32), worldBBox (+40), indexBBox (+88),
+    # voxelSize (+112).
+    name_key    = only(reinterpret(UInt64, bytes[33:40]))
     voxel_count = Int(only(reinterpret(UInt64, bytes[41:48])))
-    grid_type = only(reinterpret(UInt32, bytes[49:52]))
-    return (; magic, version_major, grid_type, voxel_count)
+    grid_type   = only(reinterpret(UInt32, bytes[49:52]))
+    wb = reinterpret(Float64, bytes[57:104])
+    world_bbox_min = (wb[1], wb[2], wb[3])
+    world_bbox_max = (wb[4], wb[5], wb[6])
+    ib = reinterpret(Int32, bytes[105:128])
+    index_bbox_min = (ib[1], ib[2], ib[3])
+    index_bbox_max = (ib[4], ib[5], ib[6])
+    vs = reinterpret(Float64, bytes[129:152])
+    voxel_size = (vs[1], vs[2], vs[3])
+    # GridData begins at file byte 200 (1-indexed 201); mFlags at GridData +20.
+    grid_flags = only(reinterpret(UInt32, bytes[221:224]))
+    return (; magic, version_major, grid_type, voxel_count, name_key,
+            world_bbox_min, world_bbox_max, index_bbox_min, index_bbox_max,
+            voxel_size, grid_flags)
 end
 
 end # module NanoVDBWriter

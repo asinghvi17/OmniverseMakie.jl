@@ -1,45 +1,47 @@
 using Test
 using OmniverseMakie: OV
 import OmniverseMakie.LibOVRTX as LibOVRTX
+import OmniverseMakie.OV.SignalGuard as SG
 
 # ---------------------------------------------------------------------------
-# Task A4 — GC-safe Binding finalizer + ovx_string SubString fix.
+# GC-safe Binding finalizer + ovx_string lifetime contract + map_binding /
+# with_restored_signals guards (pure, no GPU).
 #
-# 1. ovx_string (PURE).  The old `ovx_string(::Union{String,SubString{String}})` branch
-#    was a guaranteed MethodError on a SubString: it called
-#    Base.unsafe_convert(Cstring, ::SubString), which has NO method (a SubString carries no
-#    terminating NUL).  The fix routes every non-String AbstractString through
-#    `ovx_string(String(s))` (ovx_string_t is a raw ptr+len — only a materialized String is
-#    contiguous + NUL-terminated), while a plain String keeps its zero-copy pointer.
-# 2. destroy! finalizer-flag paths (PURE, no GPU).  The finalizer now registers
-#    `from_finalizer=true`; that path must skip all ovrtx work on a closed Renderer and
-#    ALWAYS mark the binding dead (`alive=false`, `map_handle=0`), never throwing.  The real
-#    ovrtx teardown ccalls stay covered by the m2_binding / m2_delete GPU testsets (which use
-#    the unchanged explicit `destroy!`).
+# `ovx_string` is `String`-ONLY by design: ovx_string_t is a raw ptr+len into
+# the String's bytes, so the CALLER must own + GC.@preserve that String. A
+# convenience `ovx_string(::AbstractString)` would materialize `String(s)`
+# inside the call, leaving the struct pointing into a temporary the caller's
+# `GC.@preserve original` never roots (use-after-free for a SubString). So a
+# non-String argument is a MethodError by intent, forcing call-site
+# materialization. `destroy!(; from_finalizer=true)` must skip all ovrtx work
+# on a closed Renderer, always mark the binding dead (`alive=false`,
+# `map_handle=0`), and never throw.
 # ---------------------------------------------------------------------------
 
-@testset "A4 ovx_string: SubString no MethodError + String zero-copy (pure)" begin
-    subs = SubString("abc/def", 1, 3)            # "abc", a genuine SubString{String}
+@testset "A4 ovx_string: String-only, forces materialization (pure)" begin
+    subs = SubString("abc/def", 1, 3)   # "abc", a genuine SubString{String}
     @test subs isa SubString{String}
+    @test !(subs isa String)
 
-    # RED before A4: MethodError at unsafe_convert(Cstring, ::SubString).
-    # GREEN: dispatches via ovx_string(::AbstractString); length is the substring's (3), not
-    # the parent's (7).
-    @test LibOVRTX.ovx_string(subs) isa LibOVRTX.ovx_string_t
-    @test Int(LibOVRTX.ovx_string(subs).length) == ncodeunits(subs) == 3
+    # Hazard shape: a non-String argument is a MethodError, NOT a silent
+    # materialize-into-a-temp. This is what forces callers to `s = String(x)`
+    # + `GC.@preserve s` (the lifetime-sound pattern).
+    @test_throws MethodError LibOVRTX.ovx_string(subs)
 
-    # Content round-trip: the AbstractString method builds `String(subs)`, and the
-    # ovx_string_t points into THAT fresh String — so preserve it (not the parent literal)
-    # across String(::ovx_string_t), under GC pressure.
+    # The sound pattern: materialize an owned String, preserve THAT, and the
+    # ovx_string_t round-trips under GC pressure.
     backing = String(subs)
+    @test backing isa String
     os = LibOVRTX.ovx_string(backing)
     GC.@preserve backing begin
         GC.gc()
+        @test Int(os.length) == ncodeunits(backing) == 3
         @test String(os) == "abc"
     end
 
-    # Plain String: zero-copy — the ovx_string_t points straight at the String's bytes (no
-    # extra allocation / copy), pointer identity preserved.
+    # Plain String: zero-copy — the ovx_string_t points straight at the
+    # String's bytes (no extra allocation / copy), pointer identity
+    # preserved.
     s = "hello/world"
     os_str = LibOVRTX.ovx_string(s)
     GC.@preserve s begin
@@ -50,11 +52,77 @@ import OmniverseMakie.LibOVRTX as LibOVRTX
     end
 end
 
+@testset "A4 map_binding: closed-Renderer guard errors cleanly (pure)" begin
+    # A live Binding whose Renderer has been closed: map_binding must error on
+    # the `b.r.alive` check BEFORE handing a C_NULL renderer instance to
+    # ovrtx_map_attribute. A red-first demo of the DEFECT is impractical (the
+    # unguarded path is a C_NULL-instance ccall = probable segfault, which
+    # would crash the test process), so we assert the clean-error fix directly.
+    _dead_renderer() = let r = ccall(:jl_new_struct_uninit, Any, (Any,), OV.Renderer)::OV.Renderer
+        r.ptr = Ptr{LibOVRTX.ovrtx_renderer_t}(C_NULL)
+        r.alive = false
+        r
+    end
+    # alive Binding (alive=true, map_handle=0) referencing the CLOSED renderer.
+    b = OV.Binding(_dead_renderer(), LibOVRTX.ovrtx_attribute_binding_handle_t(7),
+        "/P", "omni:xform", LibOVRTX.DLDataType(UInt8(2), UInt8(64), UInt16(16)),
+        false, LibOVRTX.OVRTX_SEMANTIC_NONE, LibOVRTX.ovrtx_map_handle_t(0), true)
+    @test b.alive && !b.r.alive          # the exact hazard state
+    err = try; OV.map_binding(b); nothing catch e; e end
+    @test err isa ErrorException
+    @test occursin("closed Renderer", err.msg)   # named cleanly, no ccall
+end
+
+@testset "A4 with_restored_signals: lock + GC restore (pure)" begin
+    # The window is serialized by a module-level ReentrantLock so concurrent
+    # Renderer() creations can't interleave snapshot/restore.
+    @test SG._RESTORE_LOCK isa ReentrantLock
+
+    # 1. f's value passes through.
+    @test SG.with_restored_signals(() -> 42) == 42
+
+    # 2. Reentrant: a nested call from the same task must not deadlock (proves
+    #    ReentrantLock, not a plain lock) and still passes f's value through.
+    @test SG.with_restored_signals() do
+        SG.with_restored_signals(() -> 7) + 1
+    end == 8
+
+    # 3. GC is re-enabled after a NORMAL return. `GC.enable(true)` returns the
+    #    previous state; restore it so the probe is non-destructive.
+    SG.with_restored_signals(() -> nothing)
+    was = GC.enable(true); GC.enable(was)
+    @test was == true
+
+    # 4. GC is re-enabled even when f THROWS (the finally chain runs). This is
+    #    the regression: before the nested `try restore finally GC.enable end`,
+    #    a throw between disable and restore could leave the GC disabled.
+    threw = false
+    try
+        SG.with_restored_signals() do
+            error("boom_signals_gc")
+        end
+    catch e
+        threw = true
+        @test occursin("boom_signals_gc", sprint(showerror, e))
+    end
+    @test threw
+    was2 = GC.enable(true); GC.enable(was2)
+    @test was2 == true
+
+    # 5. Behavioral: with the Julia SIGSEGV handler restored, a full GC (which
+    #    arms the safepoint page) runs without the process dying — SIG_DFL
+    #    would fatally mis-handle a safepoint fault.
+    SG.with_restored_signals(() -> nothing)
+    GC.gc(true)
+    @test true   # reached here ⇒ handlers restored, safepoint survived
+end
+
 @testset "A4 destroy! finalizer-flag paths (pure, no GPU)" begin
-    # A closed Renderer built WITHOUT ovrtx: `Renderer` exposes only its GPU-calling inner
-    # constructor, so bypass it (two isbits fields — ptr + alive — set by hand).  With the
-    # Renderer closed, BOTH destroy! paths must skip every ccall yet still mark the binding
-    # dead, exercising the flag logic with no GPU.
+    # A closed Renderer built WITHOUT ovrtx: `Renderer` exposes only its
+    # GPU-calling inner constructor, so bypass it (two isbits fields — ptr +
+    # alive — set by hand).  With the Renderer closed, BOTH destroy! paths
+    # must skip every ccall yet still mark the binding dead, exercising the
+    # flag logic with no GPU.
     _dead_renderer() = let r = ccall(:jl_new_struct_uninit, Any, (Any,), OV.Renderer)::OV.Renderer
         r.ptr = Ptr{LibOVRTX.ovrtx_renderer_t}(C_NULL)
         r.alive = false
@@ -68,20 +136,24 @@ end
     leaks0 = OV.binding_finalizer_leak_count()
     @test leaks0 isa Int
 
-    # from_finalizer path, closed Renderer: must not throw, must force the binding dead, and
-    # must NOT count a leak (nothing errored — the ovrtx side was skipped).
+    # from_finalizer path, closed Renderer: must not throw, must force the
+    # binding dead, and must NOT count a leak (nothing errored — the ovrtx
+    # side was skipped).
     b1 = _binding(_dead_renderer(); map_handle=99)
-    @test (OV.destroy!(b1; from_finalizer=true); true)   # no throw out of the finalizer path
+    # no throw out of the finalizer path
+    @test (OV.destroy!(b1; from_finalizer=true); true)
     @test b1.alive == false
-    @test b1.map_handle == 0                              # finally-cleared even from non-zero
+    @test b1.map_handle == 0   # finally-cleared even from non-zero
     @test OV.binding_finalizer_leak_count() == leaks0
 
-    # Idempotent: a second finalizer-path call short-circuits on the alive guard (no throw).
+    # Idempotent: a second finalizer-path call short-circuits on the alive
+    # guard (no throw).
     @test (OV.destroy!(b1; from_finalizer=true); b1.alive == false)
     @test OV.binding_finalizer_leak_count() == leaks0
 
-    # Explicit path (default from_finalizer=false), closed Renderer: same flag clearing, no
-    # throw (renderer closed ⇒ no ccall ⇒ nothing to propagate).
+    # Explicit path (default from_finalizer=false), closed Renderer: same
+    # flag clearing, no throw (renderer closed ⇒ no ccall ⇒ nothing to
+    # propagate).
     b2 = _binding(_dead_renderer(); map_handle=42)
     @test (OV.destroy!(b2); b2.alive == false)
     @test b2.map_handle == 0

@@ -1,29 +1,32 @@
 using Test
+import OmniverseMakie   # bind the module name so this file runs standalone too
+using OmniverseMakie: Figure, LScene, mesh!, meshscatter!, scatter!, lines!,
+                      surface!, Rect3f, Point3f, Vec3f
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
-# OmniPBR materials (formerly m3_material_test.jl).
+# OmniPBR materials.
 #
-# VALIDATED CONSTRAINT (recorded in the source docstrings): an OmniPBR Material must be
-# PRE-AUTHORED into the stage at open-time (composed into /World/Looks).  A Material added
-# to the OPEN stage at runtime via `OV.add_usd_reference!` is a SILENT NO-OP for
-# `material:binding` in our ovrtx build.  `OV.bind_material!` works at runtime, but only on
-# a pre-authored material.  The compose subprocess below exercises exactly that shape
-# through the full Screen/colorbuffer pipeline (the original M3.1 hand-authored-stage
-# feasibility spike asserted the same metallic-vs-diffuse signature and was retired as
-# redundant with it).
+# CONSTRAINT: an OmniPBR Material must be PRE-AUTHORED into the stage at
+# open-time (composed into /World/Looks).  A Material added to the OPEN stage
+# at runtime via `OV.add_usd_reference!` is a SILENT NO-OP for
+# `material:binding` in this ovrtx build.  `OV.bind_material!` works at
+# runtime, but only on a pre-authored material.  The compose subprocess below
+# exercises exactly that shape through the full Screen/colorbuffer pipeline.
 
 # ---------------------------------------------------------------------------
 # `material=` escape hatch + `color`→base composition + authoring trigger.
 #
-# Unit (parent process, NO render): `is_materialized` + `material_inputs_from` compose
-# `color` + the `material=` NamedTuple into OmniPBR shader-input names, applying the
-# `base_color` precedence; PLUS the plain-color regression guard at the DATA level —
-# the robust primary guard: a plain `mesh!(…; color=:red)` authors NO material, keeps
+# Unit (parent process, NO render): `is_materialized` +
+# `material_inputs_from` compose `color` + the `material=` NamedTuple into
+# OmniPBR shader-input names, applying the `base_color` precedence; PLUS the
+# plain-color regression guard at the DATA level — the robust primary guard:
+# a plain `mesh!(…; color=:red)` authors NO material, keeps
 # `primvars:displayColor`, and gets NO `material:binding`.
 #
-# Integration (subprocess): the materialized mesh renders METALLIC through the full
-# Screen/colorbuffer pipeline (pre-author → bind → render); the plain mesh renders the
-# M1 displayColor path red-dominant (the displayColor pipeline is unbroken).
+# Integration (subprocess): the materialized mesh renders METALLIC through
+# the full Screen/colorbuffer pipeline (pre-author → bind → render); the
+# plain mesh renders the M1 displayColor path red-dominant (the displayColor
+# pipeline is unbroken).
 # ---------------------------------------------------------------------------
 
 @testset "M3.2 is_materialized + material_inputs_from (unit)" begin
@@ -37,7 +40,8 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     @test OmniverseMakie.is_materialized(m)  == true
     @test OmniverseMakie.is_materialized(mp) == false
 
-    # color + material= compose into ONE OmniPBR-input dict (mapped names, raw scalars).
+    # color + material= compose into ONE OmniPBR-input dict (mapped names,
+    # raw scalars).
     @test OmniverseMakie.material_inputs_from(m) == Dict(
         "diffuse_color_constant"        => (1, 0, 0),
         "metallic_constant"             => 0,
@@ -47,14 +51,15 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     mo = mesh!(ax, geom; color = :red, material = (; base_color = :blue))
     @test OmniverseMakie.material_inputs_from(mo)["diffuse_color_constant"] == (0, 0, 1)
 
-    # --- Regression guard (DATA-level, robust primary): the plain plot authors NO
-    #     material; the materialized plot's material IS pre-authored into /World/Looks. ---
+    # --- Regression guard (DATA-level, robust primary): the plain plot
+    #     authors NO material; the materialized plot's material IS
+    #     pre-authored into /World/Looks. ---
     looks = OmniverseMakie.materialized_looks_usda(ax.scene)
-    @test occursin("Mat_$(objectid(m))", looks)        # materialized → pre-authored material
-    @test !occursin("Mat_$(objectid(mp))", looks)      # plain        → NO material authored
+    @test occursin("Mat_$(objectid(m))", looks)    # materialized → pre-authored
+    @test !occursin("Mat_$(objectid(mp))", looks)  # plain → NO material
 
-    # usda_mesh: the plain path STILL emits primvars:displayColor (byte-unchanged — see
-    # the M1 emitters); the materialized path (nothing sentinel) OMITS it.
+    # usda_mesh: the plain path STILL emits primvars:displayColor; the
+    # materialized path (nothing sentinel) OMITS it.
     pts = [(0f0, 0f0, 0f0)]; fcs = [[0]]; nrm = [(0f0, 0f0, 1f0)]
     @test occursin("primvars:displayColor",
                    OmniverseMakie.usda_mesh(pts, OmniverseMakie._flat_faces(fcs)..., nrm, (1f0, 0f0, 0f0)))
@@ -76,36 +81,39 @@ const _M32_COMPOSE_PROG = read(joinpath(@__DIR__, "material_compose_prog.jl"), S
     @test mP !== nothing && parse(Int, mP.captures[1]) > 1000
     @test mM !== nothing && parse(Int, mM.captures[1]) > 1000
 
-    # The materialized render differs substantially from the plain render (binding took).
+    # The materialized render differs substantially from the plain render
+    # (binding took).
     mad = match(r"MEANABSDIFF=([0-9.eE+\-]+)", output)
     @test mad !== nothing && parse(Float64, mad.captures[1]) > 0.02
 
-    # Metallic specular signature: a much higher contrast than the flat diffuse sphere.
+    # Metallic specular signature: a much higher contrast than the flat
+    # diffuse sphere.
     mcr = match(r"CONTRAST_RATIO=([0-9.eE+\-]+)", output)
     @test mcr !== nothing && parse(Float64, mcr.captures[1]) > 1.5
 end
 
 # ---------------------------------------------------------------------------
-# M3.5 — primitive coverage (MeshScatter / Surface / Lines / Scatter / LineSegments)
-# + the carried emissive/opacity BOOL fix.
+# Primitive coverage (MeshScatter / Surface / Lines / Scatter / LineSegments)
+# + the emissive/opacity BOOL enable gates.
 #
-# Unit (parent process, NO render): the `material=` escape hatch is materialized on the
-# OTHER primitive types, the drop-displayColor plumbing OMITS `primvars:displayColor`
-# for a materialized primitive (and KEEPS it byte-unchanged for a plain one — the
-# regression guard), and `emissive`/`opacity` now author OmniPBR's `bool` enable gates
-# (NOT int/float) plus an explicit `emissive_intensity`.
+# Unit (parent process, NO render): the `material=` escape hatch is
+# materialized on the OTHER primitive types, the drop-displayColor plumbing
+# OMITS `primvars:displayColor` for a materialized primitive (and KEEPS it
+# for a plain one — the regression guard), and `emissive`/`opacity` author
+# OmniPBR's `bool` enable gates (NOT int/float) plus an explicit
+# `emissive_intensity`.
 #
-# Integration (subprocess): a materialized meshscatter renders METALLIC (distinct from
-# diffuse), a materialized surface renders + differs from plain, and an emissive lines
-# renders RED — the bool enable_emission + emissive_intensity fix in action.
+# Integration (subprocess): a materialized meshscatter renders METALLIC
+# (distinct from diffuse), a materialized surface renders + differs from
+# plain, and an emissive lines renders RED.
 # ---------------------------------------------------------------------------
 
 @testset "M3.5 primitive materialization + drop-color plumbing (unit)" begin
     fig = Figure(); ax = LScene(fig[1, 1])
     pts = [Point3f(0), Point3f(1, 0, 0), Point3f(1, 1, 0)]
 
-    # is_materialized fires on every primitive type with `material=` (and stays false
-    # for a plain one).
+    # is_materialized fires on every primitive type with `material=` (and
+    # stays false for a plain one).
     ls  = lines!(ax, pts; material = (; emissive = (1, 0, 0)))
     lsp = lines!(ax, pts; color = :magenta)
     sc  = scatter!(ax, pts; markersize = 0.2, material = (; metallic = 1.0))
@@ -118,7 +126,7 @@ end
     @test OmniverseMakie.is_materialized(lsp) == false
     @test OmniverseMakie.is_materialized(scp) == false
 
-    # --- drop-displayColor plumbing: materialized (nothing) OMITS, plain KEEPS ----
+    # --- drop-displayColor plumbing: materialized (nothing) OMITS, plain KEEPS
     I4 = [1.0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
     cpts = [(0f0, 0f0, 0f0), (1f0, 0f0, 0f0)]
     # BasisCurves (Lines / LineSegments)
@@ -147,7 +155,8 @@ end
     le  = lines!(ax, [Point3f(0), Point3f(1, 0, 0)]; material = (; emissive = (1, 0, 0)))
     inp = OmniverseMakie.material_inputs_from(le)
 
-    # enable_emission is a Bool `true` (NOT the int 1) → the OmniPBR `bool` MDL gate binds.
+    # enable_emission is a Bool `true` (NOT the int 1) → the OmniPBR `bool`
+    # MDL gate binds.
     @test inp["enable_emission"] === true
     @test inp["emissive_color"] == (1, 0, 0)
     # emissive_intensity is authored as a Float so emission is VISIBLE.
@@ -161,8 +170,9 @@ end
     @test inpo["enable_opacity"] === true
     @test inpo["opacity_constant"] == 0.4
 
-    # The emitter renders the Bool gate as USD `bool` (= 1), NOT `float … = 1.0`, and
-    # `emissive_intensity` as a float.  (The `Bool` branch precedes the `Real`/float branch.)
+    # The emitter renders the Bool gate as USD `bool` (= 1), NOT
+    # `float … = 1.0`, and `emissive_intensity` as a float.  (The `Bool`
+    # branch precedes the `Real`/float branch.)
     usda = OmniverseMakie.usda_omnipbr_material("Mat_x", inp)
     @test occursin("bool inputs:enable_emission = 1", usda)
     @test !occursin("float inputs:enable_emission", usda)
@@ -187,7 +197,8 @@ const _M35_PRIM_MAT_PROG = read(joinpath(@__DIR__, "primitives_material_prog.jl"
     mcr = match(r"MESHSCATTER_CONTRAST_RATIO=([0-9.eE+\-]+)", output)
     @test mcr !== nothing && parse(Float64, mcr.captures[1]) > 1.3
 
-    # Surface: materialized renders + differs substantially from plain (bind took).
+    # Surface: materialized renders + differs substantially from plain (bind
+    # took).
     sp = match(r"SURFACE_PLAIN nonblack=(\d+)", output)
     sm = match(r"SURFACE_METALLIC nonblack=(\d+)", output)
     @test sp !== nothing && parse(Int, sp.captures[1]) > 2000
@@ -195,8 +206,8 @@ const _M35_PRIM_MAT_PROG = read(joinpath(@__DIR__, "primitives_material_prog.jl"
     smad = match(r"SURFACE_MEANABSDIFF=([0-9.eE+\-]+)", output)
     @test smad !== nothing && parse(Float64, smad.captures[1]) > 0.02
 
-    # Lines: emissive RED — many red-dominant pixels, far more than a plain white curve
-    # (the bool enable_emission + emissive_intensity fix renders emission).
+    # Lines: emissive RED — many red-dominant pixels, far more than a plain
+    # white curve (bool enable_emission + emissive_intensity render emission).
     le = match(r"LINES_EMISSIVE redpix=(\d+)", output)
     lw = match(r"LINES_WHITE redpix=(\d+)", output)
     @test le !== nothing && lw !== nothing

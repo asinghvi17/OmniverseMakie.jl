@@ -2,25 +2,15 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M1.7 — the remaining static 3-D primitives render through ovrtx (the M1 GATE).
-#
-# One subprocess renders each primitive in its OWN Figure+LScene via
-# Makie.colorbuffer (lazy USD setup → insert! → to_ovrtx_object → RT2), plus a
-# COMBINED mesh!+scatter!+lines! scene (proves several to_ovrtx_object methods
-# compose through insert!).  Each render is wrapped so one failure still reports
-# the rest; the parent test parses the per-primitive lines and asserts:
-#   - image ≥ 300²
-#   - non-black pixels > a primitive-specific floor (NOT empty)
-#   - lit fraction < 0.95           (NOT the whole frame)
-#
-# Schemas validated here: UsdGeomPointInstancer (scatter/meshscatter — assumption 4),
-# UsdGeomBasisCurves (lines), UsdGeomMesh grid (surface).  If a primary schema
-# renders black the implementation switches to a merged-mesh fallback (see
-# src/translation/primitives.jl); this test asserts the OUTCOME (non-black) either way.
-#
-# Fixtures match m1.7-context.md.  Surface uses update_cam! to frame the ±3 grid
-# (the offscreen LScene camera is a fixed eye=(3,3,3); it does NOT auto-fit).
-# warmup=40 (RT2 convergence); ~5 renderers in one process (proven by M1.6).
+# Static 3-D primitives render through ovrtx: each in its own Figure+LScene
+# plus a combined mesh!+scatter!+lines! scene, all in one subprocess. The
+# parent parses per-primitive result lines: size >= 300^2, non-black above a
+# per-primitive floor, lit fraction < 0.95. Schemas: UsdGeomPointInstancer
+# (scatter/meshscatter), UsdGeomBasisCurves (lines), UsdGeomMesh grid
+# (surface); a schema that renders black falls back to a merged mesh
+# (src/translation/primitives.jl) — the outcome is asserted either way.
+# Surface frames its ±3 grid via update_cam! (the offscreen LScene camera is
+# fixed; it does not auto-fit).
 # ---------------------------------------------------------------------------
 
 const _M17_PRIM_PROG = """
@@ -57,13 +47,14 @@ function run_prim(name, build!)
     end
 end
 
-# --- the four primitives (fixtures from m1.7-context.md) ---
+# --- the four primitives ---
 run_prim("scatter", ax -> scatter!(ax, rand(Point3f, 50) .* 2; markersize = 0.15, color = :cyan))
 run_prim("meshscatter", ax -> meshscatter!(ax, [Point3f(i, 0, 0) for i in -2:2]; markersize = 0.3, color = :orange))
 run_prim("lines", ax -> lines!(ax, [Point3f(cos(t), sin(t), t/3) for t in range(0, 4pi, length = 60)]; linewidth = 4, color = :magenta))
 run_prim("surface", function (ax)
     surface!(ax, -3:0.3:3, -3:0.3:3, (x, y) -> sin(x) * cos(y))
-    Makie.update_cam!(ax.scene, Vec3f(9, 9, 9), Vec3f(0, 0, 0))   # frame the ±3 grid
+    # frame the ±3 grid
+    Makie.update_cam!(ax.scene, Vec3f(9, 9, 9), Vec3f(0, 0, 0))
 end)
 
 # --- combined: mesh + scatter + lines compose through insert! ---
@@ -76,7 +67,8 @@ end)
 println("OK_PRIMITIVES")
 """
 
-# Per-primitive non-black floor (pixels) — conservative: thin primitives light few px.
+# Per-primitive non-black floor (pixels) — conservative: thin primitives
+# light few px.
 const _M17_FLOORS = Dict(
     "scatter"     => 200,
     "meshscatter" => 300,
@@ -105,7 +97,7 @@ const _M17_FLOORS = Dict(
             W        = parse(Int, m.captures[5])
             @test status == "ok"
             @test H >= 300 && W >= 300
-            @test nonblack > _M17_FLOORS[name]      # NOT empty (renders non-black)
+            @test nonblack > _M17_FLOORS[name]   # NOT empty (renders non-black)
             @test frac < 0.95                       # NOT the whole frame
         end
     end

@@ -1,16 +1,12 @@
 using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
-# Raw OV-layer render + live xform smoke (formerly m0_render_test.jl + m0_update_test.jl,
-# merged into ONE subprocess — the render startup is amortized).
-#
-# The foundational raw-layer proof, below Makie/Screen:
-#   1. OV.Renderer() + open_usd! on the torus fixture render a full-res (1080×1920) frame
-#      with NEAR-TOTAL coverage (≤100 black border pixels) — the strictest whole-frame
-#      oracle in the suite.
-#   2. write_xform! moves /World/Torus by a large translation + reset! restarts RT2
-#      accumulation → ≥50k pixels change by ≥8/255 per channel (the magnitude threshold
-#      excludes RT2 stochastic noise; the spike measured ~597k).
+# Raw OV-layer render + live xform smoke, below Makie/Screen, in one
+# subprocess (render startup amortized):
+#   1. OV.Renderer() + open_usd! on the torus fixture render a full-res
+#      1080×1920 frame with near-total coverage (≤100 black border pixels).
+#   2. write_xform! moves /World/Torus + reset! restarts RT2 accumulation →
+#      ≥50k pixels change by ≥8/255 per channel (magnitude excludes noise).
 
 const _RAW_OV_JL   = joinpath(@__DIR__, "..", "..", "src", "binding", "OV.jl")
 const _RAW_PRODUCT = "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
@@ -35,11 +31,11 @@ H, W = size(img1)
 nb = count(c -> (red(c) + green(c) + blue(c)) > 0, img1)
 println("SIZE=", size(img1), " NONBLACK=", nb)
 @assert size(img1) == (1080, 1920) "unexpected image size: \$(size(img1))"
-# Allow up to 100 edge/border pixels to be black (RT2 may not converge all border
-# samples within 64 warmup frames).
+# Allow up to 100 edge/border pixels to be black (RT2 may not converge all
+# border samples within 64 warmup frames).
 @assert nb >= H * W - 100 "image mostly black: \$nb / \$(H * W)"
 
-# --- move the torus (row-vector convention: translation in the LAST row), reset, re-render ---
+# --- move torus (row-vector: translation in LAST row), reset, re-render ---
 M = Float64[
     1.0  0.0  0.0  0.0
     0.0  1.0  0.0  0.0
@@ -50,7 +46,8 @@ OV.write_xform!(r, PRIM, M)
 OV.reset!(r)
 img2 = OV.render_to_matrix(r, PRODUCT; warmup=WARMUP)
 
-# Count pixels where any channel changed by >= 8/255 (excludes RT2 stochastic noise).
+# Count pixels where any channel changed by >= 8/255 (excludes RT2
+# stochastic noise).
 threshold = 8
 changed = let c = 0
     for h in 1:H, w in 1:W
@@ -73,7 +70,8 @@ println("OK_RAW_RENDER")
 """
 
 @testset "raw OV render + write_xform! (subprocess)" begin
-    # Renderer shader compile (~30–60 s) + three 64-warmup renders; 600 s is ample.
+    # Renderer shader compile (~30–60 s) + three 64-warmup renders; 600 s
+    # is ample.
     exitcode, output = run_ovrtx_subprocess(_RAW_RENDER_PROG; timeout = 600, retries = 2,
                                             ready_marker = "SIZE=")
     @test exitcode == 0

@@ -1,8 +1,8 @@
 # Ported from references/RPRMakieNotes/scripts/earthquakes.jl (Lazaro Alonso).
-# 3-D globe of earthquake points (meshscatter, colormap=:nuuk, sized by magnitude)
-# + a glass box frame (3 × mesh! with opacity material).
+# 3-D globe of earthquake points (meshscatter, colormap=:nuuk, sized by
+# magnitude); the original's glass box frame is dropped (see note below).
 # Earth jpg was loaded-but-unused in the original → omitted here.
-# PointLight arg order swapped: color-first (OmniverseMakie convention), position-second.
+# PointLight arg order swapped: color-first (OmniverseMakie convention).
 using OmniverseMakie, GeometryBasics, Colors, CSV, DataFrames
 
 ## depth unit: km; projects (lon,lat,depth_km) onto unit sphere surface
@@ -31,11 +31,11 @@ function scene_earthquakes()
     # Magnitude → normalised marker size (same formula as original)
     ms = (exp.(mag) .- minimum(exp.(mag))) ./ maximum(exp.(mag) .- minimum(exp.(mag)))
 
-    # 1×1 dark env image — a subtle dome fill so the globe of points reads against black
-    # (the original's EXR is not honored by our backend; the warm PointLight is the key).
+    # 1×1 dark env image: a subtle grey15 dome fill so the globe of points
+    # reads against near-black; the warm PointLight carries the lighting.
     img = [colorant"grey15" for _ in 1:1, _ in 1:1]
 
-    # ★ PointLight: color-first (OmniverseMakie convention), position-second
+    # PointLight: color-first (OmniverseMakie convention), position-second
     lights = [
         EnvironmentLight(1.0, img'[end:-1:1, :]),
         PointLight(RGBf(65.0, 50.0, 35.0), Vec3f(1, 0.25, 0.0)),
@@ -50,12 +50,13 @@ function scene_earthquakes()
         color      = mag,
         colormap   = :nuuk)
 
-    # NOTE: the original's glass box frame is dropped here — our OmniPBR `opacity` glass
-    # renders as a bright opaque panel (no true refraction) that washes out the globe of
-    # points. The earthquake globe is the subject; it reads cleanly against the dark dome.
+    # NOTE: the original's glass box frame is dropped here — our OmniPBR
+    # `opacity` glass renders as a bright opaque panel (no true refraction)
+    # that washes out the globe of points. The earthquake globe is the
+    # subject; it reads cleanly against the dark dome.
 
-    # Frame the globe + glass frame from OUTSIDE the box (the default LScene camera,
-    # without a display(), sits inside the box → a white void).
+    # Frame the globe from outside (the default LScene camera, without a
+    # display(), sits inside the globe → a white void).
     update_cam!(ax.scene, Vec3f(3.4, 3.4, 2.2), Vec3f(0, 0, 0), Vec3f(0, 0, 1))
 
     return fig

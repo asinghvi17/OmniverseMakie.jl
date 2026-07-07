@@ -1,17 +1,13 @@
 using Test
 
 # ---------------------------------------------------------------------------
-# Task A1 — op-error propagation + alive-check ordering in OV.enqueue_wait.
-#
-# 1. open_usd! on a MISSING file must throw OVRTXError.  ovrtx reports a missing USD
-#    file only via ovrtx_op_wait_result_t.error_op_ids (SPIKE-confirmed: both the
-#    enqueue and the wait return OVRTX_API_SUCCESS, num_error_ops=1) — the pre-fix
-#    code, which read neither, reported success.
-# 2. A closed Renderer must error CLEANLY on step!/reset!: the alive check now runs
-#    before the enqueue thunk, so no ccall passes C_NULL into ovrtx.  Reaching OK_A1
-#    (exitcode 0) proves no crash; the pre-fix arg-first order ccall'd C_NULL.
-# Subprocess (needs a real ovrtx Renderer); flush after each block so a later crash
-# cannot swallow earlier evidence.
+# Op-error propagation + alive-check ordering in OV.enqueue_wait.
+# open_usd! on a missing file must throw OVRTXError: ovrtx reports the
+# failure ONLY via ovrtx_op_wait_result_t.error_op_ids — both the enqueue
+# and the wait return OVRTX_API_SUCCESS. A closed Renderer must error
+# cleanly on step!/reset!: the alive check runs before the enqueue thunk,
+# so no ccall passes C_NULL into ovrtx. Subprocess; flush after each block
+# so a later crash cannot swallow earlier evidence.
 # ---------------------------------------------------------------------------
 
 const _A1_PROG = """
@@ -35,7 +31,8 @@ println("OPEN_MISSING_IS_OVRTX=", open_is_ovrtx)
 println("OPEN_MISSING_MSG=", open_msg)
 flush(stdout)
 
-# 2. closed Renderer: step!/reset! must error cleanly BEFORE any ccall (no crash).
+# 2. closed Renderer: step!/reset! must error cleanly BEFORE any ccall
+#    (no crash).
 close(r)
 
 step_threw = false
@@ -65,11 +62,13 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     # Clean teardown (no segfault from a C_NULL ccall on the closed Renderer).
     @test exitcode == 0
     @test contains(output, "OK_A1")
-    # open_usd! on a missing file throws OVRTXError, carrying the resolved op-error string.
+    # open_usd! on a missing file throws OVRTXError, carrying the resolved
+    # op-error string.
     @test contains(output, "OPEN_MISSING_THREW=true")
     @test contains(output, "OPEN_MISSING_IS_OVRTX=true")
     @test occursin("Failed to open USD file", output)
-    # closed Renderer: step!/reset! error cleanly via the alive check (thunk-deferred ccall).
+    # closed Renderer: step!/reset! error cleanly via the alive check
+    # (thunk-deferred ccall).
     @test contains(output, "STEP_CLOSED_THREW=true")
     @test contains(output, "RESET_CLOSED_THREW=true")
 end

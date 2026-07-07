@@ -1,20 +1,16 @@
 # bench/hot_path.jl
 #
-# M2.6 hot-path throughput benchmark.
+# Hot-path throughput benchmark: write throughput for the two persistent
+# binding tiers:
+#   Path A — write_mapped_xform! : N_XFORM=10,000 omni:xform writes per frame
+#   Path B — write_binding!      : N_POINTS=100,000 Float32×3 points per frame
 #
-# Measures write throughput for the two M2 persistent binding tiers:
-#   Path A — write_mapped_xform! : N_XFORM=10,000 omni:xform writes per "virtual frame"
-#   Path B — write_binding!      : N_POINTS=100,000 Float32×3 point writes per "virtual frame"
-#
-# Gate: ≥ 30 Hz for N_XFORM = 10,000 (Path A) OR N_POINTS = 100,000 (Path B).
-# If below target: documents the shortfall and escalates GPU-resident writes to M3.
+# Gate: ≥ 30 Hz for Path A or Path B.
 #
 # Standalone run (requires OVRTX_LIBRARY_PATH set):
 #   OVRTX_LIBRARY_PATH=<path> julia --project=. bench/hot_path.jl
 #
-# Via test harness: test/m2_bench_test.jl wraps this via run_ovrtx_subprocess.
-#
-# Output format: KEY=VALUE lines; parsed by the test harness.
+# Output format: grepable KEY=VALUE lines. No test wraps this file.
 # Always exits 0 — shortfalls are documented, not fatal.
 # Hardware target: NVIDIA A5000.
 
@@ -39,14 +35,12 @@ println("BENCH_N_XFORM=$(N_XFORM) N_POINTS=$(N_POINTS) GATE_HZ=$(GATE_HZ)")
 
 # ── Minimal USDA helper ───────────────────────────────────────────────────────
 #
-# Build a standalone USDA layer containing one Mesh prim with N point3f[] entries.
-# The `points` attribute is pre-authored so the array binding (EXISTING_ONLY mode)
-# can attach to it at its current size.
-# The `omni:xform` attribute (Path A) does NOT need to be pre-authored: M2.4 proved
-# that create_binding EXISTING_ONLY targets the PRIM (not the attribute), and
-# map_attribute/write_attribute create the attribute on first write.
-#
-# Convention (M2 constraints): no upAxis in reference layers.
+# Build a standalone USDA layer containing one Mesh prim with N point3f[]
+# entries. The `points` attribute is pre-authored so the array binding
+# (EXISTING_ONLY mode) can attach to it at its current size. The `omni:xform`
+# attribute (Path A) needs no pre-author: create_binding EXISTING_ONLY
+# targets the prim (not the attribute), and map_attribute/write_attribute
+# create the attribute on first write. Reference layers must not set upAxis.
 function _make_mesh_usda(N::Int; prim_name::String = "bench")
     buf = IOBuffer()
     println(buf, "#usda 1.0")
@@ -85,7 +79,8 @@ path_a_ok = false
 
 r_a = OV.Renderer()
 try
-    # Minimal 3-point mesh so the prim exists (binding EXISTING_ONLY targets the prim).
+    # Minimal 3-point mesh so the prim exists (binding EXISTING_ONLY
+    # targets the prim).
     OV.open_usd_string!(r_a, _make_mesh_usda(3; prim_name = "bench_xform"))
 
     xb = OV.create_binding(
@@ -95,7 +90,8 @@ try
         semantic = L.OVRTX_SEMANTIC_XFORM_MAT4x4,
         optimize = true)
 
-    # Identity matrix reused every call (translation in last row — USD row-vector form).
+    # Identity matrix reused every call (translation in last row — USD
+    # row-vector form).
     mat = Float64[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
 
     # Warmup: let JIT compile write_mapped_xform! + ovrtx internal paths settle.
@@ -137,10 +133,9 @@ end
 # ── Path B: write_binding! (points array) ────────────────────────────────────
 #
 # Each "frame": one write_binding! call pushing N_POINTS = 100,000 Float32×3
-# elements through a persistent array binding (EXISTING_ONLY, no OPTIMIZE flag).
-# Exercises the array-tier write path (bind+write), closing the M2.4 coverage gap
-# (the array tier was spike-proven but not in the committed benchmark suite).
-# Measures frame time and effective update rate (points/second).
+# elements through a persistent array binding (EXISTING_ONLY, no OPTIMIZE
+# flag). Exercises the array-tier write path (bind+write) and measures frame
+# time and effective update rate (points/second).
 
 println()
 println("=== PATH B: write_binding! points (N_POINTS=$(N_POINTS), M_FRAMES=$(M_FRAMES_B)) ===")
@@ -151,7 +146,8 @@ path_b_ok = false
 r_b = OV.Renderer()
 try
     # Generate and open a stage whose `points` attribute has N_POINTS elements.
-    # The binding attaches to this pre-existing attribute (EXISTING_ONLY is satisfied).
+    # The binding attaches to this pre-existing attribute (EXISTING_ONLY
+    # is satisfied).
     t_gen  = @elapsed usda_b = _make_mesh_usda(N_POINTS; prim_name = "bench_pts")
     println("  USDA $(round(length(usda_b) / 1024, sigdigits = 3)) KiB generated in $(round(t_gen, sigdigits = 3)) s")
 
@@ -216,17 +212,6 @@ if !gate_pass
     println("# is the bottleneck at this scale.  M3 will pin GPU-resident write buffers")
     println("# (DLPack kDLCUDA device type) to eliminate the host→device transfer overhead.")
 end
-
-# ── Scatter/MeshScatter gap note ─────────────────────────────────────────────
-println()
-println("SCATTER_ROUTE_DECISION=b_documented_carry")
-println("# Scatter/MeshScatter per-instance 'positions' via UsdGeomPointInstancer is")
-println("# a no-op today: push_to_ovrtx! routes :positions_transformed_f32c to the")
-println("# 'points' attribute, but the instancer's per-instance attribute is 'positions'.")
-println("# Decision (b): benchmark the WORKING paths (Mesh xform + Mesh points), which")
-println("# independently cover the gate; the scatter route fix is a documented M3 carry.")
-println("# (The whole-scatter omni:xform write still works — only per-instance position")
-println("# updates are a no-op.)")
 
 println()
 println("BENCH_OK")

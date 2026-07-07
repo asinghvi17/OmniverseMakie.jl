@@ -1,6 +1,7 @@
 # Vendored from references/RPRMakieNotes/scripts/pointsfont.jl (Lazaro Alonso).
-# Builds 3-D letter-glyph meshes from font outlines via Luxor/Cairo path extraction.
-# Included by helix.jl; the leading underscore excludes this file from run_all.jl's scene glob.
+# Builds 3-D letter-glyph meshes from font outlines via Luxor/Cairo path
+# extraction. Included by helix.jl; the leading underscore excludes this
+# file from run_all.jl's scene glob.
 using OmniverseMakie, GeometryBasics, Luxor
 
 """

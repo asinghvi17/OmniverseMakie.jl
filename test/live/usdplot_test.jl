@@ -1,17 +1,21 @@
 # usdplot recipe + bind_usd! — pure logic + GPU behaviour (subprocess).
 #
-# Pure (in-process): the recipe (childless/atomic, abspath convert_arguments, data_limits == bbox),
-# target parsing (prim vs attr split, xformOp:* refusal, empty-segment + identifier validation),
-# the up-fold matrix, value classification, and the WeakKeyDict registry (add / replace / unbind).
+# Pure (in-process): the recipe (childless/atomic, abspath convert_arguments,
+# data_limits == bbox), target parsing (prim vs attr split, xformOp:* refusal,
+# empty-segment + identifier validation), the up-fold matrix, value
+# classification, and the WeakKeyDict registry (add / replace / unbind).
 #
-# GPU (subprocess, pixel-verified):
-#   • compose an on-disk arm.usda into a live stage → red quad renders; a displayColor attribute
-#     binding flips it red→green; a prim (transform) binding translates it (centroid moves ≫20 px);
-#     a bogus target throws OVRTXError AT BIND TIME (fail-fast); delete! removes it (pixels gone).
-#   • accumulate_across_frames: a BOUND update fires ZERO resets (non-structural), a structural
-#     insert fires one; default mode resets on the bound update (control).
-#   • up = :y folds a +90° X rotation so a quad authored flat in the file's X-Z plane renders
-#     face-on (many px) where up = :z leaves it edge-on (few px).
+# GPU (subprocess, pixel oracles):
+#   • compose an on-disk arm.usda into a live stage → red quad renders; a
+#     displayColor attribute binding flips it red→green; a prim (transform)
+#     binding translates it (centroid moves ≫20 px); a bogus target throws
+#     OVRTXError AT BIND TIME (fail-fast); delete! removes it (pixels gone).
+#   • accumulate_across_frames: a BOUND update fires ZERO resets
+#     (non-structural), a structural insert fires one; default mode resets
+#     on the bound update (control).
+#   • up = :y folds a +90° X rotation so a quad authored flat in the file's
+#     X-Z plane renders face-on (many px) where up = :z leaves it edge-on
+#     (few px).
 
 using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
@@ -21,17 +25,17 @@ using OmniverseMakie: OV
 import Makie
 using Makie: Scene, Observable, Rect3f, Rect3d, Point3f, Vec3f, Vec4f, RGBf, translationmatrix
 
-# =============================================================================================
+# =============================================================================
 # Pure logic (no GPU)
-# =============================================================================================
+# =============================================================================
 
 @testset "usdplot pure: recipe / parsing / registry / dispatch" begin
     @testset "recipe is a childless atomic plot; abspath; data_limits" begin
         sc = Scene()
         p  = usdplot!(sc, "rel/car.usdc")
         @test p isa OM.USDPlot
-        @test isempty(p.plots)                       # childless → backend atomic path
-        @test isabspath(p[1][])                      # convert_arguments absolutized the path
+        @test isempty(p.plots)   # childless → backend atomic path
+        @test isabspath(p[1][])  # convert_arguments absolutized the path
         @test endswith(p[1][], "/rel/car.usdc")
         @test p.up[] === :z                          # default up
         @test Makie.data_limits(p) == Rect3d(p.bbox[])
@@ -45,8 +49,8 @@ using Makie: Scene, Observable, Rect3f, Rect3d, Point3f, Vec3f, Vec4f, RGBf, tra
         pz = usdplot!(Scene(), "x.usd"; up = :z)
         py = usdplot!(Scene(), "x.usd"; up = :y)
         M  = translationmatrix(Vec3f(1, 2, 3))
-        @test OM._usdplot_model(pz, M) == M                    # :z → identity passthrough
-        @test OM._usdplot_model(py, M) == M * OM.ROT_X_90      # :y → +90° X fold
+        @test OM._usdplot_model(pz, M) == M                # :z → passthrough
+        @test OM._usdplot_model(py, M) == M * OM.ROT_X_90  # :y → +90° X fold
         # ROT_X_90 maps the asset's +Y onto the scene's +Z
         @test isapprox(OM.ROT_X_90 * Vec4f(0, 1, 0, 1), Vec4f(0, 0, 1, 1); atol = 1e-6)
     end
@@ -74,10 +78,11 @@ using Makie: Scene, Observable, Rect3f, Rect3d, Point3f, Vec3f, Vec4f, RGBf, tra
         @test OM._is_vec3(Vec3f(1, 2, 3))
         @test OM._is_vec3(Point3f(1, 2, 3))
         @test OM._is_vec3((1.0, 2.0, 3.0))
-        @test !OM._is_vec3([1.0, 2.0, 3.0])      # a plain Vector is the ARRAY case, not a single vec3
+        @test !OM._is_vec3([1.0, 2.0, 3.0])  # a plain Vector is the ARRAY case
         @test !OM._is_vec3(1.0)
         @test !OM._is_vec3(RGBf(1, 0, 0))
-        # an unsupported attribute value throws BEFORE touching the renderer (r = nothing here)
+        # an unsupported attribute value throws BEFORE touching the renderer
+        # (r = nothing here)
         @test_throws ArgumentError OM._write_usd_attr!(nothing, "/p", "a", :nope; prim_mode = nothing)
         @test_throws ArgumentError OM._write_usd_attr!(nothing, "/p", "a", "str"; prim_mode = nothing)
         # a prim binding needs a 4×4 matrix
@@ -92,7 +97,7 @@ using Makie: Scene, Observable, Rect3f, Rect3d, Point3f, Vec3f, Vec4f, RGBf, tra
         @test bind_usd!(p, "/Arm", o1) === o1
         @test length(OM._USD_BINDINGS[p]) == 1
         o2 = Observable(translationmatrix(Vec3f(1, 0, 0)))
-        bind_usd!(p, "/Arm", o2)                                     # same target → replace
+        bind_usd!(p, "/Arm", o2)  # same target → replace
         @test length(OM._USD_BINDINGS[p]) == 1
         @test OM._USD_BINDINGS[p][1].obs === o2
         bind_usd!(p, "/Arm/Geo.primvars:displayColor", Observable([RGBf(1, 0, 0)]))
@@ -107,13 +112,14 @@ using Makie: Scene, Observable, Rect3f, Rect3d, Point3f, Vec3f, Vec4f, RGBf, tra
     end
 end
 
-# =============================================================================================
+# =============================================================================
 # GPU subprocess: shared asset authoring + pixel helpers
-# =============================================================================================
+# =============================================================================
 
-# The arm.usda-style asset (defaultPrim Model; a red `Mesh` quad from `points_str`, wrapped in an
-# `Arm` Xform so a prim binding has a subprim to drive).  Built PARENT-side and embedded into each
-# prog via `repr(...)` (a single-line escaped literal) so no nested `"""` collides with the prog's
+# The arm.usda-style asset (defaultPrim Model; a red `Mesh` quad from
+# `points_str`, wrapped in an `Arm` Xform so a prim binding has a subprim to
+# drive).  Built PARENT-side and embedded into each prog via `repr(...)` (a
+# single-line escaped literal) so no nested `"""` collides with the prog's
 # own triple-quote.
 _arm_usda(points_str) = """#usda 1.0
 (
@@ -140,10 +146,12 @@ def Xform "Model"
 """
 # X-Y quad (faces +Z): rendered face-on by a camera on +Z.
 const _ARM_XY = _arm_usda("(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)")
-# X-Z quad (lies flat, y=0): edge-on to a +Z camera, but a +90° X fold stands it up face-on.
+# X-Z quad (lies flat, y=0): edge-on to a +Z camera, but a +90° X fold
+# stands it up face-on.
 const _ARM_XZ = _arm_usda("(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)")
 
-# Prelude spliced into each prog: `using` lines + colour/centroid pixel oracles (no `$`, no `"""`).
+# Prelude spliced into each prog: `using` lines + colour/centroid pixel
+# oracles (no `$`, no `"""`).
 const _USDPLOT_PROG_PRELUDE = """
 using OmniverseMakie, ColorTypes, FixedPointNumbers
 const OM = OmniverseMakie
@@ -163,15 +171,22 @@ function centroid(img)
 end
 """
 
-# ---------------------------------------------------------------------------------------------
+# Temp asset paths are generated PARENT-side (not via the child's `tempname()`)
+# so the parent can `rm` them even when a child crashes before its own cleanup.
+const _USDPLOT_CORE_ARM  = tempname() * ".usda"
+const _USDPLOT_ACCUM_ARM  = tempname() * ".usda"
+const _USDPLOT_ACCUM_ARM2 = tempname() * ".usda"
+const _USDPLOT_UP_ARM    = tempname() * ".usda"
+
+# -----------------------------------------------------------------------------
 # Prog A — compose + displayColor flip + prim move + fail-fast + delete
-# ---------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 const _USDPLOT_CORE_PROG = """
 $(_USDPLOT_PROG_PRELUDE)
 
 OM.activate!(warmup = 40, samples = 128)
-const ARM = tempname() * ".usda"
+const ARM = $(repr(_USDPLOT_CORE_ARM))
 write(ARM, $(repr(_ARM_XY)))
 
 scene = Scene(size = (300, 300)); cam3d!(scene)
@@ -218,6 +233,7 @@ println("OK_USDPLOT_CORE")
 @testset "usdplot GPU: compose + displayColor + prim move + fail-fast + delete (subprocess)" begin
     exitcode, out = run_ovrtx_subprocess(_USDPLOT_CORE_PROG; timeout = 900, retries = 4,
                                          ready_marker = "OK_USDPLOT_CORE")
+    rm(_USDPLOT_CORE_ARM; force = true)   # robust cleanup (child may have crashed)
     contains(out, "OK_USDPLOT_CORE") || @info "usdplot core output" out
     @test exitcode == 0
     @test contains(out, "OK_USDPLOT_CORE")
@@ -225,26 +241,33 @@ println("OK_USDPLOT_CORE")
     getint(tag)   = (m = match(Regex("$(tag)=(-?\\d+)"), out); m === nothing ? nothing : parse(Int, m.captures[1]))
     getfloat(tag) = (m = match(Regex("$(tag)=(-?[\\d.]+)"), out); m === nothing ? nothing : parse(Float64, m.captures[1]))
 
-    @test getint("BASE_NB")   !== nothing && getint("BASE_NB")   > 300   # asset composed + rendered
-    @test getint("BASE_RED")  !== nothing && getint("BASE_RED")  > 300   # red-dominant
-    @test getint("COLOR_GREEN") !== nothing && getint("COLOR_GREEN") > 300  # displayColor flipped to green
-    @test getint("COLOR_RED")   !== nothing && getint("COLOR_RED")   < 50   # ...and no longer red
-    @test getfloat("MOVE_DCOL") !== nothing && getfloat("MOVE_DCOL") > 30   # prim binding moved it right
-    @test contains(out, "FAILFAST_THREW=true")                             # bogus bind threw at bind time
-    @test contains(out, "FAILFAST_STALE=false")                            # ...and left no bogus binding
-    @test getint("DELETE_NB") !== nothing && getint("DELETE_NB") < 75      # delete! removed the reference
+    # asset composed + rendered
+    @test getint("BASE_NB")   !== nothing && getint("BASE_NB")   > 300
+    # red-dominant
+    @test getint("BASE_RED")  !== nothing && getint("BASE_RED")  > 300
+    # displayColor flipped to green
+    @test getint("COLOR_GREEN") !== nothing && getint("COLOR_GREEN") > 300
+    # ...and no longer red
+    @test getint("COLOR_RED")   !== nothing && getint("COLOR_RED")   < 50
+    # prim binding moved it right
+    @test getfloat("MOVE_DCOL") !== nothing && getfloat("MOVE_DCOL") > 30
+    @test contains(out, "FAILFAST_THREW=true")  # bogus bind threw at bind time
+    @test contains(out, "FAILFAST_STALE=false")  # ...and left no bogus binding
+    # delete! removed the reference
+    @test getint("DELETE_NB") !== nothing && getint("DELETE_NB") < 75
 end
 
-# ---------------------------------------------------------------------------------------------
-# Prog B — accumulate suppresses the reset on a bound update; a structural insert still resets
-# ---------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Prog B — accumulate suppresses the reset on a bound update; a structural
+# insert still resets
+# -----------------------------------------------------------------------------
 
 const _USDPLOT_ACCUM_PROG = """
 $(_USDPLOT_PROG_PRELUDE)
 
 OM.activate!(warmup = 4)
-const ARM  = tempname() * ".usda"; write(ARM,  $(repr(_ARM_XY)))
-const ARM2 = tempname() * ".usda"; write(ARM2, $(repr(_ARM_XY)))
+const ARM  = $(repr(_USDPLOT_ACCUM_ARM));  write(ARM,  $(repr(_ARM_XY)))
+const ARM2 = $(repr(_USDPLOT_ACCUM_ARM2)); write(ARM2, $(repr(_ARM_XY)))
 
 resets = Ref(0)
 OV._RESET_OBSERVER[] = () -> (resets[] += 1)
@@ -254,13 +277,13 @@ scene = Scene(size = (200, 200)); cam3d!(scene)
 update_cam!(scene, Vec3f(0, 0, 14), Vec3f(0, 0, 0), Vec3f(0, 1, 0))
 p = usdplot!(scene, ARM)
 screen = OM.Screen(scene; accumulate_across_frames = true, warmup = 4, accumulation_preroll = 8)
-Makie.colorbuffer(screen)                       # author (structural reset — ignored below)
+Makie.colorbuffer(screen)  # author (structural reset — ignored below)
 col = Observable([RGBf(1, 0, 0)])
 bind_usd!(p, "/Arm/Geo.primvars:displayColor", col)
 resets[] = 0
-col[] = [RGBf(0, 1, 0)]                          # a BOUND (non-structural) update
+col[] = [RGBf(0, 1, 0)]  # a BOUND (non-structural) update
 Makie.colorbuffer(screen)
-println("ACCUM_BOUND_RESETS=", resets[])        # expect 0 (accumulate keeps the history)
+println("ACCUM_BOUND_RESETS=", resets[])  # expect 0 (accumulate keeps history)
 
 resets[] = 0
 p2 = usdplot!(scene, ARM2)
@@ -291,26 +314,30 @@ println("OK_USDPLOT_ACCUM")
 @testset "usdplot GPU: accumulate reset suppression on bound update (subprocess)" begin
     _, out = run_ovrtx_subprocess(_USDPLOT_ACCUM_PROG; timeout = 900, retries = 4,
                                   ready_marker = "OK_USDPLOT_ACCUM")
+    rm(_USDPLOT_ACCUM_ARM; force = true); rm(_USDPLOT_ACCUM_ARM2; force = true)
     contains(out, "OK_USDPLOT_ACCUM") || @info "usdplot accumulate output" out
     @test contains(out, "OK_USDPLOT_ACCUM")
 
     m_bound  = match(r"ACCUM_BOUND_RESETS=(\d+)", out)
     m_insert = match(r"ACCUM_INSERT_RESETS=(\d+)", out)
     m_def    = match(r"DEFAULT_BOUND_RESETS=(\d+)", out)
-    @test m_bound  !== nothing && parse(Int, m_bound.captures[1])  == 0   # accumulate: no reset
-    @test m_insert !== nothing && parse(Int, m_insert.captures[1]) >= 1   # structural: resets
-    @test m_def    !== nothing && parse(Int, m_def.captures[1])    >= 1   # default: bound update resets
+    # accumulate: no reset; structural: resets; default: bound update resets
+    @test m_bound  !== nothing && parse(Int, m_bound.captures[1])  == 0
+    @test m_insert !== nothing && parse(Int, m_insert.captures[1]) >= 1
+    @test m_def    !== nothing && parse(Int, m_def.captures[1])    >= 1
 end
 
-# ---------------------------------------------------------------------------------------------
-# Prog C — up = :y stands a Y-up (X-Z-plane) quad upright (face-on) vs edge-on for up = :z
-# ---------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Prog C — up = :y stands a Y-up (X-Z-plane) quad upright (face-on) vs
+# edge-on for up = :z
+# -----------------------------------------------------------------------------
 
 const _USDPLOT_UP_PROG = """
 $(_USDPLOT_PROG_PRELUDE)
 
 OM.activate!(warmup = 40, samples = 128)
-const ARM = tempname() * ".usda"; write(ARM, $(repr(_ARM_XZ)))   # quad lies flat in the file's X-Z plane
+# quad lies flat in the file's X-Z plane
+const ARM = $(repr(_USDPLOT_UP_ARM)); write(ARM, $(repr(_ARM_XZ)))
 
 function render_up(up)
     scene = Scene(size = (300, 300)); cam3d!(scene)
@@ -334,6 +361,7 @@ println("OK_USDPLOT_UP")
 @testset "usdplot GPU: up=:y folds a Y-up quad upright (subprocess)" begin
     _, out = run_ovrtx_subprocess(_USDPLOT_UP_PROG; timeout = 900, retries = 4,
                                   ready_marker = "OK_USDPLOT_UP")
+    rm(_USDPLOT_UP_ARM; force = true)
     contains(out, "OK_USDPLOT_UP") || @info "usdplot up-axis output" out
     @test contains(out, "OK_USDPLOT_UP")
 

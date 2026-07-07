@@ -1,10 +1,8 @@
-# Volumes M1 Task 3 — end-to-end VDB render (subprocess, env-gated, skip-if-absent).
-#
-# With IndeX enabled (OMNIVERSEMAKIE_INDEX_LIBS), author the on-disk torus.vdb into a Screen's
-# stage via author_vdb_volume! and render it through the existing RT2 → IndeX Direct path; assert
-# a non-black volume appeared and IndeX was enabled.  Skips cleanly when the Kit IndeX libs dir or
-# the sample VDB is absent (so CI without them stays green); on THIS box they are present, so it
-# actually renders (the spike/Task-2 verification saw ~9.5k non-black px @ 256²).
+# End-to-end VDB render (subprocess, env-gated). With IndeX enabled
+# (OMNIVERSEMAKIE_INDEX_LIBS), author the on-disk torus.vdb into a Screen's
+# stage via author_vdb_volume! and render through RT2 → IndeX Direct; assert
+# a non-black volume and IndeX enabled. Skips cleanly when the Kit IndeX
+# libs dir or the sample VDB is absent.
 
 using Test
 
@@ -19,9 +17,9 @@ import OmniverseMakie as OM
 using OmniverseMakie: OV
 OM.activate!(warmup = 48)
 scene = Scene(size=(256,256)); cam3d!(scene)
-# Frame the torus_fog grid (near origin) from the spike-verified viewpoint.
+# Frame the torus_fog grid (near origin).
 update_cam!(scene, Vec3f(38,38,22), Vec3f(0,0,0), Vec3f(0,0,1))
-screen = OM.Screen(scene)                        # creating the Screen enables IndeX (env is set)
+screen = OM.Screen(scene)   # creating the Screen enables IndeX (env is set)
 OM.author_root_from_scene!(screen, scene; resolution = screen.fb_size)
 OM.author_vdb_volume!(screen, scene, "$(_VDB)"; field="torus_fog", colormap=:viridis)
 img = OV.render_to_matrix(screen.renderer, screen.product; warmup = 48)
@@ -36,18 +34,19 @@ println("OK_VOL_RENDER")
     if !isdir(_LIBS) || !isfile(_VDB)
         @test_skip "IndeX libs ($_LIBS) or sample VDB ($_VDB) absent — volume render test skipped"
     else
-        # retries=4: absorbs the known intermittent ovrtx startup crash
-        # (GeometryGroup::attachToContext), same as the other volumes render tests (E3 pattern;
-        # this file was the one render test left unconverted — it flaked the integration gate).
+        # retries=4 absorbs the intermittent ovrtx startup crash
+        # (GeometryGroup::attachToContext).
         ec, out = run_ovrtx_subprocess(_VOL_RENDER_PROG; timeout = 600,
             retries = 4, ready_marker = "VOL_NONBLACK=",
             env = ("OMNIVERSEMAKIE_INDEX_LIBS" => _LIBS))
-        # Dump the full subprocess log only on failure (it is thousands of ovrtx lines).
+        # Dump the full subprocess log only on failure (it is thousands of
+        # ovrtx lines).
         contains(out, "OK_VOL_RENDER") || @info "Volume render output (failure)" out
         @test ec == 0
         @test contains(out, "INDEX_ENABLED=true")
         @test contains(out, "OK_VOL_RENDER")
         m = match(r"VOL_NONBLACK=(\d+)", out)
-        @test m !== nothing && parse(Int, m.captures[1]) > 500   # a volume appeared (spike ~9179 @ 512²)
+        # a volume appeared
+        @test m !== nothing && parse(Int, m.captures[1]) > 500
     end
 end

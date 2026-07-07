@@ -3,18 +3,16 @@ using OmniverseMakie: OV
 using ColorTypes, FixedPointNumbers
 
 # ---------------------------------------------------------------------------
-# Task A2 — leak-proof readback + with_mapped_hdr.
-#
-# 1. Pure: the single-pass OV.cwh_to_matrix must equal the OLD two-pass loop
-#    (inlined below as an independent oracle) on synthetic [C,W,H] bytes —
-#    proving the reinterpret/permute collapse preserves the top-left-origin,
-#    no-y-flip, R,G,B,A channel order (dlpack.jl header, offscreen/orientation_test).
+# Leak-proof readback + with_mapped_hdr.
+# 1. Pure: the single-pass OV.cwh_to_matrix must equal an independent
+#    two-pass oracle (inlined below) on synthetic [C,W,H] bytes, preserving
+#    top-left origin, no y-flip, and R,G,B,A channel order.
 # 2. Subprocess: with_mapped_hdr passes f's result through AND unmaps in a
-#    `finally` when f throws — asserted by a *subsequent* map succeeding on the
-#    same render var (a leaked mapping would block it).  CPU map, no CUDA/GL.
+#    `finally` when f throws — asserted by a subsequent map succeeding on the
+#    same render var (a leaked mapping would block it). CPU map, no CUDA/GL.
 # ---------------------------------------------------------------------------
 
-# The pre-A2 dlpack.jl algorithm, verbatim, as the equivalence oracle: the
+# An independent two-pass implementation as the equivalence oracle: the
 # single-pass path is checked against independent code, never against itself.
 function _a2_old_cwh(pixels::Array{UInt8,3})
     C, W, H = size(pixels)
@@ -46,14 +44,16 @@ end
     @test got isa Matrix{RGBA{N0f8}}
     @test size(got) == (H, W)            # top-left origin, no flip: rows = H
     @test got == want                    # byte-identical to the two-pass oracle
-    # one texel, spelled out: channel c → RGBA component in R,G,B,A order (no swap)
+    # one texel, spelled out: channel c → RGBA component in R,G,B,A order
+    # (no swap)
     @test got[2, 3] == RGBA{N0f8}(
         reinterpret(N0f8, pixels[1, 3, 2]), reinterpret(N0f8, pixels[2, 3, 2]),
         reinterpret(N0f8, pixels[3, 3, 2]), reinterpret(N0f8, pixels[4, 3, 2]))
 end
 
-# HDR path: render a tiny scene, map HdrColor on CPU (no CUDA/GL) and exercise
-# with_mapped_hdr's result-passthrough + unmap-in-finally, plus the map_cpu_f32 wrapper.
+# HDR path: render a tiny scene, map HdrColor on CPU (no CUDA/GL) and
+# exercise with_mapped_hdr's result-passthrough + unmap-in-finally, plus the
+# map_cpu_f32 wrapper.
 const _A2_HDR_PROG = """
 using OmniverseMakie
 using OmniverseMakie: OV
@@ -68,7 +68,8 @@ for _ in 1:8   # warm frames so HdrColor is resident
 end
 sr = OV.step!(screen.renderer, screen.product; timeout_ns = UInt64(60_000_000_000))
 
-# 1. passthrough: with_mapped_hdr returns f's value verbatim; f sees a [C=4,W,H] Float16 view.
+# 1. passthrough: with_mapped_hdr returns f's value verbatim; f sees a
+#    [C=4,W,H] Float16 view.
 res = OV.with_mapped_hdr(sr, "HdrColor") do raw16, W, H
     (size(raw16), W, H, eltype(raw16))
 end
@@ -88,14 +89,15 @@ end
 println("THREW=", threw)
 println("THREW_EXPECTED=", expected)
 
-# 3. ...and must have unmapped in `finally`: a subsequent map on the SAME var succeeds
-#    (a leaked mapping would block/error this).
+# 3. ...and must have unmapped in `finally`: a subsequent map on the SAME
+#    var succeeds (a leaked mapping would block/error this).
 val = OV.with_mapped_hdr(sr, "HdrColor") do raw16, W, H
     Float32(raw16[1, 1, 1])
 end
 println("AFTER_MAP_OK=", isfinite(val))
 
-# 4. map_cpu_f32 (thin wrapper over with_mapped_hdr) still yields a Float32 [C,W,H].
+# 4. map_cpu_f32 (thin wrapper over with_mapped_hdr) still yields a Float32
+#    [C,W,H].
 px, W2, H2 = OV.map_cpu_f32(sr, "HdrColor")
 println("F32_WRAPPER_OK=", px isa Array{Float32,3} && size(px) == (4, W2, H2))
 
@@ -106,15 +108,18 @@ println("OK_A2_HDR")
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 @testset "A2 with_mapped_hdr passthrough + unmap-on-throw (subprocess)" begin
-    # Retry the known intermittent ovrtx GeometryGroup::attachToContext startup crash:
-    # re-run until the child reaches its first map.
-    _, out = run_ovrtx_subprocess(_A2_HDR_PROG; timeout = 600, retries = 4,
-                                  ready_marker = "PASSTHROUGH_OK=")
+    # Retry the intermittent ovrtx startup crash
+    # (GeometryGroup::attachToContext): re-run until the first map.
+    exitcode, out = run_ovrtx_subprocess(_A2_HDR_PROG; timeout = 600, retries = 4,
+                                         ready_marker = "PASSTHROUGH_OK=")
     contains(out, "OK_A2_HDR") || @info "A2 with_mapped_hdr output" out
+    @test exitcode == 0                        # clean teardown, no segfault
     @test contains(out, "OK_A2_HDR")           # subprocess completed all work
-    @test contains(out, "PASSTHROUGH_OK=true") # f's result passed through; view is [4,W,H] Float16
+    # f's result passed through; view is [4,W,H] Float16
+    @test contains(out, "PASSTHROUGH_OK=true")
     @test contains(out, "THREW=true")          # throwing f propagates
     @test contains(out, "THREW_EXPECTED=true")
-    @test contains(out, "AFTER_MAP_OK=true")   # mapping released in finally → re-map works
+    # mapping released in finally → re-map works
+    @test contains(out, "AFTER_MAP_OK=true")
     @test contains(out, "F32_WRAPPER_OK=true") # map_cpu_f32 wrapper intact
 end

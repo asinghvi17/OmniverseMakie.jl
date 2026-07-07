@@ -1,27 +1,10 @@
 # replace_scene! — hybrid embedded viewport (subprocess, GLMakie).
-#
-# Proves the RPRMakie-style hybrid end to end: in a displayed GLMakie figure with an LScene
-# (3D, left) beside an Axis (2D diagnostic, right), replace_scene!(lscene) replaces ONLY the
-# LScene with a live ovrtx render. Decisive occlusion + isolation check via a pure-GL baseline:
-#   • the LEFT (embedded) region CHANGES vs the pre-replace GL baseline — ovrtx now draws there;
-#   • the RIGHT (2D diagnostic) region is ~UNCHANGED — the other axis stays GLMakie;
-#   • the ovrtx present buffer is non-black and RESPONDS to orbiting the LScene camera;
-#   • close() frees the ovrtx Screen but leaves the host GLMakie window open, and is idempotent.
-#
-# Second prog: a usdplot INSIDE the replaced LScene.  The childless USDPlot reaches GLMakie's
-# atomic branch (insert! → draw_atomic), so without the ext's no-op draw_atomic the
-# `display(fig)` PRECONDITION of replace_scene! MethodErrors before any RTX work starts.
-# Asserts: display succeeds, plain GL draws NOTHING for the usdplot, and the replace_scene!
-# overlay then shows the USD asset via ovrtx.
-#
-# Third prog (CarComponents field report): rotated target + scripted recording.
-#   • a root `rotate!(ls.scene, Q_X90)` (the Z-up trick) must NOT rotate the overlay — pre-fix
-#     the sub-scene inherited the target's Transformation, the blit quad went edge-on, and the
-#     composite silently equaled the pure-GL baseline (LEFT_DIFF == 0.0, repro-proven);
-#   • the recording recipe: `stop_renderloop!(glscr; close_after_renderloop = false)` BEFORE
-#     replace_scene! (the corrected precondition accepts a stopped loop on an open screen), then
-#     `record_frame!` drives fully synchronous ticks and a >64KB child-process pipe write
-#     completes (the field failure: a hot on-demand loop starved libuv → ffmpeg write hung).
+# Three progs: (1) replace ONLY an LScene with a live ovrtx render beside a
+# GLMakie Axis (occlusion/isolation vs a pure-GL baseline, orbit response,
+# composite re-upload guard, idempotent close); (2) a usdplot INSIDE the
+# replaced LScene — the childless USDPlot needs the ext's no-op draw_atomic
+# so `display(fig)` (the replace_scene! precondition) succeeds; (3) a rotated
+# target + stopped-loop recording via record_frame!.
 
 using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
@@ -39,36 +22,49 @@ ax  = Axis(fig[1, 2]); lines!(ax, 0:0.1:10, sin.(0:0.1:10); color = :blue, linew
 
 glscr = GLMakie.Screen(; visible = false)
 display(glscr, fig.scene)
-base = copy(GLMakie.colorbuffer(glscr))          # pure-GL baseline (lays out the viewport too)
+base = copy(GLMakie.colorbuffer(glscr))  # pure-GL baseline (lays out viewport)
 W = size(base, 2); half = W ÷ 2
+
+# steps_per_tick < 1 desyncs accumulation — replace_scene! must reject it with
+# an ArgumentError before building any ovrtx Screen (no renderer leak).
+_spt_ok = false
+try
+    OM.replace_scene!(ls; steps_per_tick = 0)
+catch e
+    global _spt_ok = e isa ArgumentError
+end
+println("STEPS_PER_TICK_GUARD=", _spt_ok)
 
 session = OM.replace_scene!(ls)
 println("SESSION_TYPE=", nameof(typeof(session)))
 println("AUTHORED_PLOTS=", length(session.screen.plot2robj))
 
-# Drive a few host frames — each colorbuffer fires render_tick → the embedded tick renders + blits.
+# Drive a few host frames — each colorbuffer fires render_tick → the
+# embedded tick renders + blits.
 for _ in 1:6; GLMakie.colorbuffer(glscr); end
 shot = copy(GLMakie.colorbuffer(glscr))
-c1 = lit_centroid(session.present_buf)         # centroid of the ovrtx present buffer
+c1 = lit_centroid(session.present_buf)  # centroid of the ovrtx present buffer
 
 println("PRESENT_NONBLACK=", count(c -> lum(c) > LUM_MIN, session.present_buf))
-# Embedded (left) region changed a lot vs GL baseline; 2D (right) region barely changed.
+# Embedded (left) region changed a lot vs GL baseline; 2D (right) region
+# barely changed.
 println("LEFT_DIFF=",  region_diff(base, shot, 1, half))
 println("RIGHT_DIFF=", region_diff(base, shot, half + 1, W))
 println("LEFT_NONBLACK=",  region_nonblack(shot, 1, half))
 println("RIGHT_NONBLACK=", region_nonblack(shot, half + 1, W))
 
-# Orbit the LScene camera → the live ovrtx render responds (present buffer moves/changes).
+# Orbit the LScene camera → the live ovrtx render responds (present buffer
+# moves/changes).
 cam = Makie.cameracontrols(ls.scene)
 Makie.update_cam!(ls.scene, Vec3f(4, 2, 3), Vec3f(0, 0, 0), Vec3f(0, 0, 1))
 for _ in 1:6; GLMakie.colorbuffer(glscr); end
 c2 = lit_centroid(session.present_buf)
 println("ORBIT_MOVED=", abs(c1.crow - c2.crow) + abs(c1.ccol - c2.ccol))
 
-# ★ Regression guard (the notify(::Computed) no-op bug): assert the COMPOSITED output — a second
-# GLMakie.colorbuffer AFTER the orbit — actually changed in the embedded (left) region, not just
-# present_buf. `shot` was the pre-orbit composite; if the GL texture never re-uploaded (the bug),
-# shot2's left region is byte-frozen and COMPOSITE_ORBIT_DIFF ≈ 0.
+# Regression guard: assert the COMPOSITED output — a second GLMakie.colorbuffer
+# AFTER the orbit — changed in the embedded (left) region, not just present_buf.
+# Base.notify(::Computed) is a no-op, so an update routed through it would leave
+# the GL texture frozen and COMPOSITE_ORBIT_DIFF ≈ 0.
 shot2 = copy(GLMakie.colorbuffer(glscr))
 println("COMPOSITE_ORBIT_DIFF=", region_diff(shot, shot2, 1, half))
 println("COMPOSITE_ORBIT_RIGHT_DIFF=", region_diff(shot, shot2, half + 1, W))
@@ -87,6 +83,8 @@ println("OK_REPLACE_SCENE")
     contains(out, "OK_REPLACE_SCENE") || @info "replace_scene! output" out
     @test contains(out, "OK_REPLACE_SCENE")
     @test contains(out, "SESSION_TYPE=EmbeddedSession")
+    # steps_per_tick < 1 is rejected at the replace_scene! entry point.
+    @test contains(out, "STEPS_PER_TICK_GUARD=true")
 
     # ovrtx authored the LScene's mesh + rendered non-black content.
     m_auth = match(r"AUTHORED_PLOTS=(\d+)", out)
@@ -94,8 +92,9 @@ println("OK_REPLACE_SCENE")
     m_pnb = match(r"PRESENT_NONBLACK=(\d+)", out)
     @test m_pnb !== nothing && parse(Int, m_pnb.captures[1]) > 300
 
-    # Occlusion + isolation: the embedded (left) region CHANGED vs the GL baseline; the 2D
-    # diagnostic (right) region barely changed (stayed GLMakie).
+    # Occlusion + isolation: the embedded (left) region CHANGED vs the GL
+    # baseline; the 2D diagnostic (right) region barely changed (stayed
+    # GLMakie).
     m_ld = match(r"LEFT_DIFF=([-\d.]+)",  out)
     m_rd = match(r"RIGHT_DIFF=([-\d.]+)", out)
     @test m_ld !== nothing && m_rd !== nothing
@@ -103,20 +102,21 @@ println("OK_REPLACE_SCENE")
         left_diff  = parse(Float64, m_ld.captures[1])
         right_diff = parse(Float64, m_rd.captures[1])
         @test left_diff  > 0.05           # ovrtx replaced the GL 3D there
-        @test right_diff < left_diff / 3  # the diagnostic axis is essentially untouched
+        @test right_diff < left_diff / 3  # the diagnostic axis is untouched
     end
     # Both halves still show content (the hybrid composited, not one blank).
     m_rnb = match(r"RIGHT_NONBLACK=(\d+)", out)
     @test m_rnb !== nothing && parse(Int, m_rnb.captures[1]) > 300
 
-    # The live embedded loop responds to orbiting the LScene camera (present buffer moved).
+    # The live embedded loop responds to orbiting the LScene camera (present
+    # buffer moved).
     m_mov = match(r"ORBIT_MOVED=([-\d.]+)", out)
     @test m_mov !== nothing && parse(Float64, m_mov.captures[1]) > 2.0
 
-    # ★ ...AND that response reaches the COMPOSITED frame — a second colorbuffer after the orbit
-    # differs in the embedded (left) region, well above the ~unchanged 2D (right) region. This is
-    # the regression guard for the notify(::Computed)-is-a-no-op freeze (the old code never
-    # re-uploaded the GL texture, so the composite stayed frozen while present_buf advanced).
+    # ...AND that response reaches the COMPOSITED frame — a second colorbuffer
+    # after the orbit differs in the embedded (left) region, well above the
+    # ~unchanged 2D (right) region (guards the notify(::Computed)-is-a-no-op
+    # GL-texture freeze).
     m_cod  = match(r"COMPOSITE_ORBIT_DIFF=([-\d.]+)", out)
     m_codr = match(r"COMPOSITE_ORBIT_RIGHT_DIFF=([-\d.]+)", out)
     @test m_cod !== nothing && parse(Float64, m_cod.captures[1]) > 0.02
@@ -129,12 +129,13 @@ println("OK_REPLACE_SCENE")
     @test contains(out, "SCREEN_CLOSED=true")
 end
 
-# ---------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # usdplot inside the replaced scene
-# ---------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
-# Red doubleSided X-Y quad, defaultPrim "Model" — same shape as the usdplot_test fixture.  Built
-# parent-side and embedded via `repr(...)` so no nested `\"\"\"` collides with the prog literal.
+# Red doubleSided X-Y quad, defaultPrim "Model" — same shape as the
+# usdplot_test fixture.  Built parent-side and embedded via `repr(...)` so no
+# nested `\"\"\"` collides with the prog literal.
 const _REPLACE_QUAD_USDA = """#usda 1.0
 (
     defaultPrim = "Model"
@@ -154,26 +155,32 @@ def Xform "Model"
 }
 """
 
+# Parent-chosen temp path so the parent can clean it up even if a child crashes
+# (a child-chosen tempname would be unknown to the parent and leak on crash).
+const _REPLACE_QUAD_PATH = tempname() * ".usda"
+
 const _REPLACE_USDPLOT_PROG = """
 using OmniverseMakie, GLMakie, ColorTypes, FixedPointNumbers
 const OM = OmniverseMakie
 $(PROG_PIXEL_HELPERS)
-const QUAD = tempname() * ".usda"
+const QUAD = $(repr(_REPLACE_QUAD_PATH))
 write(QUAD, $(repr(_REPLACE_QUAD_USDA)))
 
 GLMakie.activate!()
 fig = Figure(size = (700, 350))
 ls  = LScene(fig[1, 1]; show_axis = false)
-p   = usdplot!(ls, QUAD)                     # the ONLY plot in the LScene (pure regression)
+p   = usdplot!(ls, QUAD)  # the ONLY plot in the LScene (pure regression)
 ax  = Axis(fig[1, 2]); lines!(ax, 0:0.1:10, sin.(0:0.1:10); color = :blue, linewidth = 3)
 
-# The replace_scene! PRECONDITION: display the figure in GLMakie.  Without the ext's no-op
-# draw_atomic(::USDPlot) this MethodErrors in insertplots! before any RTX work starts.
+# The replace_scene! PRECONDITION: display the figure in GLMakie.  Without
+# the ext's no-op draw_atomic(::USDPlot) this MethodErrors in insertplots!
+# before any RTX work starts.
 glscr = GLMakie.Screen(; visible = false)
 display(glscr, fig.scene)
 println("DISPLAY_OK=true")
 
-# Plain GL draws NOTHING for the usdplot (the documented no-op) — no red in the left half.
+# Plain GL draws NOTHING for the usdplot (the documented no-op) — no red in
+# the left half.
 base = copy(GLMakie.colorbuffer(glscr))
 W = size(base, 2); half = W ÷ 2
 println("GL_LEFT_RED=", region_red(base, 1, half))
@@ -182,14 +189,14 @@ session = OM.replace_scene!(ls)
 println("AUTHORED_PLOTS=", length(session.screen.plot2robj))
 for _ in 1:6; GLMakie.colorbuffer(glscr); end
 shot = copy(GLMakie.colorbuffer(glscr))
-# The ovrtx overlay now shows the referenced USD asset (red quad) in the left half; the 2D
-# diagnostic on the right still renders.
+# The ovrtx overlay now shows the referenced USD asset (red quad) in the
+# left half; the 2D diagnostic on the right still renders.
 println("RTX_LEFT_RED=", region_red(shot, 1, half))
 println("RIGHT_NONBLACK=", region_nonblack(shot, half + 1, W))
 
 close(session)
 println("PARENT_OPEN_AFTER_CLOSE=", isopen(glscr))
-GLMakie.colorbuffer(glscr)                   # the usdplot stays in the GL scene — still no crash
+GLMakie.colorbuffer(glscr)  # the usdplot stays in the GL scene — no crash
 println("POST_CLOSE_RENDER_OK=true")
 println("OK_REPLACE_USDPLOT")
 """
@@ -197,15 +204,20 @@ println("OK_REPLACE_USDPLOT")
 @testset "replace_scene!: usdplot in the replaced scene (subprocess)" begin
     _, out = run_ovrtx_subprocess(_REPLACE_USDPLOT_PROG; timeout = 600, retries = 4,
                                   ready_marker = "OK_REPLACE_USDPLOT")
+    # Remove the child-written USDA (force=true tolerates a crashed attempt
+    # that never wrote it).
+    rm(_REPLACE_QUAD_PATH; force = true)
     contains(out, "OK_REPLACE_USDPLOT") || @info "replace_scene!+usdplot output" out
     @test contains(out, "OK_REPLACE_USDPLOT")
 
-    # GLMakie ingested the childless USDPlot (display precondition) and drew nothing for it.
+    # GLMakie ingested the childless USDPlot (display precondition) and drew
+    # nothing for it.
     @test contains(out, "DISPLAY_OK=true")
     m_glr = match(r"GL_LEFT_RED=(\d+)", out)
     @test m_glr !== nothing && parse(Int, m_glr.captures[1]) == 0
 
-    # replace_scene! authored the usdplot and the overlay shows the red USD quad.
+    # replace_scene! authored the usdplot and the overlay shows the red USD
+    # quad.
     m_auth = match(r"AUTHORED_PLOTS=(\d+)", out)
     @test m_auth !== nothing && parse(Int, m_auth.captures[1]) >= 1
     m_red = match(r"RTX_LEFT_RED=(\d+)", out)
@@ -213,14 +225,15 @@ println("OK_REPLACE_USDPLOT")
     m_rnb = match(r"RIGHT_NONBLACK=(\d+)", out)
     @test m_rnb !== nothing && parse(Int, m_rnb.captures[1]) > 300
 
-    # Teardown: host window survives, and GL keeps tolerating the (no-op) usdplot.
+    # Teardown: host window survives, and GL keeps tolerating the (no-op)
+    # usdplot.
     @test contains(out, "PARENT_OPEN_AFTER_CLOSE=true")
     @test contains(out, "POST_CLOSE_RENDER_OK=true")
 end
 
-# ---------------------------------------------------------------------------------------------
-# rotated target + scripted recording (CarComponents field report #1 + #2)
-# ---------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# rotated target + scripted recording
+# -----------------------------------------------------------------------------
 
 const _REPLACE_ROTATED_RECORD_PROG = """
 using OmniverseMakie, GLMakie, ColorTypes, FixedPointNumbers
@@ -233,36 +246,39 @@ ls  = LScene(fig[1, 1])
 mesh!(ls, Rect3f(Point3f(-0.5), Vec3f(1)); color = :orange)
 ax  = Axis(fig[1, 2]); lines!(ax, 0:0.1:10, sin.(0:0.1:10); color = :blue, linewidth = 3)
 
-# The Z-up trick (MultibodyComponents-style content): a root rotation on the TARGET scene.
-# The overlay must not inherit it — pre-fix the blit quad went edge-on and the composite
-# silently equaled the pure-GL baseline.
+# The Z-up trick: a root rotation on the TARGET scene.  The overlay must not
+# inherit it — an overlay sub-scene that inherits the target's Transformation
+# turns the blit quad edge-on and the composite silently equals the pure-GL
+# baseline.
 Makie.rotate!(ls.scene, Makie.qrotation(Vec3f(1, 0, 0), Float32(pi) / 2))
 
 glscr = GLMakie.Screen(; visible = false, px_per_unit = 1, scalefactor = 1)
 display(glscr, fig.scene)
-base = copy(GLMakie.colorbuffer(glscr))          # layout pass + pure-GL baseline
+base = copy(GLMakie.colorbuffer(glscr))  # layout pass + pure-GL baseline
 W = size(base, 2); half = W ÷ 2
 
-# Recording recipe: STOP the render loop (screen stays OPEN) BEFORE replace_scene!.
+# Recording recipe: STOP the render loop (screen stays OPEN) BEFORE
+# replace_scene!.
 GLMakie.stop_renderloop!(glscr; close_after_renderloop = false)
 session = OM.replace_scene!(ls)
 println("REPLACED_ON_STOPPED_LOOP=true")
 
-img  = OM.record_frame!(session; ticks = 3)      # 3 fully synchronous host ticks
+img  = OM.record_frame!(session; ticks = 3)  # 3 fully synchronous host ticks
 shot = copy(img)
 println("PRESENT_NONBLACK=", count(c -> lum(c) > LUM_MIN, session.present_buf))
 println("LEFT_DIFF=",  region_diff(base, shot, 1, half))
 println("RIGHT_DIFF=", region_diff(base, shot, half + 1, W))
 
-# Pipe-write smoke: a frame (>64KB, larger than the pipe buffer) written to a child process
-# completes on a stopped loop — the field failure was this write starving forever.
+# Pipe-write smoke: a frame (>64KB, larger than the pipe buffer) written to a
+# child process completes on a stopped loop (a hot on-demand render loop
+# starves libuv and the write hangs).
 sink = open(pipeline(`cat`; stdout = devnull), "w")
 write(sink, permutedims(shot))
 close(sink)
 println("PIPE_WRITE_OK=true")
 
-# Scripted camera per frame (docstring pattern): move, record again — the composite responds
-# without any live render loop.
+# Scripted camera per frame (docstring pattern): move, record again — the
+# composite responds without any live render loop.
 Makie.update_cam!(ls.scene, Vec3f(4, 2, 3), Vec3f(0, 0, 0), Vec3f(0, 0, 1))
 shot2 = copy(OM.record_frame!(session; ticks = 3))
 println("FRAME2_DIFF=", region_diff(shot, shot2, 1, half))
@@ -278,11 +294,12 @@ println("OK_REPLACE_ROTATED_RECORD")
     contains(out, "OK_REPLACE_ROTATED_RECORD") || @info "rotated+record output" out
     @test contains(out, "OK_REPLACE_ROTATED_RECORD")
 
-    # The corrected precondition: replace_scene! attaches to an open screen with a STOPPED loop.
+    # The precondition accepts an open screen with a STOPPED render loop.
     @test contains(out, "REPLACED_ON_STOPPED_LOOP=true")
 
-    # ovrtx rendered (present buffer lit) AND the overlay actually composited over the rotated
-    # target — pre-fix LEFT_DIFF was exactly 0.0 (composite == GL baseline, quad edge-on).
+    # ovrtx rendered (present buffer lit) AND the overlay composited over the
+    # rotated target — an inherited rotation would leave LEFT_DIFF at 0.0
+    # (composite == GL baseline, quad edge-on).
     m_pnb = match(r"PRESENT_NONBLACK=(\d+)", out)
     @test m_pnb !== nothing && parse(Int, m_pnb.captures[1]) > 300
     m_ld = match(r"LEFT_DIFF=([-\d.]+)",  out)
@@ -291,12 +308,13 @@ println("OK_REPLACE_ROTATED_RECORD")
     if m_ld !== nothing && m_rd !== nothing
         left_diff  = parse(Float64, m_ld.captures[1])
         right_diff = parse(Float64, m_rd.captures[1])
-        @test left_diff  > 0.05           # the RTX overlay replaced the GL 3D despite the rotation
+        @test left_diff  > 0.05           # RTX overlay replaced GL 3D (rotated)
         @test right_diff < left_diff / 3  # the 2D diagnostic stayed GLMakie
     end
 
-    # The recording recipe end to end: the child-process pipe write completed (no libuv
-    # starvation on a stopped loop) and a second scripted-camera frame changed the composite.
+    # The recording recipe end to end: the child-process pipe write
+    # completed (no libuv starvation on a stopped loop) and a second
+    # scripted-camera frame changed the composite.
     @test contains(out, "PIPE_WRITE_OK=true")
     m_f2 = match(r"FRAME2_DIFF=([-\d.]+)", out)
     @test m_f2 !== nothing && parse(Float64, m_f2.captures[1]) > 0.02

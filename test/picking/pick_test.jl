@@ -1,11 +1,9 @@
 using Test
 
-# M6.B Task 2 — Screen.path2plot reverse map (prim_path => objectid(plot)) kept in
-# strict lockstep with the forward plot2robj map.  Authors the screen via the shared
-# `_author_screen!` helper (which calls Makie.insertplots! to author plot geometry —
-# `author_root_from_scene!` alone leaves plot2robj EMPTY, per Task 1 forward-notes),
-# then checks: the forward map has the plot, the reverse map resolves the plot's prim
-# path back to objectid(plot), and a typed `delete!` clears the reverse entry too.
+# Screen.path2plot reverse map (prim_path => objectid(plot)) stays in strict
+# lockstep with the forward plot2robj map. Authoring uses _author_screen!
+# (author_root_from_scene! alone leaves plot2robj empty); checks the forward
+# map, reverse resolution, and that a typed delete! clears the reverse entry.
 const _M6B_PATH2PLOT_PROG = """
 using OmniverseMakie
 OM = OmniverseMakie; OM.activate!(warmup = 8)
@@ -33,24 +31,14 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 end
 
 # ---------------------------------------------------------------------------
-# M6.B Task 3 — Makie.pick / pick_closest / pick_sorted over the native AOV pick.
-#
-# Authors a scatter marker placed OFF the vertical center (high world-Z → projects to the
-# TOP half) plus a mesh low in world-Z, then drives the STANDARD Makie pick protocol:
-#   - pick at the scatter's projected Makie pixel → (sp, 1).  Off-center is what locks the
-#     empirically-verified y-flip (`py = H - y`): a no-flip regression maps the marker's
-#     Makie position to the opposite RenderProduct row and would MISS — so HIT_IS_SCATTER
-#     alone proves the flip, and MIRROR_NOT_SCATTER witnesses it from the other side.
-#   - pick the mesh → plot-level index 0 (mesh/lines/surface are plot-level by design).
-#   - a far corner → (nothing, 0) background.
-#   - pick_closest / pick_sorted compose on top of pick (so DataInspector works).
-# Plots are authored via the shared `_author_screen!` helper (NOT `author_root_from_scene!`,
-# which leaves plot2robj/path2plot EMPTY — Task 1 forward-note).  `markersize` is WORLD-scale
-# in this backend (≈ sphere radius), so 0.3 yields a ~50px marker.
-#
-# NOTE (verified): ovrtx's PointInstancer pick reports geometryInstanceId == 0 for every
-# instance, so a multi-point scatter index is not recoverable today — index is exact only
-# for a single-point marker (this test).  See `_element_index` in src/screen.jl.
+# Makie.pick / pick_closest / pick_sorted over the native AOV pick. The
+# scatter marker sits off the vertical center to lock the y-flip (py = H - y):
+# a no-flip regression maps it to the opposite RenderProduct row and misses.
+# Mesh picks are plot-level (index 0); markersize is world-scale here.
+# PointInstancer picks report geometryInstanceId == 0 for every instance, so
+# a multi-point scatter index is not recoverable — index is exact only for a
+# single-point marker (see `_element_index` in src/screen.jl).
+# ---------------------------------------------------------------------------
 const _M6B_PICK_PROG = """
 using OmniverseMakie
 OM = OmniverseMakie; const OV = OM.OV
@@ -63,7 +51,7 @@ screen = OM.Screen(scene)
 OM._author_screen!(screen, scene, scene)
 for _ in 1:8; sr0 = OV.step!(screen.renderer, screen.product; timeout_ns=UInt64(60_000_000_000)); close(sr0); end
 W, H = screen.fb_size
-sxy = Makie.project(scene, mk)                     # scatter's Makie (bottom-left) pixel
+sxy = Makie.project(scene, mk)   # scatter's Makie (bottom-left) pixel
 mxy = Makie.project(scene, Point3f(0,0,-1.35))     # mesh-center Makie pixel
 son = Makie.Vec{2,Float64}(sxy[1], sxy[2])
 plt, idx = Makie.pick(scene, screen, son)
@@ -72,16 +60,18 @@ println("HIT_INDEX=", idx)
 mplt, midx = Makie.pick(scene, screen, Makie.Vec{2,Float64}(mxy[1], mxy[2]))
 println("HIT_IS_MESH=", mplt === mh)
 println("MESH_INDEX=", midx)
-mir = Makie.pick(scene, screen, Makie.Vec{2,Float64}(sxy[1], H - sxy[2]))   # no-flip row → not the scatter
+# no-flip row → not the scatter
+mir = Makie.pick(scene, screen, Makie.Vec{2,Float64}(sxy[1], H - sxy[2]))
 println("MIRROR_NOT_SCATTER=", mir[1] !== sp)
-miss = Makie.pick(scene, screen, Makie.Vec{2,Float64}(2.0, 2.0))            # corner → background
+# corner → background
+miss = Makie.pick(scene, screen, Makie.Vec{2,Float64}(2.0, 2.0))
 println("CORNER_MISS=", miss == (nothing, 0))
 pc = Makie.pick_closest(scene, screen, son, 10)
 println("CLOSEST_OK=", pc == (sp, idx))
 ps = Makie.pick_sorted(scene, screen, son, 10)
 println("SORTED_OK=", length(ps) == 1 && ps[1] == (sp, idx))
-# pick_hit decodes the worldPositionM/worldNormal tensors (the raw-FFI oracle folded in
-# from the retired pick-FFI test) — both must be finite on a real hit.
+# pick_hit decodes the worldPositionM/worldNormal tensors — both must be
+# finite on a real hit.
 hit = OM.pick_hit(screen, son)
 println("WORLDPOS_FINITE=", hit !== nothing && all(isfinite, hit.world_position) && all(isfinite, hit.normal))
 close(screen)

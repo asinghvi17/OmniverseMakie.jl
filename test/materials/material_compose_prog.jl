@@ -1,18 +1,18 @@
-# Subprocess body for the M3.2 material-composition INTEGRATION render
-# (read + run by test/m3_material_test.jl via run_ovrtx_subprocess).  Standalone .jl
-# so the Makie scene setup needs no escaping.
+# Subprocess body for the material-composition INTEGRATION render (read + run
+# by materials/material_test.jl via run_ovrtx_subprocess).  Standalone .jl so
+# the Makie scene setup needs no escaping.
 #
-# Proves M3.2 end to end THROUGH the real Screen / colorbuffer pipeline (NOT a
-# hand-authored stage like the M3.1 prog):
+# End to end THROUGH the real Screen / colorbuffer pipeline:
 #   - `mesh!(…; color, material=(; metallic, roughness))` is MATERIALIZED →
-#     `author_root_from_scene!` PRE-AUTHORS its OmniPBR material into /World/Looks and
-#     the Mesh build branch BINDS it (`OV.bind_material!`) + omits displayColor →
-#     the sphere reads METALLIC (sharp specular highlight over a dark body).
-#   - `mesh!(…; color)` (no material) stays on the M1 displayColor path → renders the
-#     flat diffuse colour (regression: the displayColor pipeline is unbroken).
-# The metallic render is compared to the SAME sphere rendered plain-diffuse: a much
-# higher luminance contrast + a substantial pixel-wise difference proves the
-# pre-authored material BOUND through the full pipeline.
+#     `author_root_from_scene!` PRE-AUTHORS its OmniPBR material into
+#     /World/Looks and the Mesh build branch BINDS it (`OV.bind_material!`) +
+#     omits displayColor → the sphere reads METALLIC (sharp specular
+#     highlight over a dark body).
+#   - `mesh!(…; color)` (no material) stays on the displayColor path →
+#     renders the flat diffuse colour (regression: displayColor is unbroken).
+# The metallic render is compared to the SAME sphere rendered plain-diffuse:
+# a much higher luminance contrast + a substantial pixel-wise difference
+# proves the pre-authored material BOUND through the full pipeline.
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
 const OM = OmniverseMakie
@@ -22,7 +22,7 @@ OM.activate!(warmup = 120)
 sph = GeometryBasics.normal_mesh(GeometryBasics.Tesselation(Sphere(Point3f(0), 1.0f0), 96))
 basecol = RGBf(0.72, 0.20, 0.20)
 
-# --- metrics (mirror the M3.1 prog) ------------------------------------------
+# --- metrics ------------------------------------------------------------------
 lum(c) = 0.2126f0 * Float32(red(c)) + 0.7152f0 * Float32(green(c)) + 0.0722f0 * Float32(blue(c))
 function stats(img)
     L   = vec([lum(c) for c in img])
@@ -54,17 +54,24 @@ function meanabsdiff(a, b)
     return s / (3 * length(a))
 end
 
-# Render a fresh scene holding ONE sphere built by `addplot!(ax)`.  A new Figure/LScene
-# per render → its own Screen + stage (M2 model: one root authored per screen), so the
-# materialized and plain renders are fully isolated.
+# Render a fresh scene holding ONE sphere built by `addplot!(ax)`.  The
+# material is baked into the stage at open time, so each render gets its own
+# Screen + stage (fully isolating the materialized and plain renders).  The
+# Screen is created explicitly and `close`d after the frame is read — an
+# implicit `colorbuffer(scene)` Screen never closes, leaking a renderer.
 function render_scene(addplot!)
     fig = Figure()
     ax  = LScene(fig[1, 1])
     addplot!(ax)
-    return Makie.colorbuffer(ax.scene; warmup = 120)
+    screen = OM.Screen(ax.scene; warmup = 120)
+    try
+        return Makie.colorbuffer(screen)
+    finally
+        close(screen)
+    end
 end
 
-# Plain: M1 displayColor path (regression baseline).
+# Plain: displayColor path (regression baseline).
 imgP = render_scene(ax -> mesh!(ax, sph; color = basecol))
 # Materialized: OmniPBR metallic via the `material=` escape hatch.
 imgM = render_scene(ax -> mesh!(ax, sph; color = basecol,
@@ -86,15 +93,15 @@ println("CONTRAST_RATIO=$(cr)")
 # Both renders are non-black.
 @assert sP.nonblack > 1000 "plain render is (near) black: nonblack=$(sP.nonblack)"
 @assert sM.nonblack > 1000 "metallic render is (near) black: nonblack=$(sM.nonblack)"
-# Regression: the plain displayColor render is RED-dominant (the M1 path still renders).
+# Regression: the plain displayColor render is RED-dominant.
 @assert sP.mr > sP.mg && sP.mr > sP.mb "plain render not red-dominant: mrgb=($(sP.mr),$(sP.mg),$(sP.mb))"
-# The materialized render differs SUBSTANTIALLY from the plain render (the pre-authored
-# OmniPBR material BOUND through the full pipeline).  Thresholds are loose relative to the
-# observed signal (mad≈0.06, contrast≈2.7, ratio≈2.1) so path-traced noise stays clear of
-# them — a plain flat-diffuse render sits near contrast≈1.3, ratio≈1.0.
+# The materialized render differs SUBSTANTIALLY from the plain render — the
+# pre-authored OmniPBR material BOUND through the full pipeline.  Thresholds
+# sit well below the metallic signal and above flat-diffuse noise, so
+# path-traced noise stays clear of them.
 @assert mad > 0.02 "metallic render too similar to plain (mad=$(mad)): material:binding did not take"
-# Metallic SIGNATURE: a concentrated specular highlight over a dark body → a much higher
-# luminance contrast than the flat diffuse sphere.
+# Metallic SIGNATURE: a concentrated specular highlight over a dark body →
+# a much higher luminance contrast than the flat diffuse sphere.
 @assert sM.contrast > 2.0 "no metallic specular signature: metallic contrast=$(sM.contrast)"
 @assert cr > 1.5 "metallic not distinct enough from plain diffuse: contrast ratio=$(cr)"
 

@@ -1,4 +1,5 @@
-# Ported from references/RPRMakieNotes/scripts/sphere_plane_greysky.jl (Lazaro Alonso).
+# Ported from references/RPRMakieNotes/scripts/sphere_plane_greysky.jl
+# (Lazaro Alonso).
 # Blue diffuse sphere on a gainsboro plane under a grey dome + warm point light.
 # DiffuseMaterial → plain color= (USD displayColor matte).
 using OmniverseMakie, GeometryBasics, Colors

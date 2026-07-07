@@ -1,23 +1,26 @@
-# Subprocess body for the M3.4 LIVE material-edit test (read + run by
-# test/materials/material_live_test.jl via run_ovrtx_subprocess).  Standalone .jl so the Makie
-# scene setup needs no escaping.
+# Subprocess body for the LIVE material-edit test (read + run by
+# test/materials/material_live_test.jl via run_ovrtx_subprocess).  Standalone
+# .jl so the Makie scene setup needs no escaping.
 #
-# Proves M3.4 end to end THROUGH the real Screen / colorbuffer pipeline: a live
-# `plot.color[]` / `plot.material[]` PARAM edit on a MATERIALIZED mesh re-writes the
-# PRE-AUTHORED OmniPBR shader inputs on the OPEN stage (the M2 diff path) — NO re-author
-# (`ROOT_OPENS == 1`), the render changes, and EXACTLY the changed shader inputs are
-# written (instrumented via `_PUSH_OBSERVER` + `_SHADER_WRITE_OBSERVER`).
+# End to end THROUGH the real Screen / colorbuffer pipeline: a live
+# `plot.color[]` / `plot.material[]` PARAM edit on a MATERIALIZED mesh
+# re-writes the PRE-AUTHORED OmniPBR shader inputs on the OPEN stage (the
+# live diff path) — NO re-author (`ROOT_OPENS == 1`), the render changes, and
+# EXACTLY the changed shader inputs are written (instrumented via
+# `_PUSH_OBSERVER` + `_SHADER_WRITE_OBSERVER`).
 #
-#   render A  — materialized mesh (metallic=1, roughness=0.1), red base → glossy red
-#   color[]=:blue  → render B → exactly one :scaled_color push → one diffuse_color_constant
-#                    shader write → the surface turns BLUE-dominant (no re-author)
-#   material[]=Attributes(metallic=0, roughness=0.9) → render C → exactly one :material push
-#                    → metallic_constant + reflection_roughness_constant shader writes →
-#                    the glossy specular collapses to a MATTE surface (contrast drops)
+#   render A  — materialized mesh (metallic=1, roughness=0.1), red base →
+#               glossy red
+#   color[]=:blue  → render B → exactly one :scaled_color push → one
+#                    diffuse_color_constant shader write → BLUE-dominant
+#   material[]=Attributes(metallic=0, roughness=0.9) → render C → exactly one
+#                    :material push → metallic_constant +
+#                    reflection_roughness_constant shader writes → the glossy
+#                    specular collapses to a MATTE surface (contrast drops)
 #
-# NOTE (M3.4 MCP finding): the graph stores `:material` as `Makie.Attributes`, so a live
-# edit MUST pass an `Attributes` (a raw NamedTuple fails `convert(Attributes, …)` at
-# resolve; `plot.material = (…)` setproperty is method-ambiguous).  Hence `Attributes(…)`.
+# NOTE: the graph stores `:material` as `Makie.Attributes`, so a live edit
+# MUST pass an `Attributes` (a raw NamedTuple fails `convert(Attributes, …)`
+# at resolve; `plot.material = (…)` setproperty is method-ambiguous).
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
 const OM = OmniverseMakie
@@ -63,7 +66,7 @@ function changed(x, y; thr = 0.15)
     n
 end
 
-# ---- RENDER A: build the open stage + the diff node, bind the pre-authored material ----
+# ---- RENDER A: build open stage + diff node, bind pre-authored material ----
 imgA = Makie.colorbuffer(screen)
 @assert haskey(screen.plot2robj, objectid(m)) "mesh not registered as an OvrtxRObj"
 robj = screen.plot2robj[objectid(m)]
@@ -80,7 +83,7 @@ shaderwrit = String[]
 OM._PUSH_OBSERVER[]         = name -> (pushcount[name] = get(pushcount, name, 0) + 1)
 OM._SHADER_WRITE_OBSERVER[] = name -> push!(shaderwrit, String(name))
 
-# ---- COLOR EDIT: one :scaled_color push → one diffuse_color_constant shader write → blue ----
+# ---- COLOR EDIT: one :scaled_color push → one shader write → blue ----
 empty!(pushcount); empty!(shaderwrit)
 m.color[] = :blue
 imgB = Makie.colorbuffer(screen)
@@ -92,7 +95,7 @@ println("RGB_B=$(rgbB) CONTRAST_B=$(cB)")
 @assert sort(shaderwrit) == ["diffuse_color_constant"] "color edit wrote $(shaderwrit), expected only diffuse_color_constant"
 @assert rgbB[3] > rgbB[1] "color edit did not turn the material blue: $(rgbB)"
 
-# ---- MATERIAL EDIT: one :material push → metallic + roughness shader writes → glossy→matte ----
+# ---- MATERIAL EDIT: :material push → metallic + roughness writes → matte ----
 empty!(pushcount); empty!(shaderwrit)
 m.material[] = Makie.Attributes(; metallic = 0.0, roughness = 0.9)
 imgC = Makie.colorbuffer(screen)
@@ -100,32 +103,32 @@ rgbC = mean_rgb(imgC); cC = contrast(imgC)
 diffBC = changed(imgB, imgC)
 println("PUSH_MATERIAL=$(pushcount)")
 println("SHADER_MATERIAL=$(sort(shaderwrit))")
-satB = rgbB[3] - rgbB[1]; satC = rgbC[3] - rgbC[1]   # blue-base saturation (blue − red)
+satB = rgbB[3] - rgbB[1]; satC = rgbC[3] - rgbC[1]  # blue-base saturation
 println("RGB_C=$(rgbC) CONTRAST_C=$(cC) CHANGED_B_vs_C=$(diffBC)")
 println("SAT_B=$(round(satB; digits=3)) SAT_C=$(round(satC; digits=3))")
 @assert pushcount == Dict(:material => 1) "material edit fired $(pushcount), expected one :material"
 @assert sort(shaderwrit) == ["metallic_constant", "reflection_roughness_constant"] "material edit wrote $(shaderwrit), expected metallic_constant + reflection_roughness_constant"
 @assert diffBC > 1000 "material edit did not change the render (changed=$(diffBC))"
-# metallic(1)→dielectric(0) + glossy→matte: the white specular wash is removed, so the
-# surface shows its PURE diffuse base colour — markedly MORE saturated blue than the metal.
+# metallic(1)→dielectric(0) + glossy→matte: the white specular wash is
+# removed, so the surface shows its PURE diffuse base colour — markedly
+# MORE saturated blue than the metal.
 @assert satC > satB "material edit (metallic→matte) did not show the matte diffuse base (satB=$(satB) satC=$(satC))"
 
-# ---- the stage was authored EXACTLY ONCE across all three renders (live writes only) ----
+# ---- stage authored EXACTLY ONCE across all three renders (live writes) ----
 opens = OM._ROOT_OPEN_COUNT[]
 println("ROOT_OPENS=$(opens)")
 @assert opens == 1 "stage re-opened during live material edits (opens=$(opens))"
 
 close(screen)
 
-# =================================================================================
-# PHASE 2 — the same live material-PARAM edit on a MATERIALIZED *MeshScatter* (the
-# M3 final-review fix: `:material ∈ consumed_inputs(::Makie.MeshScatter)`; before it
-# this edit was a SILENT no-op).  A fresh figure + Screen in the SAME process (the
-# ovrtx startup is amortized), so ROOT_OPENS is asserted as a PER-PHASE DELTA of 1.
-# Markers are MS_-prefixed.
-# =================================================================================
+# =============================================================================
+# PHASE 2 — the same live material-PARAM edit on a MATERIALIZED *MeshScatter*
+# (`:material ∈ consumed_inputs(::Makie.MeshScatter)` makes the edit take).
+# A fresh figure + Screen in the SAME process (ovrtx startup amortized), so
+# ROOT_OPENS is asserted as a PER-PHASE DELTA of 1.  Markers are MS_-prefixed.
+# =============================================================================
 
-basecol = RGBf(0.20, 0.20, 0.80)   # saturated blue base — its saturation rises when matte
+basecol = RGBf(0.20, 0.20, 0.80)  # saturated blue — saturation rises when matte
 msmarkers = [Point3f(x, 0.0, 0.0) for x in -1.5:1.0:1.5]
 
 fig2 = Figure()
@@ -153,7 +156,7 @@ rgbMB = mean_rgb(imgMB)
 diffMAB = changed(imgMA, imgMB)
 println("MS_PUSH_MATERIAL=$(pushcount)")
 println("MS_SHADER_MATERIAL=$(sort(shaderwrit))")
-satMA = rgbMA[3] - rgbMA[1]; satMB = rgbMB[3] - rgbMB[1]   # blue-base saturation (blue − red)
+satMA = rgbMA[3] - rgbMA[1]; satMB = rgbMB[3] - rgbMB[1]  # blue-base saturation
 println("MS_RGB_B=$(rgbMB) MS_CHANGED_A_vs_B=$(diffMAB)")
 println("MS_SAT_A=$(round(satMA; digits=3)) MS_SAT_B=$(round(satMB; digits=3))")
 @assert pushcount == Dict(:material => 1) "meshscatter material edit fired $(pushcount), expected one :material"

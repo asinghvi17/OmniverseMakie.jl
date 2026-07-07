@@ -1,16 +1,10 @@
 using Test
 
-# M6.B Task 4 — select! / clear_selection! selection-outline API + outline RENDER test.
-#
-# This is the FIRST end-to-end pixel check of the outline FFI: Task 1 wrote the outline
-# group/style writers and smoke-tested that they RETURN success, but their DRAWN effect was
-# never rendered (no selection_outline-enabled renderer existed until Task 2).  Here we build
-# a Screen with selection_outline=true, render a baseline, `select!` a mesh, render again, and
-# assert strongly-orange pixels appeared that were NOT in the baseline (so the assertion proves
-# the outline is NEW pixels, not the plot's own geometry color), then `clear_selection!` removes
-# most of them.  Plots are authored via the shared `_author_screen!` helper (NOT
-# `author_root_from_scene!`, which leaves plot2robj EMPTY → select! would find no robj — Task 1
-# forward-note).  CPU-only map; no GLMakie/CUDA.
+# select! / clear_selection! outline render test: render a baseline, select!
+# a mesh, assert strongly-orange pixels appeared that the baseline lacked
+# (new outline pixels, not the plot's own color); clear_selection! removes
+# most. Authoring uses _author_screen! — author_root_from_scene! leaves
+# plot2robj empty, so select! would find no robj. CPU-only; no GLMakie/CUDA.
 const _M6B_OUTLINE_PROG = """
 using OmniverseMakie
 OM = OmniverseMakie; OM.activate!(warmup = 24, selection_outline = true)
@@ -26,8 +20,8 @@ sel  = OM.OV.render_to_matrix(screen.renderer, screen.product; warmup = 24)
 isorange(c) = Float32(c.r) > 0.6 && 0.2 < Float32(c.g) < 0.75 && Float32(c.b) < 0.3
 gained = count(i -> isorange(sel[i]) && !isorange(base[i]), eachindex(sel))
 println("OUTLINE_GAINED=", gained)
-# Diagnostic (first pixel-level look at the drawn outline): the LDR color of the most
-# orange-leaning pixel that was NOT orange in the baseline — documents the outline's color.
+# Diagnostic: the LDR color of the most orange-leaning pixel that was not
+# orange in the baseline — documents the outline's drawn color.
 bi = argmax(i -> (isorange(base[i]) ? -9f0 : Float32(sel[i].r) - Float32(sel[i].b)), eachindex(sel))
 sc = sel[bi]
 println("OUTLINE_SAMPLE_RGB=", (round(Float32(sc.r); digits=3), round(Float32(sc.g); digits=3), round(Float32(sc.b); digits=3)))
@@ -46,32 +40,38 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     @test exitcode == 0
     @test contains(output, "OK_OUTLINE")
     g = match(r"OUTLINE_GAINED=(\d+)", output)
-    @test g !== nothing && parse(Int, g.captures[1]) > 50         # an outline appeared
+    @test g !== nothing && parse(Int, g.captures[1]) > 50   # outline appeared
     c = match(r"OUTLINE_AFTER_CLEAR=(\d+)", output)
-    @test c !== nothing && parse(Int, c.captures[1]) < parse(Int, g.captures[1]) ÷ 2   # clearing removed most of it
+    # clearing removed most of it
+    @test c !== nothing && parse(Int, c.captures[1]) < parse(Int, g.captures[1]) ÷ 2
 end
 
-# select! on a Screen built WITHOUT selection_outline=true must @warn once (maxlog=1) and
-# no-op — the drawn highlight needs the creation-time flag, but pick DATA still works.  This
-# needs no render: the gate (`_ensure_outline_style!`) short-circuits before any draw, so the
-# style is never installed and select! returns nothing.  Three calls ⇒ exactly ONE warning.
+# select! on a Screen built WITHOUT selection_outline=true must @warn once
+# (maxlog=1) and no-op — the drawn highlight needs the creation-time flag,
+# but pick DATA still works.  This needs no render: the gate
+# (`_ensure_outline_style!`) short-circuits before any draw, so the style is
+# never installed and select! returns nothing.  Three calls ⇒ exactly ONE
+# warning.
 const _M6B_NOOUTLINE_PROG = """
 using OmniverseMakie
 import Logging
-OM = OmniverseMakie; OM.activate!(warmup = 8)            # default: selection_outline = false
+# default: selection_outline = false
+OM = OmniverseMakie; OM.activate!(warmup = 8)
 scene = Scene(size=(64,64)); cam3d!(scene)
 p = mesh!(scene, Rect3f(Point3f(0), Vec3f(1)); color = :gray)
 screen = OM.Screen(scene)
-println("OUTLINE_FLAG=", screen.config.selection_outline)            # expect false (default)
+println("OUTLINE_FLAG=", screen.config.selection_outline)   # false (default)
 OM._author_screen!(screen, scene, scene)
 buf = IOBuffer()
 ret = Logging.with_logger(Logging.SimpleLogger(buf, Logging.Debug)) do
-    r1 = OM.select!(screen, p); OM.select!(screen, p); OM.select!(screen, p); r1   # 3 calls
+    # 3 calls
+    r1 = OM.select!(screen, p); OM.select!(screen, p); OM.select!(screen, p); r1
 end
 logtxt = String(take!(buf))
 println("NOOUTLINE_RET_NOTHING=", ret === nothing)
 println("NOOUTLINE_NOT_STYLED=", screen._outline_styled == false)
-println("NOOUTLINE_WARN_COUNT=", count(r"no highlight drawn", logtxt))   # exactly 1 (maxlog=1)
+# exactly 1 (maxlog=1)
+println("NOOUTLINE_WARN_COUNT=", count(r"no highlight drawn", logtxt))
 close(screen)
 println("OK_NOOUTLINE")
 """

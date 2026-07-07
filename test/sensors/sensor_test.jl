@@ -1,14 +1,15 @@
-# Sensor simulation (lidar!/radar!) — pure recipe/emission contract + end-to-end GPU point
-# clouds through ovrtx's native RTX sensor pipeline.
+# Sensor simulation (lidar!/radar!) — pure recipe/emission contract +
+# end-to-end GPU point clouds through ovrtx's native RTX sensor pipeline.
 #
-# Pure tier: layer emission goldens (prim/API/frameRate/instant/channels/attribute passthrough),
-# channel + kwarg validation, returns-observable shape, origin fold, motion-BVH scene detection,
-# ScreenConfig contract.
-# GPU tier (one subprocess, 2 renderer creations): a lidar + radar on a known scene → full-scan
-# counts, sensor-frame range bands (ground at −h, cube at ~10 m), observable updates, pose move
-# shifts the scan, delete! drops the sensor from stepping, steady-state step_sensors! fires no
-# image reset, motion-BVH auto-detection, and the post-display (no-BVH) insert path with its
-# one-time warn.
+# Pure tier: layer emission goldens (prim/API/frameRate/instant/channels/
+# attribute passthrough), channel + kwarg validation, returns-observable
+# shape, origin fold, motion-BVH scene detection, ScreenConfig contract.
+# GPU tier (one subprocess, 2 renderer creations): a lidar + radar on a known
+# scene → full-scan counts, sensor-frame range bands (ground at −h, cube at
+# ~10 m), observable updates, pose move shifts the scan, delete! drops the
+# sensor from stepping, steady-state step_sensors! fires no image reset,
+# motion-BVH auto-detection, and the post-display (no-BVH) insert path with
+# its one-time warn.
 
 using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
@@ -32,7 +33,8 @@ using Makie
         @test occursin("token omni:sensor:Core:elementsCoordsType = \"CARTESIAN\"", u)
         @test occursin("double2 omni:sensor:frameRate = (10.0, 1)", u)
         @test occursin("bool omni:sensor:Core:instantLidar = true", u)
-        # usd_attributes passthrough, typed + deterministically ordered (farRangeM < scanRate…)
+        # usd_attributes passthrough, typed + deterministically ordered
+        # (farRangeM < scanRate…)
         @test occursin("float omni:sensor:Core:farRangeM = 400.0", u)
         @test occursin("int omni:sensor:Core:scanRateBaseHz = 20", u)
         @test findfirst("farRangeM", u).start < findfirst("scanRateBaseHz", u).start
@@ -40,7 +42,8 @@ using Makie
         @test occursin("rel orderedVars = [</Sensor/Vars/PointCloud>]", u)
         @test occursin("uniform string sourceName = \"PointCloud\"", u)
         @test occursin("string[] channels = [\"Coordinates\", \"Intensity\"]", u)
-        # :sensor output frame is the schema default — NOT authored (golden-minimal emission)
+        # :sensor output frame is the schema default — NOT authored
+        # (golden-minimal emission)
         @test !occursin("outputFrameOfReference", u)
     end
 
@@ -60,19 +63,21 @@ using Makie
         @test occursin("prepend apiSchemas = [\"OmniSensorGenericRadarWpmDmatAPI\"]", u)
         @test occursin("token omni:sensor:WpmDmat:elementsCoordsType = \"CARTESIAN\"", u)
         @test occursin("string[] channels = [\"Coordinates\", \"RCS\", \"RadialVelocityMs\"]", u)
-        @test !occursin("instantLidar", u)                     # lidar-only attribute
+        @test !occursin("instantLidar", u)   # lidar-only attribute
         u_world = OM._sensor_layer_usda(radar!(ls; output_frame = :world))
         @test occursin("token omni:sensor:WpmDmat:outputFrameOfReference = \"WORLD\"", u_world)
     end
 
     @testset "validation fails loud" begin
         @test_throws ArgumentError OM._sensor_layer_usda(lidar!(ls; channels = [:bogus]))
-        @test_throws ArgumentError OM._sensor_layer_usda(lidar!(ls; channels = [:rcs]))       # radar-only
-        @test_throws ArgumentError OM._sensor_layer_usda(radar!(ls; channels = [:intensity])) # lidar-only
+        # :rcs is radar-only; :intensity is lidar-only
+        @test_throws ArgumentError OM._sensor_layer_usda(lidar!(ls; channels = [:rcs]))
+        @test_throws ArgumentError OM._sensor_layer_usda(radar!(ls; channels = [:intensity]))
         @test_throws ArgumentError OM._sensor_layer_usda(lidar!(ls; channels = Symbol[]))
         @test_throws ArgumentError OM._sensor_layer_usda(lidar!(ls; frame_rate = 0.0))
         @test_throws ArgumentError OM._sensor_layer_usda(lidar!(ls; output_frame = :screen))
-        # usd_attributes hygiene: non-sensor keys, injection-y strings, unsupported types
+        # usd_attributes hygiene: non-sensor keys, injection-y strings,
+        # unsupported types
         @test_throws ArgumentError OM._sensor_layer_usda(
             lidar!(ls; usd_attributes = Dict{String,Any}("omni:rtx:rendermode" => "X")))
         @test_throws ArgumentError OM._sensor_layer_usda(
@@ -94,7 +99,7 @@ using Makie
     @testset "returns observable + recipe mechanics" begin
         p = lidar!(ls, Point3f(0, 0, 1.5); channels = [:coordinates, :intensity, :flags])
         r = sensor_returns(p)
-        @test r === sensor_returns(p)                          # identity-stable accessor
+        @test r === sensor_returns(p)   # identity-stable accessor
         @test keys(r[]) == (:points, :intensity, :flags, :counts, :pose)
         @test r[].points isa Vector{Point3f} && isempty(r[].points)
         @test r[].counts == 0
@@ -106,17 +111,18 @@ using Makie
         # origin folds into the omni:xform model (author + live writes agree)
         m = OM._usdplot_model(p, Makie.Mat4f(Makie.LinearAlgebra.I))
         @test m[Vec(1, 2, 3), 4] == Vec3f(0, 0, 1.5)
-        # the WRITTEN xform carries the Y-spin mount rotation; the sensor→data `pose` does NOT
-        # (the model's output frame aligns with the mount frame)
+        # the WRITTEN xform carries the Y-spin mount rotation; the
+        # sensor→data `pose` does NOT (the model's output frame aligns with
+        # the mount frame)
         @test m[Vec(1, 2, 3), Vec(1, 2, 3)] ≈ OM._SENSOR_BASE_ROT[Vec(1, 2, 3), Vec(1, 2, 3)]
         mount = OM._sensor_mount(p, Makie.Mat4f(Makie.LinearAlgebra.I))
         @test mount[Vec(1, 2, 3), Vec(1, 2, 3)] ≈ Makie.Mat3f(Makie.LinearAlgebra.I)
         @test mount[Vec(1, 2, 3), 4] == Vec3f(0, 0, 1.5)
 
         @test OM.consumed_inputs(p) == [:model_f32c, :visible]
-        @test haskey(p.attributes, :model_f32c)                # registered by plot! (usdplot lesson)
+        @test haskey(p.attributes, :model_f32c)   # plot! registers :model_f32c
         bb = Makie.data_limits(p)
-        @test all(Makie.widths(bb) .≈ 0.1)                     # sensors don't inflate axis limits
+        @test all(Makie.widths(bb) .≈ 0.1)   # sensors don't inflate limits
 
         @test OM._is_sensor_plot(p) && OM._is_sensor_plot(rad)
         @test !OM._is_sensor_plot(mesh!(ls, Rect3f(Point3f(0), Vec3f(1))))
@@ -126,17 +132,37 @@ using Makie
         @test !OM._scene_contains_sensors(Makie.get_scene(ls2))
     end
 
+    @testset "composite-nested sensor detection" begin
+        # A sensor nested among a composite plot's children (like a user
+        # recipe that plots a lidar!) is authored by insert!'s `plot.plots`
+        # recursion, so the walkers must recurse the same way — a top-level-
+        # only scan of scene.plots would MISS it.
+        fig3 = Figure(); ls3 = LScene(fig3[1, 1])
+        sc3  = Makie.get_scene(ls3)
+        parent = mesh!(ls3, Rect3f(Point3f(0), Vec3f(1)); color = :gray)
+        nested = lidar!(parent, Point3f(0, 0, 1.5); channels = [:coordinates])
+        @test nested isa OM.Lidar
+        @test any(p -> p isa OM.Lidar, parent.plots)   # nested under the mesh plot
+        @test !any(p -> p isa OM.Lidar, sc3.plots)     # NOT a direct scene plot
+        # top-level-only scan misses it; the recursive walker finds it
+        @test !any(OM._is_sensor_plot, sc3.plots)
+        @test OM._plot_contains_sensor(parent)
+        @test OM._scene_contains_sensors(sc3)
+    end
+
     @testset "ScreenConfig contract" begin
-        @test fieldnames(OM.ScreenConfig)[end] == :sensors     # appended (positional-ctor contract)
+        # appended (positional-ctor contract)
+        @test fieldnames(OM.ScreenConfig)[end] == :sensors
         @test fieldtype(OM.ScreenConfig, :sensors) == Bool
         theme = Makie.CURRENT_DEFAULT_THEME[:OmniverseMakie]
-        @test Makie.to_value(theme[:sensors]) == false         # no BVH cost for sensor-free scenes
+        # no BVH cost for sensor-free scenes
+        @test Makie.to_value(theme[:sensors]) == false
     end
 end
 
-# =============================================================================================
+# ==============================================================================
 # GPU tier — one subprocess, 2 renderer creations
-# =============================================================================================
+# ==============================================================================
 
 const _SENSOR_PROG = """
 using OmniverseMakie, ColorTypes, FixedPointNumbers
@@ -144,7 +170,8 @@ import OmniverseMakie as OM
 using OmniverseMakie: OV
 using Test: @test_logs
 
-# Known geometry (data space, Z-up): ground top at z=0, a 1.5 m cube centred at x = 10.
+# Known geometry (data space, Z-up): ground top at z=0, a 1.5 m cube centred
+# at x = 10.
 # Sensor height h = 1.5 → sensor-frame ground plane at z = −1.5.
 function build_scene()
     scene = Scene(size = (320, 320); lights = AbstractLight[
@@ -160,17 +187,18 @@ scene  = build_scene()
 sensor = lidar!(scene, Point3f(0, 0, 1.5); channels = [:coordinates, :intensity])
 rad    = radar!(scene, Point3f(0, 0, 1.5))
 screen = OM.Screen(scene)
-println("MOTION_BVH_AUTO=", screen.renderer.motion_bvh)      # scene has sensors → auto-on
+# scene has sensors → auto-on
+println("MOTION_BVH_AUTO=", screen.renderer.motion_bvh)
 
-Makie.colorbuffer(screen)                                     # authors the stage + first render
-println("SENSOR_PROG_READY")                                  # early ready marker (retry loop)
+Makie.colorbuffer(screen)      # authors the stage + first render
+println("SENSOR_PROG_READY")   # early ready marker (retry loop)
 
 fired = Ref(0)
 on(_ -> fired[] += 1, sensor_returns(sensor))
 
 resets = Ref(0)
 OV._RESET_OBSERVER[] = () -> (resets[] += 1)
-step_sensors!(screen, 0.1)                                    # steady state: nothing changed
+step_sensors!(screen, 0.1)   # steady state: nothing changed
 println("STEADY_STEP_RESETS=", resets[])
 OV._RESET_OBSERVER[] = nothing
 
@@ -181,15 +209,15 @@ println("LIDAR_NPOINTS=", length(r.points))
 println("LIDAR_INTENSITY_LEN=", length(r.intensity))
 println("LIDAR_INTENSITY_POS=", count(>(0), r.intensity))
 zs = [p[3] for p in r.points]
-println("LIDAR_MINZ=", minimum(zs))                           # sensor frame: ground ⇒ ≈ −1.5
+println("LIDAR_MINZ=", minimum(zs))   # sensor frame: ground ⇒ ≈ −1.5
 cube_hits = count(p -> 9.0 < p[1] < 11.0 && abs(p[2]) < 1.5 && p[3] > -1.4, r.points)
 println("LIDAR_CUBE_HITS=", cube_hits)
 println("LIDAR_TON_ELTYPE=", eltype(r.points))
 
-# Pose move: slide the sensor 3 m toward the cube (live omni:xform diff).  Lateral moves are
-# fan-geometry-proof oracles: the flat ground stays at sensor-frame z = −h while the cube
-# cluster shifts from x ≈ 10 to x ≈ 7.  (Raising the sensor instead pushes the ground out of
-# the default model's elevation-fan × ~16 m range envelope — measured, not a bug.)
+# Pose move: slide the sensor 3 m toward the cube (live omni:xform diff).
+# Lateral moves keep the flat ground at sensor-frame z = −h while the cube
+# cluster shifts from x ≈ 10 to x ≈ 7; raising the sensor instead pushes the
+# ground out of the default model's elevation-fan range envelope.
 translate!(sensor, 3, 0, 0)
 step_sensors!(screen, 0.1)
 r2 = sensor_returns(sensor)[]
@@ -206,15 +234,17 @@ println("RADAR_KEYS_OK=", keys(rr) == (:points, :rcs, :radial_velocity, :counts,
 println("RADAR_RCS_FINITE=", all(isfinite, rr.rcs))
 println("RADAR_RV_FINITE=", all(isfinite, rr.radial_velocity))
 
-# delete!: the lidar leaves the stepping set; stepping the remaining radar still works.
-# (Bare-Scene test convention: screen-level delete!/insert! are called explicitly.)
+# delete!: the lidar leaves the stepping set; stepping the remaining radar
+# still works. (Bare-Scene test convention: screen-level delete!/insert!
+# are called explicitly.)
 delete!(screen, scene, sensor)
 step_sensors!(screen, 0.1)
 rr2 = sensor_returns(rad)[]
 println("RADAR_COUNTS_AFTER_DELETE=", rr2.counts)
 close(screen)
 
-# Post-display insert on a sensor-less screen: no motion BVH → one-time warn, static scene works.
+# Post-display insert on a sensor-less screen: no motion BVH → one-time
+# warn, static scene works.
 scene2  = build_scene()
 screen2 = OM.Screen(scene2)
 Makie.colorbuffer(screen2)
@@ -232,37 +262,47 @@ println("OK_SENSORS")
 """
 
 @testset "lidar/radar end-to-end point clouds (subprocess)" begin
-    _, out = run_ovrtx_subprocess(_SENSOR_PROG; timeout = 600, retries = 4,
-                                  ready_marker = "SENSOR_PROG_READY")
+    exitcode, out = run_ovrtx_subprocess(_SENSOR_PROG; timeout = 600, retries = 4,
+                                         ready_marker = "SENSOR_PROG_READY")
     contains(out, "OK_SENSORS") || @info "sensor prog output" out
+    @test exitcode == 0          # clean exit (catches a teardown segfault)
     @test contains(out, "OK_SENSORS")
 
-    @test contains(out, "MOTION_BVH_AUTO=true")            # sensors in scene → BVH auto-enabled
-    @test contains(out, "STEADY_STEP_RESETS=0")            # step_sensors! alone never resets RT2
+    # sensors in scene → BVH auto-enabled
+    @test contains(out, "MOTION_BVH_AUTO=true")
+    # step_sensors! alone never resets RT2
+    @test contains(out, "STEADY_STEP_RESETS=0")
 
     m = match(r"LIDAR_COUNTS=(\d+)", out)
-    @test m !== nothing && parse(Int, m.captures[1]) > 10_000     # a full instant scan (~200k on the spike scene)
-    @test contains(out, "LIDAR_FIRED=1")                   # observable fired exactly once per step
+    # a full instant scan
+    @test m !== nothing && parse(Int, m.captures[1]) > 10_000
+    # observable fired exactly once per step
+    @test contains(out, "LIDAR_FIRED=1")
     counts = parse(Int, m.captures[1])
     mnp = match(r"LIDAR_NPOINTS=(\d+)", out)
-    @test mnp !== nothing && parse(Int, mnp.captures[1]) == counts   # validity-sliced to Counts
+    # validity-sliced to Counts
+    @test mnp !== nothing && parse(Int, mnp.captures[1]) == counts
     mil = match(r"LIDAR_INTENSITY_LEN=(\d+)", out)
     @test mil !== nothing && parse(Int, mil.captures[1]) == counts
     mip = match(r"LIDAR_INTENSITY_POS=(\d+)", out)
     @test mip !== nothing && parse(Int, mip.captures[1]) > 0
 
-    # Sensor-frame geometry oracles: flat ground at −h (invariant under the lateral move),
-    # cube cluster at x ≈ 10, then x ≈ 7 after sliding the sensor 3 m toward it.
+    # Sensor-frame geometry oracles: flat ground at −h (invariant under the
+    # lateral move), cube cluster at x ≈ 10, then x ≈ 7 after sliding the
+    # sensor 3 m toward it.
     mz = match(r"LIDAR_MINZ=([-\d.]+)", out)
     @test mz !== nothing && -1.6 < parse(Float64, mz.captures[1]) < -1.4
     mch = match(r"LIDAR_CUBE_HITS=(\d+)", out)
-    @test mch !== nothing && parse(Int, mch.captures[1]) > 50     # the 10 m cube returns
+    # the 10 m cube returns
+    @test mch !== nothing && parse(Int, mch.captures[1]) > 50
     mzm = match(r"LIDAR_MINZ_MOVED=([-\d.]+)", out)
     @test mzm !== nothing && -1.6 < parse(Float64, mzm.captures[1]) < -1.4
     mchm = match(r"LIDAR_CUBE_HITS_MOVED=(\d+)", out)
-    @test mchm !== nothing && parse(Int, mchm.captures[1]) > 50   # scan followed the pose move
+    # scan followed the pose move
+    @test mchm !== nothing && parse(Int, mchm.captures[1]) > 50
     mpx = match(r"POSE_X=([-\d.]+)", out)
-    @test mpx !== nothing && 2.9 < parse(Float64, mpx.captures[1]) < 3.1   # pose carries the move
+    # pose carries the move
+    @test mpx !== nothing && 2.9 < parse(Float64, mpx.captures[1]) < 3.1
 
     mrc = match(r"RADAR_COUNTS=(\d+)", out)
     @test mrc !== nothing && parse(Int, mrc.captures[1]) > 0
@@ -270,12 +310,18 @@ println("OK_SENSORS")
     @test contains(out, "RADAR_RCS_FINITE=true")
     @test contains(out, "RADAR_RV_FINITE=true")
     mrd = match(r"RADAR_COUNTS_AFTER_DELETE=(\d+)", out)
-    @test mrd !== nothing && parse(Int, mrd.captures[1]) > 0      # stepping survives the delete!
+    # stepping survives the delete!
+    @test mrd !== nothing && parse(Int, mrd.captures[1]) > 0
 
-    @test contains(out, "MOTION_BVH_SENSORLESS=false")     # no silent BVH cost without sensors
-    # Post-display insert on a sensor-less screen is the documented DEGRADED path (cm stage,
-    # no BVH — the child's @test_logs pins the warn): the oracle is that authoring + stepping
-    # WORK mechanically, not scan quality (sensor physics are 100× off in data units there).
+    # no silent BVH cost without sensors
+    @test contains(out, "MOTION_BVH_SENSORLESS=false")
+    # Post-display insert on a sensor-less screen is the documented DEGRADED
+    # path (cm stage, no BVH — the child's @test_logs pins the warn): the
+    # oracle is that authoring + stepping WORK mechanically, not scan
+    # quality (sensor physics are 100× off in data units there).
+    # The degraded (cm-stage, no-BVH) path can legitimately return zero points
+    # — the oracle is that step_sensors! ran and published a counts field
+    # (the line printed), not scan quality.  `(\d+) >= 0` was a tautology.
     mlc = match(r"LATE_LIDAR_COUNTS=(\d+)", out)
-    @test mlc !== nothing && parse(Int, mlc.captures[1]) >= 0
+    @test mlc !== nothing
 end

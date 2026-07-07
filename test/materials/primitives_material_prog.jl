@@ -1,20 +1,23 @@
-# Subprocess body for the M3.5 primitive-coverage material INTEGRATION renders
-# (read + run by test/m3_material_test.jl via run_ovrtx_subprocess).  Standalone .jl
-# so the Makie scene setup needs no escaping.
+# Subprocess body for the primitive-coverage material INTEGRATION renders
+# (read + run by materials/material_test.jl via run_ovrtx_subprocess).
+# Standalone .jl so the Makie scene setup needs no escaping.
 #
-# Proves M3.5 end to end THROUGH the real Screen / colorbuffer pipeline that the OmniPBR
-# `material=` escape hatch now applies to the OTHER primitive types:
-#   - MeshScatter: `material=(; metallic, roughness)` → the instances render METALLIC
-#     (sharp specular over a dark body), DISTINCT from the same meshscatter shaded
-#     plain-diffuse.  (A materialized instancer is rendered as a merged UsdGeomMesh, since
-#     ovrtx does not honor materials on a PointInstancer.)
-#   - Surface: `material=(; metallic, roughness)` → a materialized `UsdGeomMesh` (NO
-#     displayColor) that BINDS + renders, substantially different from the plain surface.
-#   - Lines: `material=(; emissive=(1,0,0))` → an emissive RED curve (validates the
-#     `bool enable_emission` + `emissive_intensity` fix — without it emission is OFF and
-#     the curve reads OmniPBR's near-grey default, NOT red).  Red-dominance is measured by
-#     a RED-PIXEL COUNT (luminance under-weights red: a full-red pixel has luminance only
-#     0.21, so a luminance-mean is swamped by the brighter background).
+# End to end THROUGH the real Screen / colorbuffer pipeline: the OmniPBR
+# `material=` escape hatch applies to the OTHER primitive types:
+#   - MeshScatter: `material=(; metallic, roughness)` → the instances render
+#     METALLIC (sharp specular over a dark body), DISTINCT from the same
+#     meshscatter shaded plain-diffuse.  (A materialized instancer is
+#     rendered as a merged UsdGeomMesh, since ovrtx does not honor materials
+#     on a PointInstancer.)
+#   - Surface: `material=(; metallic, roughness)` → a materialized
+#     `UsdGeomMesh` (NO displayColor) that BINDS + renders, substantially
+#     different from the plain surface.
+#   - Lines: `material=(; emissive=(1,0,0))` → an emissive RED curve (without
+#     `bool enable_emission` + `emissive_intensity` emission is OFF and the
+#     curve reads OmniPBR's near-grey default, NOT red).  Red-dominance is
+#     measured by a RED-PIXEL COUNT (luminance under-weights red: a full-red
+#     pixel has luminance only 0.21, so a luminance mean is swamped by the
+#     brighter background).
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
 const OM = OmniverseMakie
@@ -38,8 +41,9 @@ function meanabsdiff(a, b)
     end
     return s / (3 * length(a))
 end
-# Count strongly RED-dominant pixels (the emissive curve): red high AND clearly above
-# both other channels.  A plain (non-emissive) curve / the blue-ish background score ~0.
+# Count strongly RED-dominant pixels (the emissive curve): red high AND
+# clearly above both other channels.  A plain (non-emissive) curve / the
+# blue-ish background score ~0.
 function redcount(img; thr = 0.35f0)
     n = 0
     for c in img
@@ -49,11 +53,21 @@ function redcount(img; thr = 0.35f0)
     return n
 end
 
+# Each material variant bakes its OmniPBR material into the stage at open
+# time, so every render needs its OWN Screen.  Create it explicitly and
+# `close` it (freeing the renderer) after reading the frame — an implicit
+# `colorbuffer(scene)` Screen never closes, and six leaked renderers in one
+# child overrun the machine-wide SyncScopeIds budget.
 function render_scene(build!; setcam! = nothing)
     fig = Figure(); ax = LScene(fig[1, 1])
     build!(ax)
     setcam! === nothing || setcam!(ax)
-    return Makie.colorbuffer(ax.scene; warmup = 64)
+    screen = OM.Screen(ax.scene; warmup = 64)
+    try
+        return Makie.colorbuffer(screen)
+    finally
+        close(screen)
+    end
 end
 
 basecol = RGBf(0.72, 0.20, 0.20)
@@ -101,8 +115,8 @@ println("LINES_WHITE redpix=$(rcW)")
 @assert sSm.nonblack > 2000 "metallic surface (near) black: $(sSm.nonblack)"
 @assert madS > 0.02 "metallic surface too similar to plain (mad=$(madS)): bind did not take"
 
-# Lines emissive: MANY red-dominant pixels (the curve glows red) and FAR more than a
-# plain white curve — the bool enable_emission + emissive_intensity fix renders emission.
+# Lines emissive: MANY red-dominant pixels (the curve glows red) and FAR more
+# than a plain white curve — enable_emission + emissive_intensity in action.
 @assert rcE > 500 "emissive lines not visibly red: redpix=$(rcE)"
 @assert rcE > 20 * (rcW + 1) "emissive lines not decisively redder than plain: $(rcE) vs white $(rcW)"
 

@@ -1,13 +1,15 @@
 using Test
 
-# M6.A Task 3 — OV.map_cuda: map a render var as LINEAR CUDA device memory (mode 2)
-# and return RAW handles (no CUDA.jl in the main module).  HdrColor is kDLFloat/16,
-# so we map LINEAR (not CUDA_ARRAY) — Task 4 wraps `data` as a CuArray{Float16} and
-# tonemaps it on-device, which an opaque CUarray (mode 3) could not support.
+# OV.map_cuda: map a render var as LINEAR CUDA device memory (mode 2) and
+# return RAW handles (no CUDA.jl in the main module).  HdrColor is
+# kDLFloat/16, mapped LINEAR (not CUDA_ARRAY): the GPU present wraps `data`
+# as a CuArray{Float16} and tonemaps on-device, which an opaque CUarray
+# (mode 3) could not support.
 #
-# `using CUDA` in the subprocess loads libcuda + a functional GPU context so ovrtx's
-# CUDA map succeeds; the helper sets JULIA_CUDA_USE_COMPAT=false so CUDA.jl and ovrtx
-# share the system driver (else ovrtx createDevices fails, driver result 3).
+# `using CUDA` in the subprocess loads libcuda + a functional GPU context so
+# ovrtx's CUDA map succeeds; the helper sets JULIA_CUDA_USE_COMPAT=false so
+# CUDA.jl and ovrtx share the system driver (else ovrtx createDevices fails,
+# driver result 3).
 const _M6_MAPCUDA_PROG = """
 using OmniverseMakie, CUDA
 const OV = OmniverseMakie.OV

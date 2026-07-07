@@ -2,23 +2,21 @@ using Test
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M2.5 — leak-free `delete!` / `delete!(scene)` / `empty!` teardown.
+# Leak-free `delete!` / `delete!(scene)` / `empty!` teardown.
 #
 # Imperative teardown on the OPEN stage (no re-author) must leave ZERO residual
-# prims-with-content, GPU bindings, diff-nodes, or scene listeners:
+# prims-with-content, GPU bindings, or diff-nodes:
 #
-#   delete!(screen, scene, plot)  → destroy bindings, remove_usd! the reference,
-#       drop plot2robj, delete the :ovrtx_renderobject node; render drops to bg.
-#   delete!(screen, scene)        → recurse children + plots; Observables.off each
-#       listener; drop scene_listeners + scene2scope.  Add/remove a subscene 50× →
-#       scene_listeners + plot2robj return to baseline (NO accumulation).
-#   empty!(screen)                → tear down everything; all three registries empty
-#       + every binding destroyed; the screen still renders a freshly-added plot
-#       (structural-re-open carry: references re-add on the still-open stage).
-#
-# RED (M2.4, no typed delete!/empty!): the typed methods don't exist → the
-#   subprocess errors on the first delete!(screen, scene, plot) call.
-# GREEN (M2.5): the three typed methods tear down leak-free.
+#   delete!(screen, scene, plot)  → destroy bindings, remove_usd! the
+#       reference, drop plot2robj, delete the :ovrtx_renderobject node;
+#       render drops to bg.
+#   delete!(screen, scene)        → recurse children + plots; drop
+#       scene2scope.  Add/remove a subscene 50× → registries return to
+#       baseline (NO accumulation).
+#   empty!(screen)                → tear down everything; all three registries
+#       empty + every binding destroyed; the screen still renders a
+#       freshly-added plot (structural-re-open carry: references re-add on
+#       the still-open stage).
 # ---------------------------------------------------------------------------
 
 # ===========================================================================
@@ -81,10 +79,8 @@ println("NONBLACK_READD=\$(nb2)")
 empty!(screen)
 println("PLOT2ROBJ_AFTER_EMPTY=\$(length(screen.plot2robj))")
 println("SCENE2SCOPE_AFTER_EMPTY=\$(length(screen.scene2scope))")
-println("SCENE_LISTENERS_AFTER_EMPTY=\$(length(screen.scene_listeners))")
 @assert isempty(screen.plot2robj) "plot2robj not empty after empty!"
 @assert isempty(screen.scene2scope) "scene2scope not empty after empty!"
-@assert isempty(screen.scene_listeners) "scene_listeners not empty after empty!"
 @assert !haskey(m2.attributes, :ovrtx_renderobject) "m2 node leaked after empty!"
 
 # ---- structural-re-open carry: add a plot + colorbuffer renders correctly ----
@@ -122,10 +118,9 @@ println("OK_DELETE")
         @test false
     end
 
-    # All three registries empty after empty!.
+    # Both registries empty after empty!.
     @test contains(output, "PLOT2ROBJ_AFTER_EMPTY=0")
     @test contains(output, "SCENE2SCOPE_AFTER_EMPTY=0")
-    @test contains(output, "SCENE_LISTENERS_AFTER_EMPTY=0")
 
     # Structural-re-open carry: a plot added after empty! renders.
     mr = match(r"NONBLACK_AFTER_EMPTY_READD=(\d+)", output)
@@ -138,10 +133,9 @@ end
 
 # ===========================================================================
 # Subprocess 2 — add/remove a subscene 50× → registries return to baseline.
-#
-# The GLMakie subscene leak we fix: every add must be matched by delete!(screen,
-# subscene) so scene_listeners + plot2robj do NOT accumulate (and remove_usd! 50×
-# closes the M1.6 per-reference handle leak — no GPU handle exhaustion).
+# Every add must be matched by delete!(screen, subscene) so scene_listeners +
+# plot2robj do NOT accumulate, and remove_usd! 50× frees every per-reference
+# handle (no GPU handle exhaustion).
 # ===========================================================================
 const _M25_SUBSCENE_LEAK_PROG = """
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
@@ -164,35 +158,29 @@ img0 = Makie.colorbuffer(screen)
 @assert nonblack(img0) > 300 "base build frame (near) black"
 
 base_robj      = length(screen.plot2robj)
-base_listeners = length(screen.scene_listeners)
+base_scope     = length(screen.scene2scope)
 println("BASELINE_ROBJ=\$(base_robj)")
-println("BASELINE_LISTENERS=\$(base_listeners)")
 
-peak_robj      = base_robj
-peak_listeners = base_listeners
+peak_robj = base_robj
 for i in 1:50
-    sub = Scene(scene)                                              # add a subscene
+    sub = Scene(scene)              # add a subscene
     pl  = mesh!(sub, Rect3f(Point3f(0, 0, 0), Vec3f(1)); color = :blue)
-    OM.insert!(screen, sub, pl)                                     # register its robj + listener slot
-    global peak_robj      = max(peak_robj, length(screen.plot2robj))
-    global peak_listeners = max(peak_listeners, length(screen.scene_listeners))
+    OM.insert!(screen, sub, pl)     # register its robj + scope
+    global peak_robj = max(peak_robj, length(screen.plot2robj))
     @assert haskey(screen.plot2robj, objectid(pl)) "subscene plot not registered (iter \$(i))"
-    delete!(screen, sub)                                            # remove the subscene
+    delete!(screen, sub)            # remove the subscene
     @assert !haskey(screen.plot2robj, objectid(pl)) "subscene plot still registered after delete (iter \$(i))"
-    @assert !haskey(screen.scene_listeners, objectid(sub)) "subscene listener slot leaked (iter \$(i))"
 end
 
 println("PEAK_ROBJ=\$(peak_robj)")
-println("PEAK_LISTENERS=\$(peak_listeners)")
 println("FINAL_ROBJ=\$(length(screen.plot2robj))")
-println("FINAL_LISTENERS=\$(length(screen.scene_listeners))")
+println("FINAL_SCOPE=\$(length(screen.scene2scope))")
 
 # The add actually grew the registries (the test isn't a no-op)…
-@assert peak_robj      == base_robj + 1 "subscene add did not grow plot2robj"
-@assert peak_listeners == base_listeners + 1 "subscene add did not reserve a listener slot"
+@assert peak_robj == base_robj + 1 "subscene add did not grow plot2robj"
 # …and 50 add/remove cycles returned them EXACTLY to baseline (NO accumulation).
-@assert length(screen.plot2robj)      == base_robj "plot2robj accumulated over 50× (got \$(length(screen.plot2robj)), baseline \$(base_robj))"
-@assert length(screen.scene_listeners) == base_listeners "scene_listeners accumulated over 50× (got \$(length(screen.scene_listeners)), baseline \$(base_listeners))"
+@assert length(screen.plot2robj)  == base_robj  "plot2robj accumulated over 50× (got \$(length(screen.plot2robj)), baseline \$(base_robj))"
+@assert length(screen.scene2scope) == base_scope "scene2scope accumulated over 50× (got \$(length(screen.scene2scope)), baseline \$(base_scope))"
 
 # The stage still renders after all the churn.
 img1 = Makie.colorbuffer(screen)
@@ -215,13 +203,12 @@ println("OK_SUBSCENE_LEAK")
     # Registries returned to baseline (no accumulation over 50 cycles).
     bl_r = match(r"BASELINE_ROBJ=(\d+)", output)
     fn_r = match(r"FINAL_ROBJ=(\d+)", output)
-    bl_l = match(r"BASELINE_LISTENERS=(\d+)", output)
-    fn_l = match(r"FINAL_LISTENERS=(\d+)", output)
     pk_r = match(r"PEAK_ROBJ=(\d+)", output)
-    if all(x -> x !== nothing, (bl_r, fn_r, bl_l, fn_l, pk_r))
-        @test parse(Int, fn_r.captures[1]) == parse(Int, bl_r.captures[1])   # robj baseline
-        @test parse(Int, fn_l.captures[1]) == parse(Int, bl_l.captures[1])   # listeners baseline
-        @test parse(Int, pk_r.captures[1]) == parse(Int, bl_r.captures[1]) + 1  # add did grow it
+    if all(x -> x !== nothing, (bl_r, fn_r, pk_r))
+        # robj baseline
+        @test parse(Int, fn_r.captures[1]) == parse(Int, bl_r.captures[1])
+        # add did grow it
+        @test parse(Int, pk_r.captures[1]) == parse(Int, bl_r.captures[1]) + 1
     else
         @test false
     end

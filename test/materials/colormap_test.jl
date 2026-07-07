@@ -1,22 +1,19 @@
 using Test
+import OmniverseMakie   # bind the module name so this file runs standalone too
+using OmniverseMakie: Figure, LScene, Point3f, meshscatter!, RGBf
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # ---------------------------------------------------------------------------
-# M4 follow-up — numeric `color` + `colormap` on meshscatter!/lines!/linesegments!
-# (and per-vertex `mesh!`).
+# Numeric `color` + `colormap` on meshscatter!/lines!/linesegments! (and
+# per-vertex `mesh!`).
 #
-# Before this fix, a colour-mapped scatter/line resolved `:scaled_color` to a
-# `Vector{Float32}` that `_displaycolor_from_scaled` could not handle — it fell through to
-# `_rgb(to_color(::Vector))` → `MethodError: no method matching red(::Vector{Float32})`,
-# failing the whole render (the M4 examples worked around it with an in-scene `cmap_colors`).
+# Unit (parent process, NO render): `_scaled_to_display` maps a numeric
+# `scaled_color` vector through the plot's colormap → a per-VERTEX colour
+# list; a Colorant/scalar `scaled_color` still takes the constant path.
 #
-# Unit (parent process, NO render): `_scaled_to_display` maps a numeric `scaled_color` vector
-# through the plot's colormap → a per-VERTEX colour list; a Colorant/scalar `scaled_color`
-# still takes the byte-unchanged constant path.
-#
-# Integration (subprocess, ★): a colormapped meshscatter + linesegments render non-black and
-# show a VARIED colormap gradient through the full Screen/colorbuffer pipeline.  Body is
-# `test/m4_colormap_prog.jl`.
+# Integration (subprocess): a colormapped meshscatter + linesegments render
+# non-black and show a VARIED colormap gradient through the full
+# Screen/colorbuffer pipeline.  Body: `colormap_prog.jl`.
 # ---------------------------------------------------------------------------
 
 @testset "M4 _scaled_to_display maps numeric color via colormap (unit)" begin
@@ -32,10 +29,11 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     @test all(v -> v isa NTuple{3,Float32}, values)
     # the colormap gradient produced VARIED colours (not one flat colour)
     @test length(unique(values)) >= 8
-    # endpoints differ (low end of :plasma is dark purple, high end is bright yellow)
+    # endpoints differ (low end of :plasma is dark purple, high end is
+    # bright yellow)
     @test values[1] != values[end]
 
-    # a Colorant `scaled_color` still resolves to ONE constant colour (byte-unchanged path)
+    # a Colorant `scaled_color` still resolves to ONE constant colour
     cvals, cinterp = OmniverseMakie._scaled_to_display(p, RGBf(1, 0, 0), length(vals))
     @test cinterp == "constant"
     @test cvals == (1.0f0, 0.0f0, 0.0f0)
