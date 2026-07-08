@@ -4,8 +4,7 @@
 const EXAMPLES_DIR = @__DIR__
 const RPR_DIR  = joinpath(EXAMPLES_DIR, "rpr")
 const RUN_ONE  = joinpath(EXAMPLES_DIR, "common", "run_one.jl")
-const OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH",
-    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/python/minimal/.venv/lib/python3.13/site-packages/ovrtx/bin/libovrtx-dynamic.so")
+const OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH", "")
 
 scenes = isempty(ARGS) ?
     sort([replace(basename(f), ".jl" => "") for f in readdir(RPR_DIR; join = true)
@@ -15,9 +14,13 @@ scenes = isempty(ARGS) ?
 results = Tuple{String,Symbol}[]
 for s in scenes
     println("\n=== rendering $(s) ===")
+    env_pairs = Pair{String,String}[
+        "PATH" => get(ENV, "PATH", ""),
+        "HOME" => get(ENV, "HOME", ""),
+    ]
+    isempty(OVRTX_LIB) || push!(env_pairs, "OVRTX_LIBRARY_PATH" => OVRTX_LIB)
     cmd = setenv(`julia --project=$(EXAMPLES_DIR) $(RUN_ONE) $(s)`,
-                 "OVRTX_LIBRARY_PATH" => OVRTX_LIB,
-                 "PATH" => get(ENV, "PATH", ""), "HOME" => get(ENV, "HOME", ""))
+                 env_pairs)
     ok = success(pipeline(cmd; stdout = stdout, stderr = stderr))
     push!(results, (s, ok ? :pass : :fail))
 end

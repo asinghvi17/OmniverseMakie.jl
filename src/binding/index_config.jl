@@ -104,6 +104,12 @@ function _synth_index_config(ovrtx_bin::AbstractString, libs::AbstractString)
     return path
 end
 
+function _resolved_ovrtx_bin()
+    lib = get(ENV, "OVRTX_LIBRARY_PATH", LibOVRTX.libovrtx)
+    isempty(lib) && error("OVRTX runtime path is empty")
+    return dirname(lib)
+end
+
 # Disable the crash reporter on the non-volume path (no IndeX env): point
 # CARB_FRAMEWORK_CONFIG_NAME at a copy of the install config with the reporter
 # disabled — unless carb is already routed to a config (user-set env wins; a
@@ -114,9 +120,7 @@ function _ensure_crashreporter_off!()
     # existing carb routing (user-set env) wins
     haskey(ENV, "CARB_FRAMEWORK_CONFIG_NAME") && return nothing
     try
-        lib = get(ENV, "OVRTX_LIBRARY_PATH", "")
-        isempty(lib) && return nothing
-        ovrtx_bin = dirname(lib)
+        ovrtx_bin = _resolved_ovrtx_bin()
         base_path = joinpath(ovrtx_bin, "ovrtx.config.json")
         isfile(base_path) || return nothing
         path = joinpath(mktempdir(), "nocrash.config.json")
@@ -160,7 +164,7 @@ const _ensure_index = Base.OncePerProcess{Bool}() do
         return false
     end
     try
-        ovrtx_bin = dirname(ENV["OVRTX_LIBRARY_PATH"])   # == CARB_APP_PATH
+        ovrtx_bin = _resolved_ovrtx_bin()   # == CARB_APP_PATH
         config_file = if !isempty(cfg)
             isfile(cfg) || error("OMNIVERSEMAKIE_OVRTX_CONFIG points to a missing file: $cfg")
             cfg

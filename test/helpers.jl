@@ -2,8 +2,7 @@
 # Provides run_ovrtx_subprocess plus shared scaffolding: the ovrtx-startup
 # retry loop, the IndeX-libs default, and the pixel-inspection prelude.
 
-const _HELPER_OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH",
-    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/python/minimal/.venv/lib/python3.13/site-packages/ovrtx/bin/libovrtx-dynamic.so")
+const _HELPER_OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH", "")
 const _HELPER_REPO_ROOT = joinpath(@__DIR__, "..")
 const _HELPER_USDA = get(ENV, "OM_USDA",
     "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda")
@@ -121,7 +120,6 @@ function _run_ovrtx_once(prog::String; timeout::Int, kill_grace::Real, env)
         # (has GLMakie)
         _load_path = join(["@", _test_dir, "@v#.#", "@stdlib"], ":")
         env_pairs = Pair{String,String}[
-            "OVRTX_LIBRARY_PATH"        => _HELPER_OVRTX_LIB,
             "OM_USDA"                   => _HELPER_USDA,
             "PATH"                      => get(ENV, "PATH", ""),
             "HOME"                      => get(ENV, "HOME", ""),
@@ -144,6 +142,8 @@ function _run_ovrtx_once(prog::String; timeout::Int, kill_grace::Real, env)
             # is loadable by subprocess programs that do `using GLMakie`.
             "JULIA_LOAD_PATH"           => _load_path,
         ]
+        isempty(_HELPER_OVRTX_LIB) ||
+            push!(env_pairs, "OVRTX_LIBRARY_PATH" => _HELPER_OVRTX_LIB)
         # Only forward XAUTHORITY when a cookie actually exists (ENV or
         # discovered) — forwarding a dead path produces an opaque GL error a
         # minute later instead of GLFW's clear init failure.

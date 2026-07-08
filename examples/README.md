@@ -29,7 +29,8 @@ julia --project=examples examples/run_all.jl uberMExample
 `run_all.jl` renders each scene in an isolated subprocess (ovrtx installs `carb` signal
 handlers), writes the PNG to `examples/renders/`, and property-asserts the result (non-black
 + a scene-appropriate signal). It is **not** part of `Pkg.test` — it is its own runner.
-`OVRTX_LIBRARY_PATH` must point at `libovrtx-dynamic.so`.
+By default the in-repo `OVRTX_jll` artifact downloads the official ovrtx C archive on first
+use; set `OVRTX_LIBRARY_PATH` only to override that runtime with a manual install.
 
 ## Gallery
 

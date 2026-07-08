@@ -30,14 +30,25 @@ real path-traced scenes end-to-end.
   release archive as a Julia artifact on first use. `ovrtx` is NVIDIA-proprietary and is
   not vendored here; the artifact downloads from NVIDIA's GitHub release. Set
   `OVRTX_LIBRARY_PATH` to use a manually installed runtime instead.
+- **A supported OVRTX release platform:** Linux x86_64, Linux aarch64, or Windows x86_64
+  for the current official C-library archives.
+- **Linux `unzip` on `PATH`.** The Linux OVRTX archives contain symlinks that `p7zip`
+  rejects, so `OVRTX_jll` uses Info-ZIP `unzip` on Unix.
+- **Enough depot space for the OVRTX runtime.** The Linux x86_64 artifact is about 3.5 GB
+  after extraction; a clean first install also needs temporary room while unpacking.
 - **Julia 1.12** or newer.
 - Optional, for the GPU-direct viewport blit: **CUDA** (via `CUDA.jl`) and **GLMakie**.
+  When using CUDA.jl in the same process as OVRTX, set `JULIA_CUDA_USE_COMPAT=false` so
+  both use the system NVIDIA driver library.
+
+The first renderer creation on a machine, or after a driver update, may spend several
+minutes compiling and caching RTX shaders. Later runs should start much faster.
 
 ### Environment variables
 
 | Variable | When | Purpose |
 |---|---|---|
-| `OVRTX_LIBRARY_PATH` | optional | Absolute path to `libovrtx-dynamic.so`. If set, `LibOVRTX` uses it and does not load the `OVRTX_jll` artifact. If unset, `LibOVRTX` resolves `OVRTX_jll.libovrtx_dynamic`; only if that fails does it fall back to the bare `libovrtx-dynamic.so` soname. |
+| `OVRTX_LIBRARY_PATH` | optional | Absolute path to `libovrtx-dynamic.so`. If set, `LibOVRTX` uses that library path. If unset, `LibOVRTX` uses `OVRTX_jll.libovrtx_dynamic`; only if that fails does it fall back to the bare `libovrtx-dynamic.so` soname. |
 | `OMNIVERSEMAKIE_INDEX_LIBS` | volume rendering | Path to the `omni.index.libs` extension **root** (the loader appends `/bin/nvindex-libs`). Enables NVIDIA IndeX by synthesizing a carb config. |
 | `OMNIVERSEMAKIE_OVRTX_CONFIG` | volume rendering (alternative) | Absolute path to a ready `*.config.json` that already registers `/app/tokens/omni.index.libs`. Takes precedence over `OMNIVERSEMAKIE_INDEX_LIBS`. |
 | `OVRTX_LIBOPENGL_PATH` | optional | Override the `libOpenGL.so` `ovrtx`'s `usd_resolver` plugin needs (defaults to `Libglvnd_jll`). |
