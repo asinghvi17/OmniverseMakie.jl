@@ -44,7 +44,9 @@ risk is integration glue, not feasibility.
 1. **Interactive 3D exploration** is the v1 north-star (live RTX viewport you orbit/zoom),
    built on a static `Scene→USD→image` foundation.
 2. **Direct `ccall`** to `libovrtx-dynamic.so` from the start (no Python/PythonCall), in a
-   `LibOVRTX` **subpackage**, mirroring RadeonProRender.jl's 3-layer wrap.
+   `LibOVRTX` **subpackage**, mirroring RadeonProRender.jl's 3-layer wrap. Runtime
+   discovery prefers an explicit `OVRTX_LIBRARY_PATH`, then the in-repo artifact-backed
+   `OVRTX_jll` wrapper over NVIDIA's official C-library release archive.
 3. **3D path-traced core** scope: `Mesh`, `MeshScatter`, `Scatter`, `Surface`, `Lines`,
    `Volume` (2D/text/axes deferred).
 4. **GPU-direct display** (ovrtx CUDA frame → GLMakie texture via CUDA-GL interop), CPU
@@ -55,8 +57,8 @@ Plus three hard requirements called out in review:
   correctly (better than GLMakie's subscene story).
 - **C zero-copy hot path** for animation — per-frame updates use `map_attribute`/array
   bindings, never USDA re-authoring.
-- **`Libdl.dlopen` with an `OVRTX_LIBRARY_PATH` override** — assume a system install; no
-  wheel discovery, no JLL.
+- **`Libdl.dlopen` with an `OVRTX_LIBRARY_PATH` override** — explicit installs stay
+  supported; by default the in-repo `OVRTX_jll` artifact wrapper supplies the runtime.
 
 ---
 
@@ -149,7 +151,8 @@ Package name: **`OmniverseMakie`**. Subpackage: **`LibOVRTX`** at `lib/LibOVRTX/
 ### 4.2 Loading & environment (validated, simpler than feared)
 
 - **`.so` discovery:** `Libdl.dlopen` of `libovrtx-dynamic.so`. Resolution order:
-  `ENV["OVRTX_LIBRARY_PATH"]` (explicit override) → default soname on the loader path. The
+  `ENV["OVRTX_LIBRARY_PATH"]` (explicit override) → `OVRTX_jll.libovrtx_dynamic`
+  (artifact-backed official NVIDIA release archive) → default soname on the loader path. The
   `.so` lives at `<ovrtx>/bin/libovrtx-dynamic.so` with a **runtime tree beside it**
   (`plugins/ usd_plugins/ mdl/ library/ libs/ rendering-data/ cache/ ovrtx.config.json`).
 - **Schema/plugin registration is automatic in C.** `ovrtx_create_renderer` →
@@ -173,8 +176,8 @@ Package name: **`OmniverseMakie`**. Subpackage: **`LibOVRTX`** at `lib/LibOVRTX/
 OmniverseMakie/                      # backend package
 ├── Project.toml                     # [deps] Makie, GLMakie, GeometryBasics, Colors,
 │                                    #   DLPack, CUDA, LibOVRTX (+ Libdl, LinearAlgebra)
-│                                    # [sources] LibOVRTX = { path = "lib/LibOVRTX" }
-│                                    # [workspace] projects = ["lib/LibOVRTX"]
+│                                    # [sources] LibOVRTX/OVRTX_jll = { path = "lib/…" }
+│                                    # [workspace] projects = ["lib/LibOVRTX", "lib/OVRTX_jll", …]
 ├── src/
 │   ├── OmniverseMakie.jl            # module, __init__ (dlopen, initialize), activate!
 │   ├── binding/  OV.jl, dlpack.jl   # high-level GC wrapper + async lifecycle
@@ -186,9 +189,10 @@ OmniverseMakie/                      # backend package
 │   ├── display.jl                   # GLMakie image! target; CPU + CUDA-GL blit
 │   └── settings.jl                  # render mode (RT2 realtime / PathTracing offline), samples
 ├── lib/LibOVRTX/                    # subpackage (raw bindings)
-│   ├── Project.toml                 # name=LibOVRTX; deps CEnum, Libdl
-│   ├── src/LibOVRTX.jl              # generated + loader (OVRTX_LIBRARY_PATH) + check_error
+│   ├── Project.toml                 # name=LibOVRTX; deps CEnum, Libdl, OVRTX_jll
+│   ├── src/LibOVRTX.jl              # generated + loader (OVRTX_LIBRARY_PATH/OVRTX_jll) + check_error
 │   └── gen/  generator.toml generator.jl   # Clang.jl regeneration
+├── lib/OVRTX_jll/                   # artifact wrapper over official NVIDIA ovrtx release zips
 ├── test/  ext/  docs/  ARCHITECTURE.md
 ```
 Concrete `[sources]`/`[workspace]` TOML and the Clang.jl `generator.jl` are in

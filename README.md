@@ -25,10 +25,11 @@ real path-traced scenes end-to-end.
 ## Requirements
 
 - **An NVIDIA GPU** (validated on an RTX A5000) and a working NVIDIA driver.
-- **An `ovrtx` install** providing `libovrtx-dynamic.so` and its runtime tree. `ovrtx` is
-  NVIDIA-proprietary and cannot be vendored — you install it yourself (e.g. the `ovrtx`
-  wheel; see the reproduction recipe in [`ARCHITECTURE.md`](ARCHITECTURE.md) §11). The
-  backend only `dlopen`s it.
+- **An `ovrtx` runtime** providing `libovrtx-dynamic.so` and its runtime tree. By default
+  the in-repo `OVRTX_jll` development package resolves NVIDIA's official `ovrtx` C-library
+  release archive as a Julia artifact on first use. `ovrtx` is NVIDIA-proprietary and is
+  not vendored here; the artifact downloads from NVIDIA's GitHub release. Set
+  `OVRTX_LIBRARY_PATH` to use a manually installed runtime instead.
 - **Julia 1.12** or newer.
 - Optional, for the GPU-direct viewport blit: **CUDA** (via `CUDA.jl`) and **GLMakie**.
 
@@ -36,7 +37,7 @@ real path-traced scenes end-to-end.
 
 | Variable | When | Purpose |
 |---|---|---|
-| `OVRTX_LIBRARY_PATH` | always (unless `libovrtx-dynamic.so` is already on the loader path) | Absolute path to `libovrtx-dynamic.so`. `LibOVRTX` `dlopen`s this at load; if unset it falls back to the bare `libovrtx-dynamic.so` soname. |
+| `OVRTX_LIBRARY_PATH` | optional | Absolute path to `libovrtx-dynamic.so`. If set, `LibOVRTX` uses it and does not load the `OVRTX_jll` artifact. If unset, `LibOVRTX` resolves `OVRTX_jll.libovrtx_dynamic`; only if that fails does it fall back to the bare `libovrtx-dynamic.so` soname. |
 | `OMNIVERSEMAKIE_INDEX_LIBS` | volume rendering | Path to the `omni.index.libs` extension **root** (the loader appends `/bin/nvindex-libs`). Enables NVIDIA IndeX by synthesizing a carb config. |
 | `OMNIVERSEMAKIE_OVRTX_CONFIG` | volume rendering (alternative) | Absolute path to a ready `*.config.json` that already registers `/app/tokens/omni.index.libs`. Takes precedence over `OMNIVERSEMAKIE_INDEX_LIBS`. |
 | `OVRTX_LIBOPENGL_PATH` | optional | Override the `libOpenGL.so` `ovrtx`'s `usd_resolver` plugin needs (defaults to `Libglvnd_jll`). |
@@ -55,10 +56,11 @@ The package is not registered; install it from a checkout.
 git clone <this-repo> OmniverseMakie.jl
 cd OmniverseMakie.jl
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
-export OVRTX_LIBRARY_PATH=/path/to/ovrtx/bin/libovrtx-dynamic.so
+# Optional: override the artifact runtime with a manual ovrtx install.
+# export OVRTX_LIBRARY_PATH=/path/to/ovrtx/bin/libovrtx-dynamic.so
 ```
 
-`LibOVRTX` and `NanoVDBWriter` are path `[sources]` sub-packages under
+`LibOVRTX`, `OVRTX_jll`, and `NanoVDBWriter` are path `[sources]` sub-packages under
 [`lib/`](lib) and resolve automatically.
 
 ---
@@ -360,5 +362,7 @@ black here and warns once. `:domelight` works natively. Tripwire test in
   (binding → translation → presentation), locked decisions, milestone plan, and the
   validation recipe.
 - **Sub-packages** — [`lib/LibOVRTX/`](lib/LibOVRTX) (raw `ccall` bindings, `dlopen` +
-  `OVRTX_LIBRARY_PATH`) and [`lib/NanoVDBWriter/`](lib/NanoVDBWriter) (pure-Julia
-  dense-array → `.nvdb` writer; see its README for attribution).
+  `OVRTX_LIBRARY_PATH` / `OVRTX_jll` resolution), [`lib/OVRTX_jll/`](lib/OVRTX_jll)
+  (artifact wrapper over NVIDIA's official ovrtx C-library release archive), and
+  [`lib/NanoVDBWriter/`](lib/NanoVDBWriter) (pure-Julia dense-array → `.nvdb` writer; see
+  its README for attribution).

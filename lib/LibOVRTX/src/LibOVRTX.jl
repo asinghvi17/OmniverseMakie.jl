@@ -5,9 +5,26 @@ import Libglvnd_jll
 
 # Resolved at runtime in __init__ so OVRTX_LIBRARY_PATH is honored (not baked
 # at precompile); generated `@ccall libovrtx.sym(...)` calls use this binding.
+# Resolution order: explicit OVRTX_LIBRARY_PATH, then the in-repo OVRTX_jll
+# artifact wrapper, then the bare soname for users with a loader-path install.
 global libovrtx::String = "libovrtx-dynamic.so"
 const _OVRTX_HANDLE  = Ref{Ptr{Cvoid}}(C_NULL)
 const _OPENGL_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
+const _OVRTX_JLL_ID = Base.PkgId(Base.UUID("1f3d2a3f-048b-4987-93b1-45f346dd13cd"), "OVRTX_jll")
+
+function _default_libovrtx_path()
+    haskey(ENV, "OVRTX_LIBRARY_PATH") && return ENV["OVRTX_LIBRARY_PATH"]
+    try
+        # Load lazily so an explicit OVRTX_LIBRARY_PATH never triggers the
+        # large artifact download.  With no env override, this is ordinary
+        # Julia artifact resolution: artifact"ovrtx" downloads on demand.
+        mod = Base.require(_OVRTX_JLL_ID)
+        return String(Base.invokelatest(getproperty, mod, :libovrtx_dynamic))
+    catch e
+        @warn "LibOVRTX: could not resolve OVRTX_jll artifact; falling back to loader-path libovrtx-dynamic.so" exception=(e, catch_backtrace()) maxlog=1
+        return "libovrtx-dynamic.so"
+    end
+end
 
 function __init__()
     # Load libOpenGL first and RTLD_GLOBAL (soname libOpenGL.so.0) so ovrtx's
@@ -20,12 +37,13 @@ function __init__()
         error("LibOVRTX: failed to dlopen libOpenGL at \"$libgl\" ($e). \
                Override the path with the OVRTX_LIBOPENGL_PATH env var.")
     end
-    global libovrtx = get(ENV, "OVRTX_LIBRARY_PATH", "libovrtx-dynamic.so")
+    global libovrtx = _default_libovrtx_path()
     _OVRTX_HANDLE[] = try
         Libdl.dlopen(libovrtx, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
     catch e
         error("LibOVRTX: failed to dlopen libovrtx at \"$libovrtx\" ($e). \
-               Set OVRTX_LIBRARY_PATH to the absolute path of libovrtx-dynamic.so.")
+               Set OVRTX_LIBRARY_PATH to the absolute path of libovrtx-dynamic.so, \
+               or ensure the OVRTX_jll artifact is available for this platform.")
     end
 end
 
