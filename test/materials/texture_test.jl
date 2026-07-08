@@ -26,7 +26,7 @@ const GeometryBasics = OmniverseMakie.GeometryBasics
 # through the full Screen/colorbuffer pipeline.  Body: `texture_prog.jl`.
 # ---------------------------------------------------------------------------
 
-@testset "M3.3 image texture mapping + st primvar (unit)" begin
+@testset "image texture mapping + st primvar (unit)" begin
     fig  = Figure()
     ax   = LScene(fig[1, 1])
     img  = [RGBf(1, 0, 0) RGBf(0, 0, 1); RGBf(0, 0, 1) RGBf(1, 0, 0)]
@@ -105,7 +105,7 @@ end
 
 const _M33_TEXTURE_PROG = read(joinpath(@__DIR__, "texture_prog.jl"), String)
 
-@testset "M3.3 image-textured mesh renders the checker via colorbuffer (subprocess)" begin
+@testset "image-textured mesh renders the checker via colorbuffer (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M33_TEXTURE_PROG; timeout = 900, retries = 2, ready_marker = "ELTYPE=")
     @info "M3.3 texture subprocess output" output
     @test exitcode == 0

@@ -16,7 +16,7 @@ _three_lights() = AbstractLight[
     DirectionalLight(RGBf(0.5f0, 0.7f0, 0.9f0), Vec3f(1f0, -1f0, -1f0), false),
 ]
 
-@testset "L2 per-frame snapshot rebuild is allocation-lean" begin
+@testset "per-frame snapshot rebuild is allocation-lean" begin
     lights = _three_lights()
     # author-time seed (fresh; allocates paths once)
     seed   = _lights_snapshot(lights)
@@ -44,7 +44,7 @@ _three_lights() = AbstractLight[
     @test all(reused[i][1] === seed[i][1] for i in eachindex(seed))
 end
 
-@testset "L2 count change falls back to a fresh (correct) snapshot" begin
+@testset "count change falls back to a fresh (correct) snapshot" begin
     three = _three_lights()
     two   = AbstractLight[three[1], three[2]]
     seed3 = _lights_snapshot(three)
@@ -57,7 +57,7 @@ end
     @test [p for (p, _) in snap2] == [p for (p, _) in _lights_snapshot(two)]
 end
 
-@testset "L2 same-count type swap rebuilds fresh paths (no stale index-wise reuse)" begin
+@testset "same-count type swap rebuilds fresh paths (no stale index-wise reuse)" begin
     # Prim paths encode <Type>_<idx>: a same-count type swap must NOT reuse
     # old paths with new states (each state would write to the wrong prim).
     # Reuse is valid only when every position's type matches; else rebuild.
@@ -93,7 +93,7 @@ end
     @test all(reused[i][1] === seed_dp[i][1] for i in eachindex(seed_dp))
 end
 
-@testset "L2 LightState comparison detects intensity/color/direction changes" begin
+@testset "LightState comparison detects intensity/color/direction changes" begin
     base = DirectionalLight(RGBf(1f0, 1f0, 1f0), Vec3f(-1f0, -1f0, -1f0), false)
     # dim / hue / turn differ from base in intensity / color / direction
     dim  = DirectionalLight(RGBf(0.5f0, 0.5f0, 0.5f0), Vec3f(-1f0, -1f0, -1f0), false)

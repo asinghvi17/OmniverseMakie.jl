@@ -70,7 +70,7 @@ def BasisCurves "curve"
 }
 """
 
-@testset "B2 _split_nan_runs: finite runs ≥2 → curves, runs of 1 dropped, mask aligned" begin
+@testset "_split_nan_runs: finite runs ≥2 → curves, runs of 1 dropped, mask aligned" begin
     N = Point3f(NaN, NaN, NaN)
     a = Point3f(0, 0, 0); b = Point3f(1, 0, 0); c = Point3f(2, 0, 0); d = Point3f(3, 0, 0)
 
@@ -100,7 +100,7 @@ def BasisCurves "curve"
     @test OM._split_nan_runs([a, b, Point3f(1, NaN, 0), c, d])[1:2] == ([a, b, c, d], [2, 2])
 end
 
-@testset "B2 _finite_segments: drop any segment with a non-finite endpoint" begin
+@testset "_finite_segments: drop any segment with a non-finite endpoint" begin
     N = Point3f(NaN, NaN, NaN)
     a = Point3f(0, 0, 0); b = Point3f(1, 0, 0); c = Point3f(2, 0, 0); d = Point3f(3, 0, 0)
 
@@ -115,7 +115,7 @@ end
     @test OM._finite_segments(Point3f[])     == (Point3f[], Int[], Bool[])
 end
 
-@testset "B2 golden: no-NaN Lines emit byte-identical (split is a no-op on finite data)" begin
+@testset "golden: no-NaN Lines emit byte-identical (split is a no-op on finite data)" begin
     pts = _b2_gpts()
     f, cnt, keep = OM._split_nan_runs(pts)
     @test f == pts && cnt == [length(pts)] && all(keep)
@@ -124,7 +124,7 @@ end
     @test usda == _GOLDEN_LINES_USDA
 end
 
-@testset "B2 golden: no-NaN LineSegments emit byte-identical" begin
+@testset "golden: no-NaN LineSegments emit byte-identical" begin
     pts = _b2_gpts()
     f, cnt, keep = OM._finite_segments(pts)
     @test f == pts && cnt == [2, 2] && all(keep)
@@ -133,7 +133,7 @@ end
     @test usda == _GOLDEN_SEGS_USDA
 end
 
-@testset "B2 _bbox_diag skips non-finite → finite, byte-preserving on finite input" begin
+@testset "_bbox_diag skips non-finite → finite, byte-preserving on finite input" begin
     a = Point3f(0, 0, 0); b = Point3f(1, 0, 0); c = Point3f(2, 0, 0)
     N = Point3f(NaN, NaN, NaN)
     # Finite bbox unchanged (locks the golden width above): diag of the
@@ -146,7 +146,7 @@ end
     @test OM._bbox_diag([N, N]) == 1.0
 end
 
-@testset "B2 _curve_width stays finite through a NaN-bearing point cloud" begin
+@testset "_curve_width stays finite through a NaN-bearing point cloud" begin
     a = Point3f(0, 0, 0); b = Point3f(4, 4, 0); N = Point3f(NaN, NaN, NaN)
     w = OM._curve_width([a, N, b], 2.0f0)
     @test isfinite(w) && w > 0
@@ -154,7 +154,7 @@ end
     @test w == OM._curve_width([a, b], 2.0f0)
 end
 
-@testset "B2 per-vertex colours filtered by the SAME mask stay index-aligned" begin
+@testset "per-vertex colours filtered by the SAME mask stay index-aligned" begin
     a = Point3f(0, 0, 0); b = Point3f(1, 0, 0); c = Point3f(2, 0, 0); d = Point3f(3, 0, 0)
     N = Point3f(NaN, NaN, NaN)
     # 5, one per pt
@@ -235,7 +235,7 @@ println("LIVE_OK=", s2.lit > 300 && moved > 3.0)
 println("OK_NAN_LINES")
 """
 
-@testset "B2 NaN-separated lines render with a GAP + live NaN move (subprocess)" begin
+@testset "NaN-separated lines render with a GAP + live NaN move (subprocess)" begin
     # Retry past ovrtx's intermittent pre-render startup crash.
     ec, out = run_ovrtx_subprocess(_B2_RENDER_PROG; timeout = 900, retries = 4,
                                    ready_marker = "S1=")
@@ -324,7 +324,7 @@ println("FROZEN=", np1 == author_np && np2 == author_np)
 println("OK_FREEZE")
 """
 
-@testset "B2 curve_npoints FROZEN at author time — same-count re-edit stays one-shot (subprocess)" begin
+@testset "curve_npoints FROZEN at author time — same-count re-edit stays one-shot (subprocess)" begin
     # Retry past ovrtx's intermittent pre-render startup crash.
     ec, out = run_ovrtx_subprocess(_B2_FREEZE_PROG; timeout = 900, retries = 4,
                                    ready_marker = "S0=")

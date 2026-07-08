@@ -66,7 +66,7 @@ println("OK_LOOP")
 """
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
-@testset "M5 on_render_tick! reframes and accumulates (subprocess)" begin
+@testset "on_render_tick! reframes and accumulates (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M5_LOOP_PROG; timeout = 600, retries = 2, ready_marker = "SAMPLES_0=")
     @info "M5 camera loop output" output
     @test exitcode == 0

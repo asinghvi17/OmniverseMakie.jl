@@ -148,7 +148,7 @@ println("OK_MATERIALIZED_SKIP")
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
-@testset "B4 non-materialized scatter/meshscatter live positions MOVE (subprocess)" begin
+@testset "non-materialized scatter/meshscatter live positions MOVE (subprocess)" begin
     # Retry past ovrtx's intermittent pre-render startup crash.
     ec, out = run_ovrtx_subprocess(_B4_MOVE_PROG; timeout = 900, retries = 4,
                                    ready_marker = "SCATTER_S0=")
@@ -169,7 +169,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     end
 end
 
-@testset "B4 materialized scatter live positions edit is a NO-OP (subprocess)" begin
+@testset "materialized scatter live positions edit is a NO-OP (subprocess)" begin
     ec, out = run_ovrtx_subprocess(_B4_MATERIALIZED_PROG; timeout = 900, retries = 4,
                                    ready_marker = "NONBLACK_A=")
     contains(out, "OK_MATERIALIZED_SKIP") || @info "B4 materialized-skip output" out

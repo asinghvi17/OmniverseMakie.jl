@@ -77,7 +77,7 @@ const _M17_FLOORS = Dict(
     "combined"    => 1000,
 )
 
-@testset "M1.7 primitives → ovrtx (subprocess)" begin
+@testset "primitives → ovrtx (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M17_PRIM_PROG; timeout = 1800, retries = 2, ready_marker = "OK_PRIMITIVES")
     @info "M1.7 primitives subprocess output" output
     @test exitcode == 0

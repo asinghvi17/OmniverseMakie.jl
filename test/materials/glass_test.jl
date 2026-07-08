@@ -24,7 +24,7 @@ const GeometryBasics = OmniverseMakie.GeometryBasics
 # Body: `glass_prog.jl`.
 # ---------------------------------------------------------------------------
 
-@testset "M4 glass material authoring (unit)" begin
+@testset "glass material authoring (unit)" begin
     frag = OmniverseMakie.usda_glass_material("Mat_x",
         Dict("glass_ior" => 1.5f0, "glass_color" => (0.8f0, 0.9f0, 1.0f0), "frosting_roughness" => 0.1f0))
     @test occursin("@OmniGlass.mdl@", frag)
@@ -55,7 +55,7 @@ end
 
 const _M4_GLASS_PROG = read(joinpath(@__DIR__, "glass_prog.jl"), String)
 
-@testset "M4 refractive glass shows specular highlight + refraction/TIR darkening (subprocess)" begin
+@testset "refractive glass shows specular highlight + refraction/TIR darkening (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M4_GLASS_PROG; timeout = 600, retries = 2, ready_marker = "ELTYPE=")
     @info "M4 glass subprocess output" output
     @test exitcode == 0
@@ -68,7 +68,7 @@ end
 
 const _M4_GLASS_LIVE_PROG = read(joinpath(@__DIR__, "glass_live_prog.jl"), String)
 
-@testset "M4 LIVE glass material edit routes to OmniGlass inputs (subprocess)" begin
+@testset "LIVE glass material edit routes to OmniGlass inputs (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M4_GLASS_LIVE_PROG; timeout = 600, retries = 2, ready_marker = "NONBLACK_B=")
     @info "M4 glass-live subprocess output" output
     @test exitcode == 0

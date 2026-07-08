@@ -29,7 +29,7 @@ function _a2_old_cwh(pixels::Array{UInt8,3})
     return img
 end
 
-@testset "A2 single-pass cwh_to_matrix == old two-pass (pure)" begin
+@testset "cwh_to_matrix single-pass matches the two-pass oracle (pure)" begin
     # Asymmetric, non-square [C=4, W, H], every channel distinct: a transpose,
     # y-flip, W/H swap, or channel swap would diverge from the oracle.
     C, W, H = 4, 7, 5
@@ -107,7 +107,7 @@ println("OK_A2_HDR")
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
-@testset "A2 with_mapped_hdr passthrough + unmap-on-throw (subprocess)" begin
+@testset "with_mapped_hdr passthrough + unmap-on-throw (subprocess)" begin
     # Retry the intermittent ovrtx startup crash
     # (GeometryGroup::attachToContext): re-run until the first map.
     exitcode, out = run_ovrtx_subprocess(_A2_HDR_PROG; timeout = 600, retries = 4,

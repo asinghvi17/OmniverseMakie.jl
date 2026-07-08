@@ -65,7 +65,7 @@ const GOLDEN_MULTI_LOWER = "7158e4b63846f84249eb31d65b272479d2b373536f539f09f283
     rm(path)
 end
 
-@testset "golden byte anchor (frozen for the D2 memory refactor)" begin
+@testset "golden byte anchor" begin
     h1 = nvdb_sha256(fixture_single_leaf(), SINGLE_LEAF_ORIGIN, SINGLE_LEAF_EXTENT)
     h2 = nvdb_sha256(fixture_multi_lower(), MULTI_LOWER_ORIGIN, MULTI_LOWER_EXTENT)
     # deterministic: the same fixture written twice produces identical bytes.
@@ -75,7 +75,7 @@ end
     @test h2 == GOLDEN_MULTI_LOWER
 end
 
-@testset "fixed format semantics (findings 1, 3, 5), independent of the hash" begin
+@testset "NanoVDB format semantics, independent of the golden hash" begin
     # GridFlags bits we set; reference stringHash("density").
     HAS_BBOX        = UInt32(1) << 1
     HAS_MINMAX      = UInt32(1) << 2
@@ -122,7 +122,7 @@ end
     end
 end
 
-@testset "double-precision Map/voxelSize computed in Float64 (finding 4)" begin
+@testset "double-precision Map/voxelSize computed in Float64" begin
     # dx = 1/3 is not exactly Float32-representable, so a Float64 division and a
     # reconstruction from the Float32 Map field diverge — this pins the double
     # Map/voxelSize to the Float64 path.
@@ -184,7 +184,7 @@ end
     rm(path)
 end
 
-@testset "allocation regression (D2 memory refactor)" begin
+@testset "save_nanovdb allocation stays under 1.5× the payload" begin
     # save_nanovdb runs on every live volume edit, so transient allocation is
     # a hot path.  The returned node buffer (~= payload) is the only
     # unavoidable large allocation; guard @allocated below 1.5× the payload.

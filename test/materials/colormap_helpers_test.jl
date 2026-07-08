@@ -52,7 +52,7 @@ const _GOLDEN_SCATTER_VALS = NTuple{3,Float32}[
     (0.993248f0, 0.906157f0, 0.143936f0),
 ]
 
-@testset "B1 regression: surface displayColor USDA byte-identical (finite, explicit)" begin
+@testset "regression: surface displayColor USDA byte-identical (finite, explicit)" begin
     xs = Float32[0, 1]; ys = Float32[0, 1]; zs = Float32[0.0 0.5; 0.5 1.0]
     fig = Figure(); ls = LScene(fig[1, 1])
     p = surface!(ls, xs, ys, zs; colormap = :viridis, colorrange = (0.0, 1.0))
@@ -65,7 +65,7 @@ const _GOLDEN_SCATTER_VALS = NTuple{3,Float32}[
     @test usda == _GOLDEN_SURFACE_USDA
 end
 
-@testset "B1 NaN-safe: surface colours finite for every vertex, no throw" begin
+@testset "NaN-safe: surface colours finite for every vertex, no throw" begin
     xs = Float32[0, 1]; ys = Float32[0, 1]; zs = Float32[0.0 NaN; 0.5 1.0]
     fig = Figure(); ls = LScene(fig[1, 1])
 
@@ -87,7 +87,7 @@ end
     @test valse[1] != valse[2] && valse[3] != valse[2]  # finite vertices mapped
 end
 
-@testset "B1 _resolve_colorrange: explicit verbatim / finite extrema / empty fallback" begin
+@testset "_resolve_colorrange: explicit verbatim / finite extrema / empty fallback" begin
     xs = Float32[0, 1]; ys = Float32[0, 1]; zs = Float32[0.0 0.5; 0.5 1.0]
     fig = Figure(); ls = LScene(fig[1, 1])
     pe = surface!(ls, xs, ys, zs; colormap = :viridis, colorrange = (0.0, 1.0))
@@ -104,7 +104,7 @@ end
     @test eltype(OM._resolve_colorrange(pe, Float32[0, 1])) === Float32
 end
 
-@testset "B1 _map_through_colormap: typed, NaN → nan_color, finite → lookup" begin
+@testset "_map_through_colormap: typed, NaN → nan_color, finite → lookup" begin
     xs = Float32[0, 1]; ys = Float32[0, 1]; zs = Float32[0.0 0.5; 0.5 1.0]
     fig = Figure(); ls = LScene(fig[1, 1])
     p = surface!(ls, xs, ys, zs; colormap = :viridis, colorrange = (0.0, 1.0), nan_color = :red)
@@ -117,7 +117,7 @@ end
     @test out[1] != out[3]  # real colormap lookup at the ends
 end
 
-@testset "B1 regression: numeric-scatter colours unchanged" begin
+@testset "regression: numeric-scatter colours unchanged" begin
     fig = Figure(); ls = LScene(fig[1, 1])
     spts = [Point3f(i, 0, 0) for i in 1:5]
     svals = Float32[1, 2, 3, 4, 5]
@@ -134,7 +134,7 @@ end
     @test cv == (1.0f0, 0.0f0, 0.0f0)
 end
 
-@testset "B1 regression: volume colorrange unchanged (Float64, explicit + automatic)" begin
+@testset "regression: volume colorrange unchanged (Float64, explicit + automatic)" begin
     fig = Figure(); ls = LScene(fig[1, 1])
     vol = reshape(Float32.(0:7), 2, 2, 2)
     vp_e = volume!(ls, 0 .. 1, 0 .. 1, 0 .. 1, vol; colorrange = (0.0, 2.0))

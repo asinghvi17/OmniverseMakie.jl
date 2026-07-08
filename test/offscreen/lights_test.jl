@@ -14,7 +14,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 # Unit tests — pure Julia, no subprocess, no renderer required
 # ---------------------------------------------------------------------------
 
-@testset "M1.4 usda_light type dispatch" begin
+@testset "usda_light type dispatch" begin
     # Use OmniverseMakie-qualified names: RGBf, Vec3f, Vec2f are re-exported
     # from Makie.
     # DirectionalLight → DistantLight prim
@@ -50,7 +50,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
     @test contains(OmniverseMakie.usda_light(al2, 1), "AmbientLight_1")
 end
 
-@testset "M1.4 lights_usda fallback and DEFAULT_LIGHTS_STR" begin
+@testset "lights_usda fallback and DEFAULT_LIGHTS_STR" begin
     # _DEFAULT_LIGHTS_STR is the fallback Sun block
     @test contains(OmniverseMakie._DEFAULT_LIGHTS_STR, "DistantLight")
     @test contains(OmniverseMakie._DEFAULT_LIGHTS_STR, "\"Sun\"")
@@ -177,7 +177,7 @@ close(screen_B)
 println("OK_LIGHTS")
 """
 
-@testset "M1.4 lights affect rendered image (subprocess)" begin
+@testset "lights affect rendered image (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M14_LIGHTS_PROG; timeout = 600, retries = 2, ready_marker = "LUM_A=")
     @info "M1.4 subprocess output" output
     @test exitcode == 0

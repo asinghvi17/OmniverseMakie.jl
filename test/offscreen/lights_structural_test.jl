@@ -32,7 +32,7 @@ function _parse_xform(usda::AbstractString)
     return permutedims(reshape(nums, 4, 4))
 end
 
-@testset "L1 count mismatch: warn once, preserve snapshot, no live write" begin
+@testset "count mismatch: warn once, preserve snapshot, no live write" begin
     # NB: Makie folds AmbientLight out of scene.compute[:lights][] (separate
     # ambient term), so use two light types that both survive the compute →
     # a genuine count of 2.
@@ -64,7 +64,7 @@ end
                             w.message), warns)         # the locked message
 end
 
-@testset "L1 first call (no baked snapshot) seeds silently" begin
+@testset "first call (no baked snapshot) seeds silently" begin
     lights = [DirectionalLight(RGBf(1f0, 1f0, 1f0), Vec3f(-1f0, -1f0, -1f0), false)]
     scene  = _scene_with(lights)
     screen = _FakeLightScreen(nothing)   # first sync, nothing baked yet
@@ -75,7 +75,7 @@ end
     @test screen.last_lights == _lights_snapshot(lights)   # snapshot seeded
 end
 
-@testset "L1 RectLight transform == DistantLight orientation + translation row" begin
+@testset "RectLight transform == DistantLight orientation + translation row" begin
     dir = Vec3f(-1f0, -2f0, -3f0)   # non-axis-aligned: hits general branch
     pos = Point3f(10f0, 20f0, 30f0)
     col = RGBf(1f0, 1f0, 1f0)
@@ -101,7 +101,7 @@ end
     @test dl_mat[4, :]   == [0.0, 0.0, 0.0, 1.0]
 end
 
-@testset "L1 SpotLight cone orientation follows direction, not pure translation" begin
+@testset "SpotLight cone orientation follows direction, not pure translation" begin
     # The SphereLight+ShapingAPI cone emits along local −Z, so the xform must
     # ORIENT it toward `direction`. Pre-fix the SpotLight branch emitted a
     # pure-translation xform (identity orientation) → every cone pointed −Z

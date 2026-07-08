@@ -41,7 +41,7 @@ println("OK_GPU_BLIT")
 """
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
-@testset "M6 GPU-direct blit (subprocess, CUDA+GL)" begin
+@testset "GPU-direct blit (subprocess, CUDA+GL)" begin
     # EARLY marker (per helpers.jl): BLITTER_INIT= is the first line printed
     # after interactive_display's successful build (the startup-crash window),
     # BEFORE any in-child @assert — so retries absorb only startup deaths, never

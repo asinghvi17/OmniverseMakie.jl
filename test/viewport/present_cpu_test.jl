@@ -80,7 +80,7 @@ println("OK_C2_PRESENT")
 """
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
-@testset "C2 CPU present! — one fused pass, zero steady-state garbage (subprocess)" begin
+@testset "CPU present! — one fused pass, zero steady-state garbage (subprocess)" begin
     # Retry past ovrtx's intermittent pre-render startup crash, up to the
     # allocation-measurement marker.
     _, out = run_ovrtx_subprocess(_C2_PRESENT_PROG; timeout = 600, retries = 4,

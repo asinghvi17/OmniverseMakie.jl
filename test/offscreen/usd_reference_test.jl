@@ -61,7 +61,7 @@ close(screen)
 println("OK_USD_REF")
 """
 
-@testset "M1.2 USD render-root + reference add/remove (subprocess)" begin
+@testset "USD render-root + reference add/remove (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M12_USD_PROG; timeout = 600, retries = 2, ready_marker = "SIZE=")
     @info "M1.2 subprocess output" output
     @test exitcode == 0

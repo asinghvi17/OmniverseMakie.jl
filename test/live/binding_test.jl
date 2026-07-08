@@ -111,7 +111,7 @@ close(screen)
 println("OK_BINDING")
 """
 
-@testset "M2.4 persistent map/bind hot-path bindings (subprocess)" begin
+@testset "persistent map/bind hot-path bindings (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M24_BINDING_PROG; timeout = 900, retries = 2, ready_marker = "BINDING_PROG_READY")
     @info "M2.4 binding subprocess output" output
     @test exitcode == 0

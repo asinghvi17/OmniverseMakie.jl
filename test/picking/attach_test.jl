@@ -83,7 +83,7 @@ println("OK_ATTACH")
 """
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
-@testset "M6.B attach_picking! (subprocess, GLMakie)" begin
+@testset "attach_picking! (subprocess, GLMakie)" begin
     exitcode, output = run_ovrtx_subprocess(_M6B_ATTACH_PROG; timeout = 600, retries = 2, ready_marker = "OK_ATTACH")
     @info "M6.B attach output" output
     @test exitcode == 0

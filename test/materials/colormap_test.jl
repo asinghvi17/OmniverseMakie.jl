@@ -16,7 +16,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 # Screen/colorbuffer pipeline.  Body: `colormap_prog.jl`.
 # ---------------------------------------------------------------------------
 
-@testset "M4 _scaled_to_display maps numeric color via colormap (unit)" begin
+@testset "_scaled_to_display maps numeric color via colormap (unit)" begin
     fig  = Figure()
     ax   = LScene(fig[1, 1])
     pts  = [Point3f(cos(t), sin(t), 0) for t in range(0, 2π; length = 10)]
@@ -41,7 +41,7 @@ end
 
 const _M4_COLORMAP_PROG = read(joinpath(@__DIR__, "colormap_prog.jl"), String)
 
-@testset "M4 colormapped scatter+lines render via colorbuffer (subprocess)" begin
+@testset "colormapped scatter+lines render via colorbuffer (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M4_COLORMAP_PROG; timeout = 600, retries = 2, ready_marker = "ELTYPE=")
     @info "M4 colormap subprocess output" output
     @test exitcode == 0
@@ -56,7 +56,7 @@ end
 
 const _M4_COLORMAP_LIVE_PROG = read(joinpath(@__DIR__, "colormap_live_prog.jl"), String)
 
-@testset "M4 LIVE numeric-color edit re-maps via colormap (subprocess)" begin
+@testset "LIVE numeric-color edit re-maps via colormap (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M4_COLORMAP_LIVE_PROG; timeout = 600, retries = 2, ready_marker = "NONBLACK_A=")
     @info "M4 colormap-live subprocess output" output
     @test exitcode == 0

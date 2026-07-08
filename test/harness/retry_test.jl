@@ -18,7 +18,7 @@ else
 end
 """
 
-@testset "review E2: ready_marker retry" begin
+@testset "ready_marker retry" begin
     @testset "retries until the marker appears; returns the last attempt" begin
         flag = tempname()
         try

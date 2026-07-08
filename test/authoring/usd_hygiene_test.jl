@@ -57,7 +57,7 @@ def Volume "Volume" (
 # Capture an `error()` and return its message, or "" if the call did NOT throw.
 _errmsg(f) = try; f(); ""; catch e; e isa ErrorException ? e.msg : sprint(showerror, e); end
 
-@testset "B6 _usd_identifier accept / reject (offender named)" begin
+@testset "_usd_identifier accept / reject (offender named)" begin
     # Accept legal USD identifiers; the returned value is a String equal to
     # input.
     for good in ("density", "_private", "Camera", "torus_fog", "Mat_123", "A")
@@ -83,7 +83,7 @@ _errmsg(f) = try; f(); ""; catch e; e isa ErrorException ? e.msg : sprint(shower
     @test !isempty(_errmsg(() -> OM._usd_identifier("")))
 end
 
-@testset "B6 _usd_asset_path wrap / escape / reject" begin
+@testset "_usd_asset_path wrap / escape / reject" begin
     # Clean path → plain `@path@`.
     @test OM._usd_asset_path("/data/torus.vdb") == "@/data/torus.vdb@"
     @test OM._usd_asset_path("OmniPBR.mdl") == "@OmniPBR.mdl@"
@@ -100,7 +100,7 @@ end
     @test occursin("@@@", msg)
 end
 
-@testset "B6 volume USDA golden byte-identity + hostile field + `@` path" begin
+@testset "volume USDA golden byte-identity + hostile field + `@` path" begin
     # Clean field: byte-identical to the golden (regression anchor).
     got = OM._vdb_volume_usda("/data/torus.vdb"; prim_path = "/World/Volume",
                               field = "density", field_dtype = "float",
@@ -122,7 +122,7 @@ end
     @test occursin("asset filePath = @@@/tmp/scene@v2/torus.vdb@@@", esc)
 end
 
-@testset "B6 material asset-path emit golden + `@` escaping" begin
+@testset "material asset-path emit golden + `@` escaping" begin
     # OmniPBR: clean texture + MDL source emit the plain `@…@` form.
     m = OM.usda_omnipbr_material("Mat_x", Dict{String,Any}("diffuse_texture" => "/abs/tex.png"))
     @test occursin("uniform asset info:mdl:sourceAsset = @OmniPBR.mdl@", m)
@@ -137,7 +137,7 @@ end
     @test occursin("asset inputs:diffuse_texture = @@@/t/a@b.png@@@", m2)
 end
 
-@testset "B6 camera_path segment validation" begin
+@testset "camera_path segment validation" begin
     # Legal path accepted (returned as-is).
     @test OM._validate_camera_path("/World/Camera") == "/World/Camera"
     @test OM._validate_camera_path("/World/MyCam_2") == "/World/MyCam_2"
@@ -159,7 +159,7 @@ end
     end
 end
 
-@testset "B6 texture temp-file naming is unique per input per plot (collision fix)" begin
+@testset "texture temp-file naming is unique per input per plot" begin
     fig  = Figure()
     ax   = LScene(fig[1, 1])
     quad = OM.GeometryBasics.uv_normal_mesh(Rect2f(0, 0, 1, 1))

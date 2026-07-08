@@ -98,7 +98,7 @@ println("OK_ORBIT")
 """
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
-@testset "M5 orbit forwarding: glscene events drive Camera3D (subprocess)" begin
+@testset "orbit forwarding: glscene events drive Camera3D (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M5_ORBIT_PROG; timeout = 600, retries = 2, ready_marker = "EYE0=")
     @info "M5 orbit output" output
     @test exitcode == 0

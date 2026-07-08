@@ -60,7 +60,7 @@ println("OK_BENCH")
 """
 
 include(joinpath(@__DIR__, "..", "test", "helpers.jl"))
-@testset "M6 GPU-direct vs CPU blit benchmark (subprocess, CUDA+GL)" begin
+@testset "GPU-direct vs CPU blit benchmark (subprocess, CUDA+GL)" begin
     exitcode, output = run_ovrtx_subprocess(_M6_BENCH_PROG; timeout=900)
     @info "M6 bench output" output
     @test exitcode == 0

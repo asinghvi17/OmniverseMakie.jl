@@ -20,7 +20,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 # ===========================================================================
 # Step 1 — scene_scopes_usda is PURE (no renderer): runs in-process.
 # ===========================================================================
-@testset "M2.3 scene_scopes_usda nested scope hierarchy (pure)" begin
+@testset "scene_scopes_usda nested scope hierarchy (pure)" begin
     # root → c1, c2 (siblings); c1 → gc (grandchild)
     root = Scene()
     c1   = Scene(root)
@@ -126,7 +126,7 @@ close(screen)
 println("OK_SUBSCENE")
 """
 
-@testset "M2.3 nested-subscene render + paths (subprocess)" begin
+@testset "nested-subscene render + paths (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M23_SUBSCENE_PROG; timeout = 900, retries = 2, ready_marker = "NONBLACK=")
     @info "M2.3 subscene subprocess output" output
     @test exitcode == 0

@@ -32,7 +32,7 @@ const _B7_ORI   = [(1.0f0,0.0f0,0.0f0,0.0f0),(0.70710677f0,0.70710677f0,0.0f0,0.
 const _B7_ICOL  = [(1.0f0,0.0f0,0.0f0),(0.0f0,1.0f0,0.0f0)]
 const _B7_MPOS  = [(10.0f0,0.0f0,0.0f0),(0.0f0,10.0f0,0.0f0)]
 
-@testset "B7 golden USDA byte-identity (flat emitters + IOBuffer streaming)" begin
+@testset "golden USDA byte-identity (flat emitters + IOBuffer streaming)" begin
     fc, fi = OM._flat_faces(_B7_FACES)   # flat (counts, indices)
     @test OM.usda_mesh(_B7_MPTS, fc, fi, _B7_NRM, (0.2f0,0.4f0,0.6f0);
                        normal_interpolation="vertex") == _B7_MESH_CONST
@@ -48,7 +48,7 @@ const _B7_MPOS  = [(10.0f0,0.0f0,0.0f0),(0.0f0,10.0f0,0.0f0)]
     @test OM._point3f_list([(1.0f0,2.0f0),(3.0f0,4.0f0,5.0f0)]) == _B7_P3F
 end
 
-@testset "B7 _flat_faces → flat (counts, 0-based indices), built once" begin
+@testset "_flat_faces → flat (counts, 0-based indices), built once" begin
     # Plain-Int nested faces (surface re-mesh / merged markers): raw is
     # identity on Int.
     c, i = OM._flat_faces([[0,1,2],[0,2,3]])
@@ -66,7 +66,7 @@ end
     @test gi == [Int(GB.raw(v)) for f in GB.faces(m) for v in f]
 end
 
-@testset "B7 _push_points_binding! writes through the reinterpret VIEW (no full-buffer copy)" begin
+@testset "_push_points_binding! writes through the reinterpret VIEW (no full-buffer copy)" begin
     v = OM.Point3f[OM.Point3f(1,2,3), OM.Point3f(4,5,6), OM.Point3f(7,8,9)]
     data = reinterpret(Float32, v)   # what _push_points_binding! passes
     # pointer() on a ReinterpretArray-over-Vector equals the parent buffer
@@ -80,7 +80,7 @@ end
     @test got == Float32[1,2,3,4,5,6,7,8,9]
 end
 
-@testset "B7 usda_mesh allocation reduced ≥5× on a 10k-vertex mesh" begin
+@testset "usda_mesh allocation stays under 8 MB on a 10k-vertex mesh" begin
     N = 10_000; ntri = 20_000
     pts   = [OM.Point3f(i, i+1, i+2) for i in 1:N]
     nrm   = [OM.Vec3f(0, 0, 1) for _ in 1:N]

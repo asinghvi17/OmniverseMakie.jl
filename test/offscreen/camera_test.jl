@@ -95,7 +95,7 @@ close(screen)
 println("OK_CAMERA")
 """
 
-@testset "M1.3 camera_intrinsics unit" begin
+@testset "camera_intrinsics unit" begin
     # Wider FOV → shorter focal length (inverse relationship).
     @test OmniverseMakie.camera_intrinsics(90, 400, 400).focal_length <
           OmniverseMakie.camera_intrinsics(30, 400, 400).focal_length
@@ -107,7 +107,7 @@ println("OK_CAMERA")
     @test intr_wide.h_aperture ≈ 2 * intr_wide.v_aperture
 end
 
-@testset "M1.3 author_camera! drives viewpoint (subprocess)" begin
+@testset "author_camera! drives viewpoint (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M13_CAMERA_PROG; timeout=600, retries=2, ready_marker="SIZE=")
     @info "M1.3 subprocess output" output
     @test exitcode == 0

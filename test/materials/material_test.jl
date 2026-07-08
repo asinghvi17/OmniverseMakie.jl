@@ -29,7 +29,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 # pipeline is unbroken).
 # ---------------------------------------------------------------------------
 
-@testset "M3.2 is_materialized + material_inputs_from (unit)" begin
+@testset "is_materialized + material_inputs_from (unit)" begin
     fig  = Figure()
     ax   = LScene(fig[1, 1])
     geom = Rect3f(Point3f(0), Vec3f(1))
@@ -69,7 +69,7 @@ end
 
 const _M32_COMPOSE_PROG = read(joinpath(@__DIR__, "material_compose_prog.jl"), String)
 
-@testset "M3.2 materialized mesh renders metallic via colorbuffer (subprocess)" begin
+@testset "materialized mesh renders metallic via colorbuffer (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M32_COMPOSE_PROG; timeout = 900, retries = 2, ready_marker = "ELTYPE=")
     @info "M3.2 compose subprocess output" output
     @test exitcode == 0
@@ -108,7 +108,7 @@ end
 # plain, and an emissive lines renders RED.
 # ---------------------------------------------------------------------------
 
-@testset "M3.5 primitive materialization + drop-color plumbing (unit)" begin
+@testset "primitive materialization + drop-color plumbing (unit)" begin
     fig = Figure(); ax = LScene(fig[1, 1])
     pts = [Point3f(0), Point3f(1, 0, 0), Point3f(1, 1, 0)]
 
@@ -150,7 +150,7 @@ end
                     OmniverseMakie._mesh_proto_body(cpts, OmniverseMakie._flat_faces([[0, 1]])..., [(0f0,0f0,1f0),(0f0,0f0,1f0)], nothing))
 end
 
-@testset "M3.5 emissive/opacity BOOL enable gates + emissive_intensity (unit)" begin
+@testset "emissive/opacity BOOL enable gates + emissive_intensity (unit)" begin
     fig = Figure(); ax = LScene(fig[1, 1])
     le  = lines!(ax, [Point3f(0), Point3f(1, 0, 0)]; material = (; emissive = (1, 0, 0)))
     inp = OmniverseMakie.material_inputs_from(le)
@@ -181,7 +181,7 @@ end
 
 const _M35_PRIM_MAT_PROG = read(joinpath(@__DIR__, "primitives_material_prog.jl"), String)
 
-@testset "M3.5 materials on MeshScatter/Surface/Lines render (subprocess)" begin
+@testset "materials on MeshScatter/Surface/Lines render (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M35_PRIM_MAT_PROG; timeout = 1500, retries = 2, ready_marker = "MESHSCATTER_MEANABSDIFF=")
     @info "M3.5 primitives-material subprocess output" output
     @test exitcode == 0

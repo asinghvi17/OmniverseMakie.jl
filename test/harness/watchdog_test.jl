@@ -13,7 +13,7 @@ using Test
 # Children `redirect_stderr(devnull)` where a signal would otherwise dump a
 # runtime backtrace, so the helper's @info stays quiet.
 
-@testset "review E1: truthful watchdog" begin
+@testset "truthful watchdog" begin
     @testset "clean exit (0) => 0" begin
         exitcode, _ = run_ovrtx_subprocess("exit(0)"; timeout = 30)
         @test exitcode == 0

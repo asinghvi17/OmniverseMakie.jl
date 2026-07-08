@@ -59,7 +59,7 @@ println("OK_STALE_RESOLVER")
 """
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
-@testset "A3 PathResolver cache invalidation on composition change (subprocess)" begin
+@testset "PathResolver cache invalidation on composition change (subprocess)" begin
     # Retry the intermittent ovrtx startup crash
     # (GeometryGroup::attachToContext): re-run until the first pick.
     exitcode, out = run_ovrtx_subprocess(_A3_RESOLVER_PROG; timeout = 600, retries = 4,

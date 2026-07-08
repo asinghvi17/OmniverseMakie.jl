@@ -55,7 +55,7 @@ println("OK_EMPTY_FILL")
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
-@testset "B3 empty→fill scatter+lines late-build renders + pickable (subprocess)" begin
+@testset "empty→fill scatter+lines late-build renders + pickable (subprocess)" begin
     # Retry past ovrtx's intermittent pre-render startup crash.
     ec, out = run_ovrtx_subprocess(_B3_EMPTY_FILL_PROG; timeout = 600, retries = 4,
                                    ready_marker = "EMPTY_LIT=")

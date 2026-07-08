@@ -56,7 +56,7 @@ println("OK_A1"); flush(stdout)
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
 
-@testset "A1 op-error propagation + closed-Renderer alive check (subprocess)" begin
+@testset "op-error propagation + closed-Renderer alive check (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_A1_PROG; timeout = 600, retries = 2, ready_marker = "OK_A1")
     contains(output, "OK_A1") || @info "A1 subprocess output" output
     # Clean teardown (no segfault from a C_NULL ccall on the closed Renderer).

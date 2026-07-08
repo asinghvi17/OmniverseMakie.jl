@@ -161,7 +161,7 @@ close(screen)
 println("OK_RENDERCFG")
 """
 
-@testset "M2.1 live render-config (camera + lights) on open stage (subprocess)" begin
+@testset "live render-config (camera + lights) on open stage (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M21_RENDERCFG_PROG; timeout = 1800, retries = 2, ready_marker = "OPENS_AFTER_BASELINE=")
     @info "M2.1 render-config subprocess output" output
     @test exitcode == 0

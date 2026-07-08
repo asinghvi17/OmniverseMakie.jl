@@ -21,7 +21,7 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 # Body: `surface_texture_prog.jl`.
 # ---------------------------------------------------------------------------
 
-@testset "M4 _surface_texcoords parametric UVs (unit)" begin
+@testset "_surface_texcoords parametric UVs (unit)" begin
     # Convention (matches GLMakie): u = (j-1)/(ny-1) along the 2nd grid axis;
     # v = (nx-i)/(nx-1) along the 1st, FLIPPED (i=1 → v=1 = the image's top
     # row).  A `u←i, v←j` layout rotates every textured surface 90°.
@@ -39,7 +39,7 @@ end
 
 const _M4_SURF_TEX_PROG = read(joinpath(@__DIR__, "surface_texture_prog.jl"), String)
 
-@testset "M4 textured surface! samples the texture via colorbuffer (subprocess)" begin
+@testset "textured surface! samples the texture via colorbuffer (subprocess)" begin
     exitcode, output = run_ovrtx_subprocess(_M4_SURF_TEX_PROG; timeout = 600, retries = 2, ready_marker = "ELTYPE=")
     @info "M4 surface-texture subprocess output" output
     @test exitcode == 0

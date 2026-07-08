@@ -88,7 +88,7 @@ println("OK_C3_PRESENT")
 """
 
 include(joinpath(@__DIR__, "..", "helpers.jl"))
-@testset "C3 GPU present! — fused oriented kernel + zero steady-state device alloc (subprocess, CUDA+GL)" begin
+@testset "GPU present! — fused oriented kernel + zero steady-state device alloc (subprocess, CUDA+GL)" begin
     # Retry past ovrtx's intermittent pre-render startup crash only: the
     # marker sits right after interactive_display, BEFORE the blitter/gpu_state
     # @asserts — so a genuine GPU-path failure fails once, not re-rolled.

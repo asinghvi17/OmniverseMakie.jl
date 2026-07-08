@@ -17,7 +17,7 @@ println("ERRORS_WITHOUT_GLMAKIE=", ok)
 println("OK_OFFSCREEN")
 """
 include(joinpath(@__DIR__, "..", "helpers.jl"))
-@testset "M6 offscreen load (no GLMakie/CUDA needed)" begin
+@testset "offscreen load (no GLMakie/CUDA needed)" begin
     exitcode, output = run_ovrtx_subprocess(_M6_OFFSCREEN_PROG; timeout = 600, retries = 2, ready_marker = "OK_OFFSCREEN")
     @info "M6 offscreen output" output
     @test exitcode == 0

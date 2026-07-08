@@ -18,7 +18,7 @@ import OmniverseMakie.OV.SignalGuard as SG
 # `map_handle=0`), and never throw.
 # ---------------------------------------------------------------------------
 
-@testset "A4 ovx_string: String-only, forces materialization (pure)" begin
+@testset "ovx_string: String-only, forces materialization (pure)" begin
     subs = SubString("abc/def", 1, 3)   # "abc", a genuine SubString{String}
     @test subs isa SubString{String}
     @test !(subs isa String)
@@ -52,7 +52,7 @@ import OmniverseMakie.OV.SignalGuard as SG
     end
 end
 
-@testset "A4 map_binding: closed-Renderer guard errors cleanly (pure)" begin
+@testset "map_binding: closed-Renderer guard errors cleanly (pure)" begin
     # A live Binding whose Renderer has been closed: map_binding must error on
     # the `b.r.alive` check BEFORE handing a C_NULL renderer instance to
     # ovrtx_map_attribute. A red-first demo of the DEFECT is impractical (the
@@ -73,7 +73,7 @@ end
     @test occursin("closed Renderer", err.msg)   # named cleanly, no ccall
 end
 
-@testset "A4 scoped-map + write-list guards error cleanly, no ccall (pure)" begin
+@testset "scoped-map + write-list guards error cleanly, no ccall (pure)" begin
     # map_cpu / with_mapped_hdr / map_cuda / read_pick_hit share the
     # `with_mapped_var` map/check/unmap scope but each keeps its OWN
     # closed-Renderer guard BEFORE any ccall.  A red-first demo is impractical
@@ -115,7 +115,7 @@ end
     @test occursin("set_selection_outline_group! on a closed Renderer", cl.msg)
 end
 
-@testset "A4 with_restored_signals: lock + GC restore (pure)" begin
+@testset "with_restored_signals: lock + GC restore (pure)" begin
     # The window is serialized by a module-level ReentrantLock so concurrent
     # Renderer() creations can't interleave snapshot/restore.
     @test SG._RESTORE_LOCK isa ReentrantLock
@@ -159,7 +159,7 @@ end
     @test true   # reached here ⇒ handlers restored, safepoint survived
 end
 
-@testset "A4 destroy! finalizer-flag paths (pure, no GPU)" begin
+@testset "destroy! finalizer-flag paths (pure, no GPU)" begin
     # A closed Renderer built WITHOUT ovrtx: `Renderer` exposes only its
     # GPU-calling inner constructor, so bypass it (two isbits fields — ptr +
     # alive — set by hand).  With the Renderer closed, BOTH destroy! paths

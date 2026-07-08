@@ -163,7 +163,7 @@ const _NO_APP_FIXTURE = """
 }
 """
 
-@testset "A5 _json_escape: JSON string-escape set (pure)" begin
+@testset "_json_escape: JSON string-escape set (pure)" begin
     # Untouched: printable ASCII + non-ASCII UTF-8 (>= U+0020) pass through
     # verbatim.
     @test OV._json_escape("plain/path-42") == "plain/path-42"
@@ -213,13 +213,13 @@ end
     @test OV._disable_crashreporter("plain text") == "plain text"
 end
 
-@testset "A5 _synth_index_config: happy path byte-stable vs golden (pure)" begin
+@testset "_synth_index_config: happy path byte-stable vs golden (pure)" begin
     bin = _write_bin(_CLEAN_FIXTURE)
     out = read(OV._synth_index_config(bin, _CLEAN_LIBS), String)
     @test out == _GOLDEN_CLEAN   # byte-for-byte regression anchor
 end
 
-@testset "A5 _synth_index_config: libs with quote/backslash -> valid escaped JSON (pure)" begin
+@testset "_synth_index_config: libs with quote/backslash -> valid escaped JSON (pure)" begin
     # A path containing a double-quote: unescaped it would terminate the
     # JSON string early (invalid config carb rejects).  The escaped value
     # must be embedded and quote-terminated.
@@ -243,7 +243,7 @@ end
     @test occursin("li\\\\bs", out_b)   # backslash was doubled in output
 end
 
-@testset "A5 _synth_index_config: nested app before top-level -> token in top-level (pure)" begin
+@testset "_synth_index_config: nested app before top-level -> token in top-level (pure)" begin
     out = read(OV._synth_index_config(_write_bin(_NESTED_FIXTURE), _CLEAN_LIBS), String)
 
     r_nested = findfirst("\n        \"app\": {", out)   # 8-space decoy in "log"
@@ -264,7 +264,7 @@ end
     @test occursin("        \"app\": {\n            \"note\":", out)
 end
 
-@testset "A5 _synth_index_config: line-comment app decoy before top-level -> token in top-level (pure)" begin
+@testset "_synth_index_config: line-comment app decoy before top-level -> token in top-level (pure)" begin
     # A `//` line-comment mentioning `"app": {` precedes the genuine
     # top-level block: the token must land in the real block and the comment
     # must survive verbatim. The other fixtures have no comments, so only
@@ -283,7 +283,7 @@ end
     @test occursin("\n    " * _DECOY_COMMENT * "\n", out)
 end
 
-@testset "A5 _synth_index_config: no top-level app block errors clearly (pure)" begin
+@testset "_synth_index_config: no top-level app block errors clearly (pure)" begin
     # No "app" key anywhere — the existing no-block error.
     err = try; OV._synth_index_config(_write_bin(_NO_APP_FIXTURE), _CLEAN_LIBS); nothing
           catch e; e end
