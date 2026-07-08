@@ -65,6 +65,7 @@ include("live/empty_fill_test.jl")         # empty→fill rebuild + pick regs
 include("live/accumulate_config_test.jl")  # ScreenConfig field/default contract
 include("live/accumulate_render_test.jl")  # accumulate reset suppression
 include("live/usdplot_test.jl")            # usdplot recipe + bind_usd!
+include("live/concurrency_test.jl")        # edit_lock handoff + two-live-screen warn
 
 # --- materials: OmniPBR/OmniGlass authoring, textures, colormaps, live edits --
 include("materials/material_test.jl")         # material= compose + bool gates

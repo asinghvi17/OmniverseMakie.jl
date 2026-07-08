@@ -502,8 +502,10 @@ function build_nanovdb_from_dense(
     voxel = (dx, dy, dz)
     vec = (Float64(origin[1]) + dx/2, Float64(origin[2]) + dy/2, Float64(origin[3]) + dz/2)
     # worldBBox spans the full input domain: IndeX uses it as the volume's
-    # world bounds (the authored UsdVol prim carries no explicit extent), so a
-    # tight active-only box clips off-origin data to black (live_test octant B).
+    # world domain, so a tight active-only box clips off-origin data. An
+    # explicit `float3[] extent` on the Volume prim does NOT override this —
+    # a tight worldBBox + full extent regressed live_test's reload recovery
+    # (RECOVERED=false 8/9), so the domain source stays the full worldBBox.
     world_min = (Float64(origin[1]), Float64(origin[2]), Float64(origin[3]))
     world_max = (Float64(origin[1]) + Float64(extent[1]),
                  Float64(origin[2]) + Float64(extent[2]),

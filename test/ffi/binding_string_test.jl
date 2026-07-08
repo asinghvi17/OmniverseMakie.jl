@@ -73,6 +73,48 @@ end
     @test occursin("closed Renderer", err.msg)   # named cleanly, no ccall
 end
 
+@testset "A4 scoped-map + write-list guards error cleanly, no ccall (pure)" begin
+    # map_cpu / with_mapped_hdr / map_cuda / read_pick_hit share the
+    # `with_mapped_var` map/check/unmap scope but each keeps its OWN
+    # closed-Renderer guard BEFORE any ccall.  A red-first demo is impractical
+    # (the unguarded path is a C_NULL-instance ccall = probable segfault), so
+    # assert each guard's clean error + verbatim message directly.
+    _dead_renderer() = let r = ccall(:jl_new_struct_uninit, Any, (Any,), OV.Renderer)::OV.Renderer
+        r.ptr = Ptr{LibOVRTX.ovrtx_renderer_t}(C_NULL); r.alive = false; r
+    end
+    dead = _dead_renderer()
+    sr = OV.StepResult(dead, LibOVRTX.ovrtx_step_result_handle_t(0), false)
+    @test !sr.r.alive
+    guards = ((() -> OV.map_cpu(sr),                        "map_cpu: the StepResult's Renderer is already closed"),
+              (() -> OV.with_mapped_hdr((a, b, c) -> nothing, sr), "with_mapped_hdr on a closed Renderer"),
+              (() -> OV.map_cuda(sr),                       "map_cuda on a closed Renderer"),
+              (() -> OV.read_pick_hit(sr),                  "read_pick_hit on a closed Renderer"))
+    for (fn, msg) in guards
+        err = try; fn(); nothing catch e; e end
+        @test err isa ErrorException
+        @test occursin(msg, err.msg)
+    end
+    # The shared helpers introduced by the consolidation exist.
+    @test OV.with_mapped_var isa Function
+    @test OV._fetch_find_var isa Function
+    @test OV._write_attribute_prims! isa Function
+
+    # set_selection_outline_group! now delegates to the shared FFI-write core
+    # (_write_attribute_prims!, prim LIST).  The length-mismatch guard and the
+    # empty (n==0) early return both short-circuit BEFORE any FFI write, so
+    # they are provable against a Renderer whose instance is C_NULL.
+    alive_null = let r = ccall(:jl_new_struct_uninit, Any, (Any,), OV.Renderer)::OV.Renderer
+        r.ptr = Ptr{LibOVRTX.ovrtx_renderer_t}(C_NULL); r.alive = true; r
+    end
+    mm = try; OV.set_selection_outline_group!(alive_null, ["/A", "/B"], UInt8[1]); nothing catch e; e end
+    @test mm isa ErrorException
+    @test occursin("prim_paths (2) and group_ids (1) length mismatch", mm.msg)
+    @test OV.set_selection_outline_group!(alive_null, String[], UInt8[]) === nothing
+    cl = try; OV.set_selection_outline_group!(dead, ["/A"], UInt8[1]); nothing catch e; e end
+    @test cl isa ErrorException
+    @test occursin("set_selection_outline_group! on a closed Renderer", cl.msg)
+end
+
 @testset "A4 with_restored_signals: lock + GC restore (pure)" begin
     # The window is serialized by a module-level ReentrantLock so concurrent
     # Renderer() creations can't interleave snapshot/restore.

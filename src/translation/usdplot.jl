@@ -281,8 +281,9 @@ function _wire_binding!(screen, robj::OvrtxRObj, binding::USDBinding; probe::Boo
     old = get(ofs, binding.target, nothing)
     old === nothing || Makie.Observables.off(old)  # re-bind replaces
     of = Makie.Observables.on(binding.obs) do v
-        screen.pending_usd_writes[key] = (binding, v)  # latest value wins
-        screen.requires_update = true                  # signal a re-render
+        # Enqueue + signal a re-render atomically under the screen's edit_lock
+        # (latest value per key wins); the render tick snapshot-swaps to flush.
+        _enqueue_usd_write!(screen, key, (binding, v))
         return
     end
     ofs[binding.target] = of
@@ -406,8 +407,12 @@ end
 # caller ORs it into `need_reset` — default mode reconverges, accumulate mode
 # ignores it (bound writes are non-structural; RT2 reprojection absorbs them).
 function _flush_pending_usd_writes!(screen)
-    pending = screen.pending_usd_writes
-    isempty(pending) && return false
+    # Snapshot-and-swap the queue under edit_lock (so a concurrent bind_usd!
+    # listener never mutates it mid-iteration), then issue the FFI writes
+    # OUTSIDE the lock — holding it across enqueue+wait ccalls is a latency/
+    # deadlock hazard.
+    pending = _swap_pending_usd_writes!(screen)
+    pending === nothing && return false
     r = screen.renderer
     for ((full_prim, _attr), (binding, v)) in pending
         try
@@ -418,6 +423,5 @@ function _flush_pending_usd_writes!(screen)
                    skipped." exception=e maxlog=1
         end
     end
-    empty!(pending)
     return true
 end

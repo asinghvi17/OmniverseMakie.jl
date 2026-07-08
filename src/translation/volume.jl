@@ -30,10 +30,14 @@ function _colormap_points(colormap; npoints::Int = 16)
     return (join(rgba, ", "), join(xs, ", "))
 end
 
+# Format a 3-tuple/Point as a USD `float3` literal `(x, y, z)` (Float64 so the
+# authored extent matches the .nvdb worldBBox exactly, no Float32 round-trip).
+_usd_float3(v) = "($(Float64(v[1])), $(Float64(v[2])), $(Float64(v[3])))"
+
 """
     _vdb_volume_usda(vdb_path; prim_path="/World/Volume", field="density",
                      field_dtype="float", colormap=:viridis,
-                     colorrange=nothing) -> String
+                     colorrange=nothing, bounds=nothing) -> String
 
 Pure (no renderer) self-contained USDA layer for a `.vdb`/`.nvdb` volume: a
 `def Volume "Volume"` (the `defaultPrim`) with a `field:<field>` rel to a
@@ -43,19 +47,33 @@ colormap/colorrange.
 `field` names the rel, the `OpenVDBAsset` prim, AND its `fieldName` (the grid
 name inside the VDB, e.g. `"torus_fog"` for `torus.vdb`).
 
+`bounds`, when given as `(min, max)` 3-tuples/Points, authors a `float3[]
+extent` on the Volume prim (UsdVolVolume is a UsdGeomBoundable): the full user
+domain in prim-local space (== the nvdb world frame, the prim carries no
+xform). USD-correct, but it does NOT govern IndeX's world domain in this build
+— IndeX still uses the .nvdb worldBBox (a tight worldBBox + full extent
+regressed live_test's reload recovery), so the writer keeps a full-domain
+worldBBox.
+
 Internal rel/connect targets are layer-relative (`</Volume/…>`) — USD remaps
 them under the reference `prim_path` on composition (absolute would dangle →
 black). `prim_path` itself is accepted only for signature symmetry with
 `author_vdb_volume!`; it does not appear in the emitted string.
 """
 function _vdb_volume_usda(vdb_path; prim_path = "/World/Volume", field = "density",
-                          field_dtype = "float", colormap = :viridis, colorrange = nothing)
+                          field_dtype = "float", colormap = :viridis, colorrange = nothing,
+                          bounds = nothing)
     # `field` is interpolated four ways below (rel name, target, prim name,
     # `fieldName` value), so it must be a legal USD identifier — validate
     # once here; a bad grid name would author a corrupt Volume prim.
     field = _usd_identifier(string(field); what = "volume `field` name")
     rgba_str, x_str = _colormap_points(colormap)
     lo, hi = something(colorrange, (0.0, 1.0))
+    # Explicit extent (full user domain), USD-correct; omitted for on-disk
+    # `.vdb` (no header parsed for bounds). Not the IndeX domain source — the
+    # .nvdb worldBBox is (see the docstring).
+    extent_line = bounds === nothing ? "" :
+        "    float3[] extent = [$(_usd_float3(bounds[1])), $(_usd_float3(bounds[2]))]\n"
     return """#usda 1.0
 (
     defaultPrim = "Volume"
@@ -64,7 +82,7 @@ def Volume "Volume" (
     prepend apiSchemas = ["MaterialBindingAPI"]
 )
 {
-    rel field:$(field) = </Volume/$(field)>
+$(extent_line)    rel field:$(field) = </Volume/$(field)>
     rel material:binding = </Volume/Material>
 
     def OpenVDBAsset "$(field)"
@@ -121,7 +139,13 @@ function author_vdb_volume!(screen, scene, vdb_path; prim_path = "/World/Volume"
         "OMNIVERSEMAKIE_INDEX_LIBS (or OMNIVERSEMAKIE_OVRTX_CONFIG) BEFORE creating the Screen, " *
         "then re-create it.")
     isfile(vdb_path) || error("author_vdb_volume!: VDB file not found: $(vdb_path)")
-    usda = _vdb_volume_usda(vdb_path; prim_path, field, field_dtype, colormap, colorrange)
+    # A `.nvdb` carries a parseable worldBBox → author it as the Volume prim's
+    # explicit extent (USD-correct Boundable metadata; not IndeX's domain
+    # source). A `.vdb` has no header we parse, so omit extent.
+    bounds = endswith(lowercase(vdb_path), ".nvdb") ?
+        (h = NanoVDBWriter.parse_nanovdb_header(vdb_path); (h.world_bbox_min, h.world_bbox_max)) :
+        nothing
+    usda = _vdb_volume_usda(vdb_path; prim_path, field, field_dtype, colormap, colorrange, bounds)
     OV.add_usd_reference!(screen.renderer, usda, prim_path)
     return prim_path
 end
@@ -164,7 +188,8 @@ function reload_volume_data!(screen, robj, plot, scalars)
         NanoVDBWriter.save_nanovdb(newtmp, data, origin, extent)
         usda = _vdb_volume_usda(newtmp; prim_path = vprim, field = "density",
                                 colormap = Makie.to_value(plot.colormap),
-                                colorrange = _volume_colorrange(plot, data))
+                                colorrange = _volume_colorrange(plot, data),
+                                bounds = (origin, origin .+ extent))
         if get(robj.meta, :usd_handle_valid, true)
             OV.remove_usd!(r, robj.usd_handle)      # drop the current layer
             robj.meta[:usd_handle_valid] = false  # dangling until add succeeds

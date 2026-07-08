@@ -6,7 +6,8 @@ using OmniverseMakie: Makie, RGBA, N0f8
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
     _scene_for_camera, interactive_display, present!, on_render_tick!,
     attach_picking!, detach_picking!, _pick_at!,   # picking
-    replace_scene!, record_frame!, ScreenConfig    # hybrid embedded viewport
+    replace_scene!, record_frame!, ScreenConfig,   # hybrid embedded viewport
+    _clear_requires_update!                        # locked render-tick flag consume
 using OmniverseMakie: tonemap
 
 # A USDPlot is a childless recipe, so GLMakie's insert! routes it to the
@@ -166,7 +167,7 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
         # The eager insertplots! flipped requires_update; the warmup already
         # drew that geometry, so consume the flag (as colorbuffer does) — else
         # the first on_render_tick! would redundantly OV.reset! and discard it.
-        screen.requires_update = false
+        _clear_requires_update!(screen)
 
         # 4. Display: one campixel! Scene with a full-viewport image! whose data
         #    array is the session-owned present buffer; present! writes it in
@@ -334,7 +335,7 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     session.samples = new_screen.config.warmup
     # Consume the warmup flag (as interactive_display does) so the first tick
     # does not redundantly reset and discard this clean frame.
-    new_screen.requires_update = false
+    _clear_requires_update!(new_screen)
     Base.close(old_screen)
 
     # 5. Replace the image!: delete the wrong-size plot, fill a fresh [W,H]
@@ -735,7 +736,7 @@ function replace_scene!(target::Union{Makie.Scene,Makie.Block};
         _author_screen!(screen, cam_scene, tscene)
         warmup_hdr = OV.render_hdr_to_array(screen.renderer, screen.product; warmup = cfg.warmup)
         # the warmup already drew the eager insertplots!
-        screen.requires_update = false
+        _clear_requires_update!(screen)
 
         # Overlay: a pixel-space child scene sharing the target's viewport
         # Observable (tracks the rectangle across layout/resize), with our opaque
@@ -897,7 +898,7 @@ function _resize_embedded!(session::EmbeddedSession, (W, H)::Tuple{Int,Int})
         close(new_screen)
         rethrow()
     end
-    new_screen.requires_update = false
+    _clear_requires_update!(new_screen)
     # Swap-first (like resize_viewport!): seat the new Screen, THEN free the
     # old one — never leave session.screen pointing at a closed renderer.
     old_screen     = session.screen

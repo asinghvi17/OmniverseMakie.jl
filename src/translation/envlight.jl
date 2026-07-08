@@ -103,7 +103,7 @@ function _apply_environment!(screen, source, intensity::Real, format::AbstractSt
         # reset so accumulate-across-frames does not blend a stale dome.
         if composition_changed
             _note_composition_change!(screen)
-            screen.requires_update = true
+            _set_requires_update!(screen)
         end
         if added
             old = st.tmp                     # GC the prior temp (one on disk)

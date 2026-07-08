@@ -31,6 +31,10 @@ mutable struct Screen <: Makie.MakieScreen
     # Environment-light (IBL) record: removable dome-layer handle +
     # screen-owned temp texture; `nothing` until an EnvironmentLight / push.
     env_light::Union{Nothing,EnvLightState}
+    # Serializes the render-tick read-and-clear of requires_update /
+    # structural_dirty / pending_usd_writes against user-task listener SETs, so
+    # a threaded renderloop cannot drop an edit or corrupt the pending Dict.
+    edit_lock::ReentrantLock
 end
 
 # ------------------------------------------------------------------
@@ -85,6 +89,7 @@ function Screen(scene::Makie.Scene, config::ScreenConfig;
         false,     # preroll_done (first-frame warmup not folded in)
         Dict{Tuple{String,Union{Nothing,String}},Any}(),  # pending_usd_writes
         nothing,   # env_light (IBL dome state)
+        ReentrantLock(),  # edit_lock (render-tick vs listener handoff)
     )
 end
 
@@ -267,7 +272,7 @@ function Base.delete!(screen::Screen, scene::Makie.Scene, plot::Makie.AbstractPl
     else
         foreach(p -> delete!(screen, scene, p), plot.plots)
     end
-    screen.requires_update = true
+    _set_requires_update!(screen)
     return screen
 end
 
@@ -287,7 +292,7 @@ function Base.delete!(screen::Screen, scene::Makie.Scene)
         delete!(screen, scene, plot)
     end
     delete!(screen.scene2scope, objectid(scene))
-    screen.requires_update = true
+    _set_requires_update!(screen)
     return screen
 end
 
@@ -320,7 +325,7 @@ function Base.empty!(screen::Screen)
     empty!(screen.plot2robj)
     empty!(screen.path2plot)   # reverse map cleared alongside plot2robj
     empty!(screen.scene2scope)
-    screen.requires_update = true
+    _set_requires_update!(screen)
     return screen
 end
 
@@ -345,25 +350,27 @@ function _author_screen!(screen::Screen, cam_scene, plot_scene)
 end
 
 # Push live camera/light/plot deltas to the open stage; return whether RT2
-# must restart this frame.  Clears requires_update on both the pre-pull and
-# post-pull reads.  Shared by colorbuffer + the interactive tick.
+# must restart this frame.  Atomically read-and-clears requires_update on both
+# the pre-pull and post-pull windows (edit_lock, so a concurrent listener SET
+# is never lost).  Shared by colorbuffer + the interactive tick.
 function _sync_and_needs_reset!(screen::Screen, cam_scene)::Bool
     cam_changed   = sync_camera!(screen, cam_scene)
     light_changed = sync_lights!(screen, cam_scene)
-    pending = screen.requires_update
-    screen.requires_update = false
+    pending = _take_requires_update!(screen)   # edits landed BEFORE the pull
     pull_ovrtx_nodes!(screen, screen.scene)
     # usdplot bind_usd! writes flush here, BEFORE the accumulate gate: the OR
     # makes default mode reconverge; the gate drops it in accumulate mode
     # (bound writes are non-structural — reprojection keeps the history).
     usd_wrote = _flush_pending_usd_writes!(screen)
-    need_reset = cam_changed || light_changed || screen.requires_update || pending || usd_wrote
-    screen.requires_update = false
+    # Take (read-and-clear) unconditionally — NOT inside the short-circuiting
+    # OR — so the flag is cleared even when the camera already forced a reset.
+    post_pull  = _take_requires_update!(screen)  # diff-node + landed edits
+    need_reset = cam_changed || light_changed || post_pull || pending || usd_wrote
     # Accumulate mode: keep RT2 history, so only a STRUCTURAL change (a USD
     # reference added/removed, via `_note_composition_change!`) resets —
     # reprojection has no history for a prim that just appeared/vanished.
-    screen.config.accumulate_across_frames && (need_reset = screen.structural_dirty)
-    screen.structural_dirty = false
+    structural = _take_structural_dirty!(screen)
+    screen.config.accumulate_across_frames && (need_reset = structural)
     return need_reset
 end
 
@@ -465,13 +472,77 @@ function path_resolver_for(screen::Screen)
     return pr
 end
 
+# ------------------------------------------------------------------
+# Edit-signal / pending-write concurrency helpers
+#
+# requires_update + structural_dirty (Bool flags) and pending_usd_writes
+# (Dict) are SET by user-task Observable listeners and READ-then-CLEARED by
+# the render tick; all access funnels through `edit_lock` so a threaded
+# renderloop cannot lose a set landing between a read and its clear, nor
+# mutate the Dict mid-iteration.  Duck-typed so a fake can exercise them.
+# ------------------------------------------------------------------
+
+# Raise the diff-node change signal (a listener / teardown SET site).
+_set_requires_update!(screen) =
+    (lock(() -> (screen.requires_update = true), screen.edit_lock); nothing)
+
+# Consume the change signal after the render path has already drawn it
+# (interactive/hybrid setup + resize warmup); used by the GLMakie ext.
+_clear_requires_update!(screen) =
+    (lock(() -> (screen.requires_update = false), screen.edit_lock); nothing)
+
+# Atomically read-and-clear requires_update (render tick): one critical
+# section, so a concurrent SET is never lost between the read and the clear.
+function _take_requires_update!(screen)::Bool
+    lock(screen.edit_lock) do
+        v = screen.requires_update
+        screen.requires_update = false
+        return v
+    end
+end
+
+# Atomically read-and-clear structural_dirty (accumulate-mode reset gate).
+function _take_structural_dirty!(screen)::Bool
+    lock(screen.edit_lock) do
+        v = screen.structural_dirty
+        screen.structural_dirty = false
+        return v
+    end
+end
+
+# Enqueue one coalesced usdplot bound write + raise the change signal, under
+# edit_lock (a bind_usd! listener SET site); latest value per key wins.
+_enqueue_usd_write!(screen, key, value) =
+    lock(screen.edit_lock) do
+        screen.pending_usd_writes[key] = value
+        screen.requires_update = true
+        return nothing
+    end
+
+# Snapshot-and-swap the pending-write Dict under edit_lock: install a fresh
+# empty Dict and return the old one (or `nothing` when empty).  The caller
+# issues the FFI writes on the returned Dict OUTSIDE the lock (holding it
+# across enqueue+wait ccalls is a latency/deadlock hazard).
+function _swap_pending_usd_writes!(screen)
+    lock(screen.edit_lock) do
+        isempty(screen.pending_usd_writes) && return nothing
+        old = screen.pending_usd_writes
+        screen.pending_usd_writes = empty(old)
+        return old
+    end
+end
+
 # Every stage-composition change (a USD reference added OR removed) calls
-# this one helper, so the two concerns never drift: (1) drop the pick
-# resolver cache, (2) flag `structural_dirty` so accumulate mode resets RT2
-# once.  Call sites: `_register_robj_maps!` (compute.jl),
+# this one helper, so the concerns never drift: (1) drop the pick resolver
+# cache, (2) flag `structural_dirty` under edit_lock so accumulate mode resets
+# RT2 once.  Call sites: `_register_robj_maps!` (compute.jl),
 # `_teardown_usd_reference!`, `reload_volume_data!` (volume.jl).
-_note_composition_change!(screen::Screen) =
-    (screen.path_resolver = nothing; screen.structural_dirty = true; nothing)
+_note_composition_change!(screen) =
+    lock(screen.edit_lock) do
+        screen.path_resolver    = nothing
+        screen.structural_dirty = true
+        return nothing
+    end
 
 """
     reset_accumulation!(screen::Screen) -> Nothing

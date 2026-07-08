@@ -8,6 +8,24 @@
 using Test
 # _HELPER_INDEX_LIBS + PROG_PIXEL_HELPERS (latter spliced into prog below)
 include(joinpath(@__DIR__, "..", "helpers.jl"))
+
+import OmniverseMakie as OM
+using GeometryBasics: Point3f
+
+# Pure (no GPU): the Volume prim authors an explicit `float3[] extent` (the
+# full user domain, prim-local == nvdb world frame) so IndeX takes it as the
+# volume's world domain; a wrong extent is invisible except through pixels
+# (ovrtx ignores unknown attrs), so this pins the exact USDA syntax.
+@testset "Volumes: _vdb_volume_usda authors extent (pure)" begin
+    u = OM._vdb_volume_usda("/tmp/x.nvdb"; bounds = (Point3f(-10, -10, -10), Point3f(10, 10, 10)))
+    # UsdVolVolume is a Boundable: `float3[] extent = [(min...), (max...)]`.
+    @test occursin("float3[] extent = [(-10.0, -10.0, -10.0), (10.0, 10.0, 10.0)]", u)
+    # The extent sits inside the Volume prim body (right after its opening `{`).
+    @test occursin("{\n    float3[] extent = [", u)
+    # No bounds → no extent authored (the on-disk `.vdb` path keeps this).
+    @test !occursin("extent", OM._vdb_volume_usda("/tmp/x.vdb"; bounds = nothing))
+end
+
 const _VOLPLOT_PROG = """
 using OmniverseMakie
 import OmniverseMakie as OM

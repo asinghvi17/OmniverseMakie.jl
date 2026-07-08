@@ -345,7 +345,8 @@ function author_usd_prim!(screen, scene, plot::Makie.Volume, args)
         path = plot_prim_path(screen.scene2scope, scene, plot)
         usda = _vdb_volume_usda(tmp; prim_path = path, field = "density",
                                 colormap = Makie.to_value(plot.colormap),
-                                colorrange = _volume_colorrange(plot, scalars))
+                                colorrange = _volume_colorrange(plot, scalars),
+                                bounds = (origin, origin .+ extent))
         h = OV.add_usd_reference!(screen.renderer, usda, path)
         robj = OvrtxRObj(path, h)
         robj.meta[:vdb_tmp]     = tmp   # cleaned by destroy_bindings!
@@ -795,6 +796,13 @@ marks the node dirty and rebuilds the reference on that screen's fresh stage
 instead of pushing diffs to a closed renderer; re-rendering the same screen
 leaves it unchanged so only real edits drive writes.
 
+Single live-screen model: `:ovrtx_screen` holds ONE screen, so this supports
+SEQUENTIAL screens (each new screen supersedes a closed one).  Two screens
+displaying the same figure CONCURRENTLY is not: the last to register wins all
+live edits and the earlier screen renders an ever-staler stage, so
+re-pointing away from a still-open screen `@warn`s once (full multi-screen
+diff routing is out of scope).
+
 A plot type with no tracked inputs (empty `consumed_inputs` —
 Surface/unknown) gets no node and is built once per screen via
 `to_ovrtx_object`.
@@ -816,8 +824,17 @@ function register_ovrtx_robj!(screen, scene, plot)
 
     attr = plot.attributes
     # Per-screen build context: the diff node consumes this; pointing it at a
-    # new screen marks it dirty → rebuild on that screen's stage.
+    # new screen marks it dirty → rebuild on that screen's stage.  Single
+    # live-screen model: the node has ONE `:ovrtx_screen`, so if the plot is
+    # already displayed on a DIFFERENT, still-open screen, live edits now route
+    # here and the earlier screen shows a frozen stage — warn once.
     if haskey(attr, :ovrtx_screen)
+        prev = attr[:ovrtx_screen][]
+        if prev isa Screen && prev !== screen && isopen(prev)
+            @warn "OmniverseMakie: this plot is now displayed on a second live Screen; live \
+                   edits route to the most recent Screen and the earlier one shows a frozen \
+                   stage (concurrent multi-screen routing is unsupported)." maxlog=1
+        end
         setproperty!(attr, :ovrtx_screen, screen)
     else
         ComputePipeline.add_input!(attr, :ovrtx_screen, screen)
@@ -866,8 +883,9 @@ function register_ovrtx_robj!(screen, scene, plot)
             end
             # Only a REAL stage change resets RT2.  Guarded on `dirty`:
             # sibling plots share screen.requires_update within one pull, so
-            # this only sets the flag; _sync_and_needs_reset! owns the clears.
-            scr === nothing || !dirty || (scr.requires_update = true)
+            # this only sets the flag (under edit_lock);
+            # _sync_and_needs_reset! owns the atomic read-and-clear.
+            scr === nothing || !dirty || _set_requires_update!(scr)
             return (robj,)
         end
     end

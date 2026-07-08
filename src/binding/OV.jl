@@ -288,6 +288,43 @@ function _check_var_output(out::LibOVRTX.ovrtx_render_var_output_t, op::Abstract
     return nothing
 end
 
+# Fetch this step's results and locate render var `name`.  `opt=true` returns
+# `nothing` when the var is absent (an expected outcome for a pick that was
+# never enqueued); the default throws via `_find_var`.
+function _fetch_find_var(sr::StepResult, name::AbstractString; opt::Bool=false)
+    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
+    return opt ? _find_var_opt(outs[], name) : _find_var(outs[], name)
+end
+
+# with_mapped_var — map render-var handle `h` on `device`, surface a failed
+# output (`check_op`), run `f(out::ovrtx_render_var_output_t)` on the
+# still-mapped view, then unmap.  The mapped view dies on unmap: `f` must copy
+# anything it keeps.  Unmap policy — CHECKED on the success path (a failed
+# unmap means the mapped read may be invalid, and there is no primary
+# exception to mask); UNCHECKED while unwinding from a throw (a throwing `f` or
+# a bad output) so a failed unmap can't mask the primary (mirrors map_cuda's
+# failure path).  map_cuda escapes this scope: it returns the LIVE mapping and
+# must not unmap.
+function with_mapped_var(f, sr::StepResult, h, op::AbstractString;
+                         device = LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU,
+                         check_op::AbstractString = op)
+    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(device, Csize_t(0)))
+    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
+    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), op)
+    out = ro[]
+    result = try
+        _check_var_output(out, check_op)
+        f(out)
+    catch
+        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, out.map_handle, LibOVRTX.NOSYNC)
+        rethrow()
+    end
+    LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, out.map_handle, LibOVRTX.NOSYNC),
+                   "unmap_render_var_output")
+    return result
+end
+
 # ------------------------------------------------------------------
 # map_cpu — fetch results, find LdrColor, map to CPU, single-pass build, unmap
 # ------------------------------------------------------------------
@@ -303,40 +340,25 @@ returned `img` is owned and valid after unmap.  Top-left origin, no y-flip.
 """
 function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
     sr.r.alive || error("map_cpu: the StepResult's Renderer is already closed")
-    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
-    h = _find_var(outs[], name)
-    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
-    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
-    out = try
-        _check_var_output(ro[], "map_render_var_output($name)")
+    h = _fetch_find_var(sr, name)
+    return with_mapped_var(sr, h, "map_render_var_output";
+                           check_op = "map_render_var_output($name)") do out
         # DLTensor shape [H,W,C]; wrap the mapped bytes as a non-owning
         # [C,W,H] view.
-        dlt = unsafe_load(unsafe_load(ro[].tensors, 1).dl)
+        dlt = unsafe_load(unsafe_load(out.tensors, 1).dl)
         H, W, C = Int(unsafe_load(dlt.shape, 1)), Int(unsafe_load(dlt.shape, 2)), Int(unsafe_load(dlt.shape, 3))
         raw = unsafe_wrap(Array, Ptr{UInt8}(dlt.data), (C, W, H); own=false)
         (cwh_to_matrix(raw), W, H)   # owned Matrix, safe post-unmap
-    catch
-        # Already unwinding: release the mapping UNCHECKED so a failed unmap
-        # can't mask the primary exception (mirrors map_cuda's failure path).
-        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)
-        rethrow()
     end
-    # Success path: NOSYNC CPU unmap, CHECKED — a failed unmap means the built
-    # matrix above may be invalid, and there is no primary exception to mask.
-    LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
-                   "unmap_render_var_output")
-    return out
 end
 
 # ------------------------------------------------------------------
 # with_mapped_hdr — map an HDR render var, run `f` on the mapped view, unmap
 #
 # HdrColor is kDLFloat/16.  The scoped/callback form owns the map lifetime
-# (unmap in `finally`) so a throwing `f` never leaks it; `map_cpu_f32` is the
-# eager-copy convenience over it.  The tonemap path also works on the mapped
-# view in place through this same signature.
+# (released by `with_mapped_var` — unmapped even if `f` throws) so it never
+# leaks; `map_cpu_f32` is the eager-copy convenience over it.  The tonemap path
+# also works on the mapped view in place through this same signature.
 # ------------------------------------------------------------------
 
 """
@@ -351,32 +373,16 @@ anything you keep.
 """
 function with_mapped_hdr(f, sr::StepResult, name::AbstractString="HdrColor")
     sr.r.alive || error("with_mapped_hdr on a closed Renderer")
-    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
-    h = _find_var(outs[], name)
-    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
-    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro), "map_render_var_output")
-    result = try
-        _check_var_output(ro[], "map_render_var_output($name)")
+    h = _fetch_find_var(sr, name)
+    return with_mapped_var(sr, h, "map_render_var_output";
+                           check_op = "map_render_var_output($name)") do out
         # DLTensor shape [H,W,C], dtype kDLFloat/16/1; wrap mapped bytes as a
         # [C,W,H] Float16 view.
-        dlt = unsafe_load(unsafe_load(ro[].tensors, 1).dl)
+        dlt = unsafe_load(unsafe_load(out.tensors, 1).dl)
         H, W, C = Int(unsafe_load(dlt.shape, 1)), Int(unsafe_load(dlt.shape, 2)), Int(unsafe_load(dlt.shape, 3))
         raw16 = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
         f(raw16, W, H)
-    catch
-        # Already unwinding (a throwing `f` or a bad map): release UNCHECKED so
-        # a failed unmap can't mask the primary (mirrors map_cuda's failure
-        # path).
-        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC)
-        rethrow()
     end
-    # Success path: NOSYNC CPU unmap, CHECKED — a failed unmap means the mapped
-    # read may be invalid, and there is no primary exception to mask.
-    LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, ro[].map_handle, LibOVRTX.NOSYNC),
-                   "unmap_render_var_output")
-    return result
 end
 
 """
@@ -421,10 +427,8 @@ the CUDA pkg ext wraps `data` as a `CuArray` and `wait_event` as a `CuEvent`.
 """
 function map_cuda(sr::StepResult, name::AbstractString="HdrColor")
     sr.r.alive || error("map_cuda on a closed Renderer")
-    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
-
-    h = _find_var(outs[], name)
+    h = _fetch_find_var(sr, name)   # shared fetch/find; the map below escapes
+                                    # the with_mapped_var scope (live mapping)
 
     # map as linear CUDA device memory (mode 2) — no copy, no unmap
     mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CUDA, Csize_t(0)))
@@ -572,14 +576,10 @@ end
 # Map one PointCloud composite output to CPU and copy its channels.  Two
 # passes over the tensor table: locate Counts first (tiny tensor), then copy
 # everything else with the validity limit applied.  Counts stays unsliced.
+# `h` was located by `read_pointcloud`'s product-scoped walk, so this maps the
+# handle directly (no fetch/find prologue).
 function _map_pointcloud_frame(sr::StepResult, h)
-    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
-    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro),
-                   "map_render_var_output(PointCloud)")
-    out = ro[]
-    try
-        _check_var_output(out, "map_render_var_output(PointCloud)")
+    return with_mapped_var(sr, h, "map_render_var_output(PointCloud)") do out
         valid = nothing                       # Counts[1] when delivered
         for t_i in 1:out.num_tensors
             t = unsafe_load(out.tensors, t_i)   # POINTER name/dl — deref both
@@ -600,8 +600,6 @@ function _map_pointcloud_frame(sr::StepResult, h)
                                        limit = name == "Counts" ? nothing : valid))
         end
         return NamedTuple{Tuple(names)}(Tuple(arrays))
-    finally
-        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, out.map_handle, LibOVRTX.NOSYNC)
     end
 end
 
@@ -698,20 +696,12 @@ restriction); always released (try/finally).
 """
 function read_pick_hit(sr::StepResult)::Vector{PickHit}
     sr.r.alive || error("read_pick_hit on a closed Renderer")
-    outs = Ref{LibOVRTX.ovrtx_render_product_set_outputs_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_fetch_results(sr.r.ptr, sr.handle, LibOVRTX.OVRTX_TIMEOUT_INFINITE, outs), "fetch_results")
-    h = _find_var_opt(outs[], LibOVRTX.OVRTX_RENDER_VAR_PICK_HIT)
+    h = _fetch_find_var(sr, LibOVRTX.OVRTX_RENDER_VAR_PICK_HIT; opt=true)
     h === nothing && return PickHit[]   # no pick enqueued this step
-    mdesc = Ref(LibOVRTX.ovrtx_map_output_description_t(LibOVRTX.OVRTX_MAP_DEVICE_TYPE_CPU, Csize_t(0)))
-    ro    = Ref{LibOVRTX.ovrtx_render_var_output_t}()
-    LibOVRTX.check(LibOVRTX.ovrtx_map_render_var_output(sr.r.ptr, h, mdesc, LibOVRTX.OVRTX_TIMEOUT_INFINITE, ro),
-                   "map_render_var_output(pick_hit)")
-    out  = ro[]
-    hits = PickHit[]
-    try
-        # Surface a failed pick output (its .error_message) like every sibling
-        # map path, rather than decoding garbage; finally still unmaps.
-        _check_var_output(out, "map_render_var_output(pick_hit)")
+    # with_mapped_var surfaces a failed pick output (its .error_message) like
+    # every sibling map path, rather than decoding garbage, and always unmaps.
+    return with_mapped_var(sr, h, "map_render_var_output(pick_hit)") do out
+        hits = PickHit[]
         magic   = _pick_param_u32(out, "magic")
         version = _pick_param_u32(out, "version")
         if !(magic == LibOVRTX.OVRTX_PICK_HIT_MAGIC && version == LibOVRTX.OVRTX_PICK_HIT_VERSION)
@@ -740,10 +730,8 @@ function read_pick_hit(sr::StepResult)::Vector{PickHit}
                          world_position = (unsafe_load(pwp, base + 1), unsafe_load(pwp, base + 2), unsafe_load(pwp, base + 3)),
                          normal         = (unsafe_load(pwn, base + 1), unsafe_load(pwn, base + 2), unsafe_load(pwn, base + 3))))
         end
-    finally
-        LibOVRTX.ovrtx_unmap_render_var_output(sr.r.ptr, out.map_handle, LibOVRTX.NOSYNC)
+        return hits
     end
-    return hits
 end
 
 """
@@ -843,29 +831,12 @@ function set_selection_outline_group!(r::Renderer, prim_paths::Vector{String}, g
     n == length(group_ids) ||
         error("set_selection_outline_group!: prim_paths ($n) and group_ids ($(length(group_ids))) length mismatch")
     n == 0 && return nothing
-    prim_arr = LibOVRTX.ovx_string_t[LibOVRTX.ovx_string(s) for s in prim_paths]
-    name_s   = String(LibOVRTX.OVRTX_ATTR_NAME_SELECTION_OUTLINE_GROUP)
-    shape    = Int64[n]
-    strides  = Int64[1]
-    dtype    = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLUInt), UInt8(8), UInt16(1))
-    GC.@preserve prim_paths prim_arr group_ids name_s shape strides begin
-        prim_list   = LibOVRTX.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(n))
-        attr_lookup = LibOVRTX.ovx_string_or_token_t(UInt64(0), LibOVRTX.ovx_string(name_s))
-        attr_type   = LibOVRTX.ovrtx_attribute_type_t(dtype, false, LibOVRTX.OVRTX_SEMANTIC_NONE)
-        bdesc = LibOVRTX.ovrtx_binding_desc_t(prim_list, LibOVRTX.ovx_primpath_list_t(0), attr_lookup,
-            attr_type, LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY, LibOVRTX.OVRTX_BINDING_FLAG_NONE)
-        bdoh = Ref(LibOVRTX.ovrtx_binding_desc_or_handle_t(bdesc, LibOVRTX.ovrtx_attribute_binding_handle_t(0)))
-        dl = LibOVRTX.DLTensor(Ptr{Cvoid}(pointer(group_ids)), LibOVRTX.DLDevice(LibOVRTX.kDLCPU, Int32(0)),
-            Int32(1), dtype, pointer(shape), pointer(strides), UInt64(0))
-        dl_arr = LibOVRTX.DLTensor[dl]
-        GC.@preserve dl_arr begin
-            ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
-                       Ptr{UInt8}(C_NULL), Csize_t(0), LibOVRTX.NOSYNC, LibOVRTX.NOSYNC))
-            enqueue_wait(r, "set_selection_outline_group") do
-                LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC)
-            end
-        end
-    end
+    # One multi-prim write (kDLUInt/8, shape [n], semantic NONE); reuses the
+    # shared FFI-write core with `prim_paths` as the prim list.
+    dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLUInt), UInt8(8), UInt16(1))
+    _write_attribute_prims!(r, prim_paths, String(LibOVRTX.OVRTX_ATTR_NAME_SELECTION_OUTLINE_GROUP),
+                            dtype, false, LibOVRTX.OVRTX_SEMANTIC_NONE, group_ids, Int64[n],
+                            "set_selection_outline_group")
     return nothing
 end
 
@@ -968,22 +939,24 @@ end
 # _write_attribute! — shared private helper for FFI attribute writes
 # ------------------------------------------------------------------
 
-# Write one attribute (fixed-size or array) to `prim` via a DLTensor over
-# `data` (a contiguous owned Vector; caller preprocesses).  `prim_mode`:
-# EXISTING_ONLY (default) silently no-ops on a missing prim/attr — ovrtx's
-# silent-ignore hazard; MUST_EXIST throws `OVRTXError` naming the target.
-function _write_attribute!(r::Renderer, prim::AbstractString, attr_name::AbstractString,
-                           dtype::LibOVRTX.DLDataType, is_array::Bool, semantic,
-                           data::AbstractVector, shape::Vector{Int64};
-                           prim_mode = LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY)
-    strides = Int64[1]
-    prim_s   = String(prim)
-    prim_ovx = LibOVRTX.ovx_string(prim_s)
-    prim_arr = LibOVRTX.ovx_string_t[prim_ovx]
+# Write one attribute (fixed-size or array) to a LIST of prims via a DLTensor
+# over `data` (a contiguous owned Vector; caller preprocesses), enqueuing one
+# `ovrtx_write_attribute` under op label `op`.  Each prim is materialized to a
+# String so its `ovx_string_t` stays rooted across the GC.@preserve span
+# (ovx_string borrows the String's bytes).  `prim_mode`: EXISTING_ONLY
+# (default) silently no-ops on a missing prim/attr — ovrtx's silent-ignore
+# hazard; MUST_EXIST throws `OVRTXError` naming the target.
+function _write_attribute_prims!(r::Renderer, prims, attr_name::AbstractString,
+                                 dtype::LibOVRTX.DLDataType, is_array::Bool, semantic,
+                                 data::AbstractVector, shape::Vector{Int64}, op::AbstractString;
+                                 prim_mode = LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY)
+    strides  = Int64[1]
+    prim_ss  = String[String(p) for p in prims]
+    prim_arr = LibOVRTX.ovx_string_t[LibOVRTX.ovx_string(s) for s in prim_ss]
     name_s   = String(attr_name)
     name_ovx = LibOVRTX.ovx_string(name_s)
-    GC.@preserve prim_s prim_arr name_s data shape strides begin
-        prim_list   = LibOVRTX.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(1))
+    GC.@preserve prim_ss prim_arr name_s data shape strides begin
+        prim_list   = LibOVRTX.ovrtx_prim_list_t(pointer(prim_arr), Csize_t(length(prim_arr)))
         attr_lookup = LibOVRTX.ovx_string_or_token_t(UInt64(0), name_ovx)
         attr_type   = LibOVRTX.ovrtx_attribute_type_t(dtype, is_array, semantic)
         bdesc = LibOVRTX.ovrtx_binding_desc_t(
@@ -1014,13 +987,21 @@ function _write_attribute!(r::Renderer, prim::AbstractString, attr_name::Abstrac
                 LibOVRTX.NOSYNC,
                 LibOVRTX.NOSYNC,
             ))
-            enqueue_wait(r, "write_attribute($attr_name)") do
+            enqueue_wait(r, op) do
                 LibOVRTX.ovrtx_write_attribute(r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_SYNC)
             end
         end
     end
     return nothing
 end
+
+# Single-prim convenience over `_write_attribute_prims!` (the common case).
+_write_attribute!(r::Renderer, prim::AbstractString, attr_name::AbstractString,
+                  dtype::LibOVRTX.DLDataType, is_array::Bool, semantic,
+                  data::AbstractVector, shape::Vector{Int64};
+                  prim_mode = LibOVRTX.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY) =
+    _write_attribute_prims!(r, (prim,), attr_name, dtype, is_array, semantic, data, shape,
+                            "write_attribute($attr_name)"; prim_mode)
 
 # ------------------------------------------------------------------
 # write_xform! — write a 4×4 transform to a USD prim (hot-path)
