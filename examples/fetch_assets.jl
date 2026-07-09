@@ -50,12 +50,14 @@ function fetch_one(scene, dest, kind, src)
         s = joinpath(RPRN, src); isfile(s) || error("missing reference asset: $(s)")
         cp(s, destpath; force = true); println("  copied   $(scene)/$(dest)")
     else
-        println("  download $(scene)/$(dest) …")
+        println("  download $(scene)/$(dest) ...")
+        tmp = tempname(destdir)
         try
-            Downloads.download(src, destpath)
+            Downloads.download(src, tmp)
+            mv(tmp, destpath; force = true)
         catch e
-            @warn "FAILED $(scene)/$(dest): $(e)"
-            return nothing
+            isfile(tmp) && rm(tmp; force = true)
+            throw(e)
         end
     end
     return destpath
@@ -63,8 +65,20 @@ end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     let want = isempty(ARGS) ? MANIFEST : filter(e -> e[1] in ARGS, MANIFEST)
+        failures = String[]
         for (scene, dest, kind, src) in want
-            fetch_one(scene, dest, kind, src)
+            try
+                fetch_one(scene, dest, kind, src)
+            catch e
+                msg = "$(scene)/$(dest): $(e)"
+                push!(failures, msg)
+                @warn "FAILED $(msg)"
+            end
+        end
+        if !isempty(failures)
+            println("fetch_assets failed:")
+            foreach(f -> println("  ", f), failures)
+            exit(1)
         end
     end
     println("fetch_assets done → $(ASSETS_DIR)")

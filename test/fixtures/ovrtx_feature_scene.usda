@@ -1,0 +1,124 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Z"
+    startTimeCode = 0
+    endTimeCode = 100
+    timeCodesPerSecond = 60
+)
+
+def Xform "World"
+{
+    def DistantLight "Sun" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:angle = 1
+        float inputs:intensity = 3000
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Camera "Camera" (
+        prepend apiSchemas = ["OmniRtxCameraAutoExposureAPI_1", "OmniRtxCameraExposureAPI_1"]
+    )
+    {
+        float2 clippingRange = (1, 10000000)
+        float focalLength = 18.147562
+        float focusDistance = 400
+        float horizontalAperture = 20.955
+        float verticalAperture = 15.2908
+        token projection = "perspective"
+        matrix4d xformOp:transform = ( (-0.70711, 0.70711, 0.0, 0.0), (-0.40825, -0.40825, 0.81650, 0.0), (0.57735, 0.57735, 0.57735, 0.0), (500.0, 500.0, 500.0, 1.0) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "FeatureMaterial"
+        {
+            token outputs:surface.connect = </World/Looks/FeatureMaterial/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:mdl:sourceAsset:subIdentifier = "OmniPBR"
+                asset info:mdl:sourceAsset = @OmniPBR.mdl@
+                color3f inputs:diffuse_color_constant = (0.9, 0.18, 0.08)
+                float inputs:roughness_constant = 0.35
+                token outputs:surface
+            }
+        }
+    }
+
+    def Xform "FeatureBox"
+    {
+        matrix4d xformOp:transform = ( (1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+
+        def Mesh "Geom"
+        {
+            uniform bool doubleSided = true
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4, 3, 7, 6, 2, 0, 4, 7, 3, 1, 2, 6, 5]
+            normal3f[] normals = [(0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0)] (
+                interpolation = "faceVarying"
+            )
+            point3f[] points = [(-100.0, -100.0, -100.0), (100.0, -100.0, -100.0), (100.0, 100.0, -100.0), (-100.0, 100.0, -100.0), (-100.0, -100.0, 100.0), (100.0, -100.0, 100.0), (100.0, 100.0, 100.0), (-100.0, 100.0, 100.0)]
+            color3f[] primvars:displayColor = [(1.0, 0.1, 0.05)] (
+                interpolation = "constant"
+            )
+            rel material:binding = </World/Looks/FeatureMaterial>
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}
+
+def "Render" (
+    hide_in_stage_window = true
+    no_delete = true
+)
+{
+    def "OVMakie"
+    {
+        def RenderProduct "RenderProduct" (
+            prepend apiSchemas = ["OmniRtxSettingsCommonAdvancedAPI_1", "OmniRtxSettingsRtAdvancedAPI_1", "OmniRtxSettingsPtAdvancedAPI_1", "OmniRtxPostColorGradingAPI_1", "OmniRtxPostChromaticAberrationAPI_1", "OmniRtxPostBloomPhysicalAPI_1", "OmniRtxPostMatteObjectAPI_1", "OmniRtxPostCompositingAPI_1", "OmniRtxPostDofAPI_1", "OmniRtxPostMotionBlurAPI_1", "OmniRtxPostTvNoiseAPI_1", "OmniRtxPostTonemapIrayReinhardAPI_1", "OmniRtxPostDebugSettingsAPI_1", "OmniRtxDebugSettingsAPI_1"]
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            rel camera = </World/Camera>
+            token omni:rtx:rendermode = "RealTimePathTracing"
+            int omni:rtx:rtpt:maxBounces = 4
+            color3f omni:rtx:rt:ambientLight:color = (0.2, 0.2, 0.2)
+            rel orderedVars = [</Render/Vars/LdrColor>, </Render/Vars/HdrColor>]
+            uniform int2 resolution = (320, 240)
+        }
+    }
+
+    def RenderSettings "GlobalRenderSettings" (
+        prepend apiSchemas = ["OmniRtxSettingsGlobalRtAdvancedAPI_1", "OmniRtxSettingsGlobalPtAdvancedAPI_1"]
+        no_delete = true
+    )
+    {
+        rel products = </Render/OVMakie/RenderProduct>
+    }
+
+    def "Vars"
+    {
+        def RenderVar "LdrColor" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            uniform string sourceName = "LdrColor"
+        }
+
+        def RenderVar "HdrColor" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            uniform string sourceName = "HdrColor"
+        }
+    }
+}

@@ -71,10 +71,10 @@ plot_prim_path(scene2scope::AbstractDict, scene, plot) =
 # material-PARAM edit on a materialized Scatter/Lines/LineSegments is a
 # no-op (a live `color` edit still works via `:scaled_color`).
 consumed_inputs(::Makie.Mesh)         = [:positions_transformed_f32c, :model_f32c, :faces, :normals, :scaled_color, :material, :visible]
-consumed_inputs(::Makie.Scatter)      = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
-consumed_inputs(::Makie.MeshScatter)  = [:positions_transformed_f32c, :model_f32c, :scaled_color, :material, :visible]
-consumed_inputs(::Makie.Lines)        = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
-consumed_inputs(::Makie.LineSegments) = [:positions_transformed_f32c, :model_f32c, :scaled_color, :visible]
+consumed_inputs(::Makie.Scatter)      = [:positions_transformed_f32c, :model_f32c, :scaled_color, :markersize, :visible]
+consumed_inputs(::Makie.MeshScatter)  = [:positions_transformed_f32c, :model_f32c, :scaled_color, :markersize, :rotation, :material, :visible]
+consumed_inputs(::Makie.Lines)        = [:positions_transformed_f32c, :model_f32c, :scaled_color, :linewidth, :visible]
+consumed_inputs(::Makie.LineSegments) = [:positions_transformed_f32c, :model_f32c, :scaled_color, :linewidth, :visible]
 # `volume!` renders via the UsdVol → IndeX Direct path.  Tracked: `:visible`
 # (hide/reshow) and `:volume` (the converted scalar data; its push writes a
 # fresh temp `.nvdb` + reloads via `reload_volume_data!`).  IndeX Direct is
@@ -221,6 +221,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Scatter, args)
     h = OV.add_usd_reference!(screen.renderer, usda, path)
     robj = OvrtxRObj(path, h)
     robj.meta[:instancer_npoints] = n  # frozen live-push gate size
+    robj.meta[:instancer_current_npoints] = n
     return robj
 end
 
@@ -253,6 +254,7 @@ function author_usd_prim!(screen, scene, plot::Makie.MeshScatter, args)
     h = OV.add_usd_reference!(screen.renderer, usda, path)
     robj = OvrtxRObj(path, h)
     robj.meta[:instancer_npoints] = n  # frozen live-push gate size
+    robj.meta[:instancer_current_npoints] = n
     return robj
 end
 
@@ -271,6 +273,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Lines, args)
         usda = _usda_basiscurves(fpts, counts, width, nothing, "constant"; model = args[:model_f32c])
         robj = _add_materialized_reference!(screen, path, usda, plot)
         robj.meta[:curve_npoints] = length(fpts)  # frozen live-push gate size
+        robj.meta[:curve_points] = fpts
         return robj
     end
     values, interp = _scaled_to_display(plot, args[:scaled_color], length(fpts))
@@ -279,6 +282,7 @@ function author_usd_prim!(screen, scene, plot::Makie.Lines, args)
     h = OV.add_usd_reference!(screen.renderer, usda, path)
     robj = OvrtxRObj(path, h)
     robj.meta[:curve_npoints] = length(fpts)
+    robj.meta[:curve_points] = fpts
     return robj
 end
 
@@ -293,6 +297,7 @@ function author_usd_prim!(screen, scene, plot::Makie.LineSegments, args)
         usda = _usda_basiscurves(seg_pts, counts, width, nothing, "constant"; model = args[:model_f32c])
         robj = _add_materialized_reference!(screen, path, usda, plot)
         robj.meta[:curve_npoints] = length(seg_pts)
+        robj.meta[:curve_points] = seg_pts
         return robj
     end
     values, interp = _scaled_to_display(plot, args[:scaled_color], length(seg_pts))
@@ -301,6 +306,7 @@ function author_usd_prim!(screen, scene, plot::Makie.LineSegments, args)
     h = OV.add_usd_reference!(screen.renderer, usda, path)
     robj = OvrtxRObj(path, h)
     robj.meta[:curve_npoints] = length(seg_pts)
+    robj.meta[:curve_points] = seg_pts
     return robj
 end
 
@@ -451,6 +457,7 @@ function _push_curve_positions!(screen, robj, plot, binding, value)
     else
         OV.write_array_attribute!(r, prim, "points", fpts)
     end
+    robj.meta[:curve_points] = fpts
     return nothing
 end
 
@@ -474,16 +481,70 @@ end
 # UsdGeomPointInstancer.  The per-instance attr is `positions`, NOT `points`
 # (ovrtx silently drops writes to nonexistent attrs).  The frozen
 # `robj.meta[:instancer_npoints]` gates the binding to its author-time
-# length; any other count takes the one-shot path and renders min(count)
-# instances (protoIndices/scales keep the author-time length).
+# length; any other count takes the one-shot path and rewrites the coupled
+# per-instance arrays that must match positions.
 function _push_instancer_positions!(screen, robj, plot, binding, value)
     r = screen.renderer; prim = robj.prim_path
+    n = length(value)
     if binding !== nothing && length(value) == get(robj.meta, :instancer_npoints, -1)
         _push_points_binding!(binding, value)
     else
         OV.write_array_attribute!(r, prim, "positions", value)
+        OV.write_array_attribute!(r, prim, "protoIndices", fill(Int32(0), n))
+        _push_instancer_scales!(r, prim, plot, n)
+        plot isa Makie.MeshScatter && _push_instancer_orientations!(r, prim, plot, n)
     end
+    robj.meta[:instancer_current_npoints] = n
     return nothing
+end
+
+function _push_instancer_scales!(r, prim, plot, n::Integer)
+    OV.write_array_attribute!(r, prim, "scales", _scales_for(plot.markersize[], Int(n)))
+    return nothing
+end
+
+function _push_instancer_orientations!(r, prim, plot, n::Integer)
+    _write_orientations!(r, prim, _orientations_or_identity(plot.rotation[], Int(n)))
+    return nothing
+end
+
+function _write_orientations!(r, prim, orientations)
+    data = Vector{Float16}(undef, 4 * length(orientations))
+    @inbounds for (i, q) in enumerate(orientations)
+        j = 4i - 3
+        data[j]     = Float16(q[1])
+        data[j + 1] = Float16(q[2])
+        data[j + 2] = Float16(q[3])
+        data[j + 3] = Float16(q[4])
+    end
+    dtype = LibOVRTX.DLDataType(UInt8(LibOVRTX.kDLFloat), UInt8(16), UInt16(4))
+    OV._write_attribute!(r, prim, "orientations", dtype, true,
+                         LibOVRTX.OVRTX_SEMANTIC_NONE, data, Int64[length(orientations)])
+    return nothing
+end
+
+function _orientations_or_identity(rotation, n::Integer)
+    orientations = try
+        _orientations_for(rotation, Int(n))
+    catch err
+        err isa InterruptException && rethrow()
+        if err isa ArgumentError
+            @warn "OmniverseMakie: live `rotation` vector length does not match the \
+                   current meshscatter instance count — using identity orientations." maxlog=1
+            nothing
+        else
+            rethrow()
+        end
+    end
+    return orientations === nothing ? fill((1.0f0, 0.0f0, 0.0f0, 0.0f0), Int(n)) : orientations
+end
+
+function _push_curve_width!(r, prim, robj, plot, linewidth)
+    pts = get(robj.meta, :curve_points, nothing)
+    pts === nothing && return false
+    isempty(pts) && return false
+    OV.write_array_attribute!(r, prim, "widths", Float32[_curve_width(pts, linewidth)])
+    return true
 end
 
 # Diagnostic hook: called with the attribute name on every `push_to_ovrtx!`
@@ -575,6 +636,12 @@ unrouted `name` → `false`):
                                   warn+skipped (needs a re-author)
 - `:normals`                    → `normals` array write
 - `:faces`                      → `faceVertexIndices` + `faceVertexCounts`
+- `:markersize`                 → `scales` on a Scatter/MeshScatter
+                                  UsdGeomPointInstancer
+- `:rotation`                   → `orientations` on a MeshScatter
+                                  UsdGeomPointInstancer
+- `:linewidth`                  → `widths` on a Lines/LineSegments
+                                  BasisCurves prim
 - `:scaled_color`               → `primvars:displayColor`, or (materialized)
                                   the shader's base-colour input
 - `:material`                   → each changed scalar/color3f shader input
@@ -641,6 +708,32 @@ function push_to_ovrtx!(screen, robj::OvrtxRObj, plot, name::Symbol, value)
             # on the material kind (glass_color vs diffuse_color_constant).
             _write_shader_input!(r, robj.material_shader, _base_color_input(_material_kind(plot)),
                                  _materialized_base_rgb(plot, value))
+        end
+    elseif name === :markersize
+        if plot isa Union{Makie.Scatter,Makie.MeshScatter} && !is_materialized(plot)
+            n = get(robj.meta, :instancer_current_npoints, get(robj.meta, :instancer_npoints, 0))
+            n > 0 || return false
+            OV.write_array_attribute!(r, prim, "scales", _scales_for(value, n))
+        else
+            @warn "OmniverseMakie: live `markersize` edits on a materialized scatter need a \
+                   re-author — skipped." maxlog=1
+            routed = false
+        end
+    elseif name === :rotation
+        if plot isa Makie.MeshScatter && !is_materialized(plot)
+            n = get(robj.meta, :instancer_current_npoints, get(robj.meta, :instancer_npoints, 0))
+            n > 0 || return false
+            _write_orientations!(r, prim, _orientations_or_identity(value, n))
+        else
+            @warn "OmniverseMakie: live `rotation` edits on a materialized scatter need a \
+                   re-author — skipped." maxlog=1
+            routed = false
+        end
+    elseif name === :linewidth
+        if plot isa Union{Makie.Lines,Makie.LineSegments}
+            routed = _push_curve_width!(r, prim, robj, plot, value)
+        else
+            routed = false
         end
     elseif name === :material
         # A live material edit re-writes the pre-authored shader's inputs.

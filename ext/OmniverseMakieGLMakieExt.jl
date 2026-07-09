@@ -4,11 +4,22 @@ using OmniverseMakie, GLMakie
 using OmniverseMakie: Makie, RGBA, N0f8
 # main-module internals used with bare names:
 import OmniverseMakie: Screen, OV, _author_screen!, _sync_and_needs_reset!,
-    _scene_for_camera, interactive_display, present!, on_render_tick!,
+    _scene_for_camera, _single_camera_scene, interactive_display, present!, on_render_tick!,
     attach_picking!, detach_picking!, _pick_at!,   # picking
     replace_scene!, record_frame!, ScreenConfig,   # hybrid embedded viewport
     _clear_requires_update!                        # locked render-tick flag consume
 using OmniverseMakie: tonemap
+
+function _hdr_config(cfg::ScreenConfig)
+    return ScreenConfig(cfg.mode, cfg.samples, cfg.warmup, cfg.max_bounces,
+                        false, cfg.accumulate_across_frames,
+                        cfg.accumulation_preroll, cfg.background, cfg.sensors)
+end
+
+_hdr_screen(scene::Makie.Scene) =
+    Screen(scene; selection_outline = false)
+_hdr_screen(scene::Makie.Scene, cfg::ScreenConfig; fb_size::Tuple{Int,Int}) =
+    Screen(scene, _hdr_config(cfg); fb_size)
 
 # A USDPlot is a childless recipe, so GLMakie's insert! routes it to the
 # atomic branch — without this no-op, `display(fig)` MethodErrors (and that
@@ -145,13 +156,13 @@ function interactive_display(fig_or_scene::Union{Makie.Figure,Makie.Scene}; size
     # by the same count; a value < 1 desynchronizes the sample counter.
     steps_per_tick >= 1 || throw(ArgumentError("interactive_display: steps_per_tick must be >= 1, got $steps_per_tick"))
     scene     = fig_or_scene isa Makie.Figure ? fig_or_scene.scene : fig_or_scene
-    cam_scene = something(_scene_for_camera(scene), scene)
+    cam_scene = _single_camera_scene(scene, "interactive_display")
 
     # 1. Resize root so Screen() (size(Makie.root(scene))) renders at `size`.
     Makie.resize!(Makie.root(cam_scene), size...)
 
     # 2. Build + author open-stage ovrtx Screen (colorbuffer open-once path).
-    screen = Screen(cam_scene)
+    screen = _hdr_screen(cam_scene)
     # A throw between building the Screen and seating it on the returned
     # session leaks the ovrtx renderer (SyncScopeIds exhaust after ~7) — close
     # it (and glscr if created) and rethrow.
@@ -312,7 +323,7 @@ function resize_viewport!(session::ViewportSession, (W, H)::Tuple{Int,Int})
     Makie.resize!(root_scene, W, H)
 
     # 2. Build + author the new ovrtx Screen (same as interactive_display).
-    new_screen = Screen(cam_scene)
+    new_screen = _hdr_screen(cam_scene, session.screen.config; fb_size = (W, H))
     # A throw before the new Screen is seated on the session leaks its ovrtx
     # renderer (SyncScopeIds exhaust after ~7) — close it and rethrow.
     warmup_hdr = try
@@ -728,8 +739,9 @@ function replace_scene!(target::Union{Makie.Scene,Makie.Block};
     # Build an ovrtx Screen at the sub-scene size (fb_size override);
     # accumulate for smooth realtime streaming.
     cfg = Makie.merge_screen_config(ScreenConfig,
-        Dict{Symbol,Any}(:accumulate_across_frames => accumulate))
-    screen = Screen(cam_scene, cfg; fb_size = (W, H))
+        Dict{Symbol,Any}(:accumulate_across_frames => accumulate,
+                         :selection_outline => false))
+    screen = _hdr_screen(cam_scene, cfg; fb_size = (W, H))
     # A throw before the Screen is seated on the returned session leaks its
     # ovrtx renderer (SyncScopeIds exhaust after ~7) — close it and rethrow.
     try
@@ -888,7 +900,7 @@ end
 # Rebuild the embedded ovrtx render + overlay image at a new target size.
 function _resize_embedded!(session::EmbeddedSession, (W, H)::Tuple{Int,Int})
     cfg        = session.screen.config
-    new_screen = Screen(session.cam_scene, cfg; fb_size = (W, H))
+    new_screen = _hdr_screen(session.cam_scene, cfg; fb_size = (W, H))
     # A throw before the new Screen is seated leaks its ovrtx renderer
     # (SyncScopeIds exhaust after ~7) — close it and rethrow.
     warmup_hdr = try

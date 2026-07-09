@@ -1,14 +1,17 @@
 module LibOVRTX
 using CEnum
 import Libdl
-import Libglvnd_jll
+if Sys.islinux()
+    import Libglvnd_jll
+end
 import OVRTX_jll
 
 # Resolved at runtime in __init__ so OVRTX_LIBRARY_PATH is honored (not baked
 # at precompile); generated `@ccall libovrtx.sym(...)` calls use this binding.
 # Resolution order: explicit OVRTX_LIBRARY_PATH, then the in-repo OVRTX_jll
 # artifact wrapper, then the bare soname for users with a loader-path install.
-global libovrtx::String = "libovrtx-dynamic.so"
+const _BARE_LIBOVRTX = Sys.iswindows() ? "ovrtx-dynamic.dll" : "libovrtx-dynamic.so"
+global libovrtx::String = _BARE_LIBOVRTX
 const _OVRTX_HANDLE  = Ref{Ptr{Cvoid}}(C_NULL)
 const _OPENGL_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
@@ -18,27 +21,31 @@ function _default_libovrtx_path()
         return String(OVRTX_jll.libovrtx_dynamic)
     catch e
         @warn "LibOVRTX: could not resolve OVRTX_jll artifact; falling back to loader-path libovrtx-dynamic.so" exception=(e, catch_backtrace()) maxlog=1
-        return "libovrtx-dynamic.so"
+        return _BARE_LIBOVRTX
     end
 end
 
 function __init__()
-    # Load libOpenGL first and RTLD_GLOBAL (soname libOpenGL.so.0) so ovrtx's
-    # usd_resolver plugin resolves GL symbols against this image via its later
-    # by-soname dlopen.  The env override permits a system/driver libOpenGL.
-    libgl = get(ENV, "OVRTX_LIBOPENGL_PATH", Libglvnd_jll.libOpenGL_path)
-    _OPENGL_HANDLE[] = try
-        Libdl.dlopen(libgl, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
-    catch e
-        error("LibOVRTX: failed to dlopen libOpenGL at \"$libgl\" ($e). \
-               Override the path with the OVRTX_LIBOPENGL_PATH env var.")
+    # Load libOpenGL first and RTLD_GLOBAL on Linux (soname libOpenGL.so.0) so
+    # ovrtx's usd_resolver plugin resolves GL symbols against this image via its
+    # later by-soname dlopen.  Windows does not use libglvnd; an explicit
+    # OVRTX_LIBOPENGL_PATH is still honored for developer overrides.
+    if Sys.islinux() || haskey(ENV, "OVRTX_LIBOPENGL_PATH")
+        libgl = get(ENV, "OVRTX_LIBOPENGL_PATH",
+                    Sys.islinux() ? Libglvnd_jll.libOpenGL_path : "opengl32")
+        _OPENGL_HANDLE[] = try
+            Libdl.dlopen(libgl, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+        catch e
+            error("LibOVRTX: failed to dlopen OpenGL at \"$libgl\" ($e). \
+                   Override the path with the OVRTX_LIBOPENGL_PATH env var.")
+        end
     end
     global libovrtx = _default_libovrtx_path()
     _OVRTX_HANDLE[] = try
         Libdl.dlopen(libovrtx, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
     catch e
         error("LibOVRTX: failed to dlopen libovrtx at \"$libovrtx\" ($e). \
-               Set OVRTX_LIBRARY_PATH to the absolute path of libovrtx-dynamic.so, \
+               Set OVRTX_LIBRARY_PATH to the absolute path of $(_BARE_LIBOVRTX), \
                or ensure the OVRTX_jll artifact is available for this platform.")
     end
 end

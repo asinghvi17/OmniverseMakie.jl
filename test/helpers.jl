@@ -5,7 +5,7 @@
 const _HELPER_OVRTX_LIB = get(ENV, "OVRTX_LIBRARY_PATH", "")
 const _HELPER_REPO_ROOT = joinpath(@__DIR__, "..")
 const _HELPER_USDA = get(ENV, "OM_USDA",
-    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/c/minimal/torus-plane.usda")
+    joinpath(@__DIR__, "fixtures", "ovrtx_feature_scene.usda"))
 # NVIDIA IndeX ext libs dir.  Env-overridable; default is the dev-box location.
 # Volume subprocess tests forward this via `env=` and skip when it's absent.
 const _HELPER_INDEX_LIBS = get(ENV, "OMNIVERSEMAKIE_INDEX_LIBS",

@@ -54,6 +54,7 @@ include("live/subscene_test.jl")           # Scope hierarchy mirrors scene tree
 include("live/binding_test.jl")            # hot-path bindings identity-stable
 include("live/delete_test.jl")             # leak-free delete!/empty!; 50× churn
 include("live/scatter_positions_test.jl")  # positions route; materialized skip
+include("live/style_live_test.jl")         # markersize/rotation/linewidth diffs
 include("live/nan_lines_test.jl")          # NaN-split gap; frozen-size gate
 include("live/empty_fill_test.jl")         # empty→fill rebuild + pick regs
 include("live/accumulate_config_test.jl")  # ScreenConfig field/default contract

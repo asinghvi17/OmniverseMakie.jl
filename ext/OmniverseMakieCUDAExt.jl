@@ -245,23 +245,23 @@ function _gpu_present!(session)
     end
     sr = OV.step!(screen.renderer, screen.product; timeout_ns = _M6_STEP_TIMEOUT_NS)
     # Track the ovrtx mapping so the outer finally can release it on any
-    # unwind (map_cuda has no finally of its own; a leaked mapping breaks the
-    # next present/unregister).  Cleared once the happy path unmaps it.
-    mh = nothing
-    ovrtx_mapped = false
+    # unwind. Cleared once the happy path unmaps it.
+    mapping = nothing
     try
-        data, W, H, C, mh, wait_event = OV.map_cuda(sr, "HdrColor")
-        ovrtx_mapped = true
+        mapping = OV.map_cuda(sr, "HdrColor")
+        W = mapping.width
+        H = mapping.height
+        C = mapping.channels
         stream = Base.unsafe_convert(CC.CUstream, CUDA.stream())
 
         # Wait ovrtx's buffer-ready event before the kernel reads `data`.
-        if wait_event != Csize_t(0)
-            CC.cuStreamWaitEvent(stream, CC.CUevent(UInt(wait_event)), Cuint(0))
+        if mapping.wait_event != Csize_t(0)
+            CC.cuStreamWaitEvent(stream, CC.CUevent(UInt(mapping.wait_event)), Cuint(0))
         end
 
         # Wrap the linear float16 CUdeviceptr as a CuArray [C,W,H];
         # tonemap+orient on-device into the cached [W,H] RGBA8 buffer.
-        hdr = unsafe_wrap(CuArray, reinterpret(CUDA.CuPtr{Float16}, data), (C, W, H))
+        hdr = unsafe_wrap(CuArray, reinterpret(CUDA.CuPtr{Float16}, mapping.data), (C, W, H))
         oriented = _tonemap_orient_cached!(st, hdr, session.exposure)
 
         GC.@preserve oriented begin
@@ -286,8 +286,7 @@ function _gpu_present!(session)
                 # Record copy done; gate ovrtx unmap on it (no reclaim mid-copy).
                 evh = Base.unsafe_convert(CC.CUevent, st.copy_done)
                 CC.cuEventRecord(evh, stream)
-                OV.unmap_cuda(sr, mh; stream = Csize_t(UInt(stream)), done_event = Csize_t(UInt(evh)))
-                ovrtx_mapped = false
+                OV.unmap_cuda(mapping; stream = Csize_t(UInt(stream)), done_event = Csize_t(UInt(evh)))
                 CC.cuStreamSynchronize(stream)  # GL sync before GLMakie samples
             finally
                 # Swallow secondary errors so the primary exception surfaces.
@@ -301,8 +300,8 @@ function _gpu_present!(session)
     finally
         # Release the ovrtx mapping (synchronous NOSYNC unmap) if the happy
         # path did not; then always reap the StepResult.
-        ovrtx_mapped && try
-            OV.unmap_cuda(sr, mh)
+        mapping !== nothing && mapping.open && try
+            close(mapping)
         catch e
             @warn "M6: ovrtx unmap_cuda failed on unwind" exception = e maxlog = 1
         end

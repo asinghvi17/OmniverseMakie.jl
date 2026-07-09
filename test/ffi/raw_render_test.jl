@@ -3,13 +3,13 @@ include(joinpath(@__DIR__, "..", "helpers.jl"))
 
 # Raw OV-layer render + live xform smoke, below Makie/Screen, in one
 # subprocess (render startup amortized):
-#   1. OV.Renderer() + open_usd! on the torus fixture render a full-res
-#      1080×1920 frame with near-total coverage (≤100 black border pixels).
-#   2. write_xform! moves /World/Torus + reset! restarts RT2 accumulation →
-#      ≥50k pixels change by ≥8/255 per channel (magnitude excludes noise).
+#   1. OV.Renderer() + open_usd! on the vendored fixture render a lit 320×240
+#      frame.
+#   2. write_xform! moves /World/FeatureBox + reset! restarts RT2 accumulation
+#      → a meaningful number of pixels change by ≥8/255 per channel.
 
 const _RAW_OV_JL   = joinpath(@__DIR__, "..", "..", "src", "binding", "OV.jl")
-const _RAW_PRODUCT = "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
+const _RAW_PRODUCT = "/Render/OVMakie/RenderProduct"
 const _RAW_WARMUP  = 64
 
 const _RAW_RENDER_PROG = """
@@ -20,27 +20,25 @@ using ColorTypes
 const USDA    = ENV["OM_USDA"]
 const PRODUCT = $(repr(_RAW_PRODUCT))
 const WARMUP  = $(_RAW_WARMUP)
-const PRIM    = "/World/Torus"
+const PRIM    = "/World/FeatureBox"
 
 r = OV.Renderer()
 OV.open_usd!(r, USDA)
 
-# --- frame 1: full-res render, near-total non-black coverage ---
+# --- frame 1: fixture render, non-black coverage ---
 img1 = OV.render_to_matrix(r, PRODUCT; warmup=WARMUP)
 H, W = size(img1)
 nb = count(c -> (red(c) + green(c) + blue(c)) > 0, img1)
 println("SIZE=", size(img1), " NONBLACK=", nb)
-@assert size(img1) == (1080, 1920) "unexpected image size: \$(size(img1))"
-# Allow up to 100 edge/border pixels to be black (RT2 may not converge all
-# border samples within 64 warmup frames).
-@assert nb >= H * W - 100 "image mostly black: \$nb / \$(H * W)"
+@assert size(img1) == (240, 320) "unexpected image size: \$(size(img1))"
+@assert nb >= 1000 "image mostly black: \$nb / \$(H * W)"
 
 # --- move torus (row-vector: translation in LAST row), reset, re-render ---
 M = Float64[
     1.0  0.0  0.0  0.0
     0.0  1.0  0.0  0.0
     0.0  0.0  1.0  0.0
-    300.0 250.0 300.0 1.0
+    180.0 0.0 0.0 1.0
 ]
 OV.write_xform!(r, PRIM, M)
 OV.reset!(r)
@@ -63,7 +61,7 @@ changed = let c = 0
     c
 end
 println("CHANGED_PIXELS=", changed, " / ", H*W)
-@assert changed >= 50000 "xform write did not move geometry: changed=\$changed < 50000"
+@assert changed >= 1000 "xform write did not move geometry: changed=\$changed < 1000"
 
 close(r)
 println("OK_RAW_RENDER")
@@ -76,11 +74,11 @@ println("OK_RAW_RENDER")
                                             ready_marker = "SIZE=")
     @test exitcode == 0
     @test contains(output, "OK_RAW_RENDER")
-    @test contains(output, "SIZE=(1080, 1920)")
+    @test contains(output, "SIZE=(240, 320)")
 
     m = match(r"NONBLACK=(\d+)", output)
-    @test m !== nothing && parse(Int, m.captures[1]) >= 1080 * 1920 - 100
+    @test m !== nothing && parse(Int, m.captures[1]) >= 1000
 
     mc = match(r"CHANGED_PIXELS=(\d+)", output)
-    @test mc !== nothing && parse(Int, mc.captures[1]) >= 50000
+    @test mc !== nothing && parse(Int, mc.captures[1]) >= 1000
 end

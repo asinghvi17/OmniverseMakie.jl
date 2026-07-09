@@ -325,6 +325,32 @@ function with_mapped_var(f, sr::StepResult, h, op::AbstractString;
     return result
 end
 
+function _check_compact_dlt(dlt::LibOVRTX.DLTensor, op::AbstractString)
+    dlt.data == C_NULL && error("$op: DLPack tensor has null data")
+    if dlt.strides != C_NULL
+        expect = 1
+        for i in Int(dlt.ndim):-1:1
+            got = Int(unsafe_load(dlt.strides, i))
+            got == expect ||
+                error("$op: non-compact DLPack tensor (stride[$i] = $got, expected $expect)")
+            expect *= Int(unsafe_load(dlt.shape, i))
+        end
+    end
+    return nothing
+end
+
+_dlt_data_ptr(::Type{T}, dlt::LibOVRTX.DLTensor, op::AbstractString) where {T} =
+    (_check_compact_dlt(dlt, op); Ptr{T}(dlt.data + Int(dlt.byte_offset)))
+
+function _dlt_hwc(dlt::LibOVRTX.DLTensor, op::AbstractString)
+    Int(dlt.ndim) == 3 || error("$op: expected rank-3 HWC DLPack tensor, got rank $(Int(dlt.ndim))")
+    _check_compact_dlt(dlt, op)
+    H = Int(unsafe_load(dlt.shape, 1))
+    W = Int(unsafe_load(dlt.shape, 2))
+    C = Int(unsafe_load(dlt.shape, 3))
+    return H, W, C
+end
+
 # ------------------------------------------------------------------
 # map_cpu — fetch results, find LdrColor, map to CPU, single-pass build, unmap
 # ------------------------------------------------------------------
@@ -346,8 +372,8 @@ function map_cpu(sr::StepResult, name::AbstractString="LdrColor")
         # DLTensor shape [H,W,C]; wrap the mapped bytes as a non-owning
         # [C,W,H] view.
         dlt = unsafe_load(unsafe_load(out.tensors, 1).dl)
-        H, W, C = Int(unsafe_load(dlt.shape, 1)), Int(unsafe_load(dlt.shape, 2)), Int(unsafe_load(dlt.shape, 3))
-        raw = unsafe_wrap(Array, Ptr{UInt8}(dlt.data), (C, W, H); own=false)
+        H, W, C = _dlt_hwc(dlt, "map_cpu($name)")
+        raw = unsafe_wrap(Array, _dlt_data_ptr(UInt8, dlt, "map_cpu($name)"), (C, W, H); own=false)
         (cwh_to_matrix(raw), W, H)   # owned Matrix, safe post-unmap
     end
 end
@@ -379,8 +405,8 @@ function with_mapped_hdr(f, sr::StepResult, name::AbstractString="HdrColor")
         # DLTensor shape [H,W,C], dtype kDLFloat/16/1; wrap mapped bytes as a
         # [C,W,H] Float16 view.
         dlt = unsafe_load(unsafe_load(out.tensors, 1).dl)
-        H, W, C = Int(unsafe_load(dlt.shape, 1)), Int(unsafe_load(dlt.shape, 2)), Int(unsafe_load(dlt.shape, 3))
-        raw16 = unsafe_wrap(Array, Ptr{Float16}(dlt.data), (C, W, H); own=false)
+        H, W, C = _dlt_hwc(dlt, "with_mapped_hdr($name)")
+        raw16 = unsafe_wrap(Array, _dlt_data_ptr(Float16, dlt, "with_mapped_hdr($name)"), (C, W, H); own=false)
         f(raw16, W, H)
     end
 end
@@ -408,23 +434,32 @@ map_cpu_f32(sr::StepResult, name::AbstractString) =
 # ------------------------------------------------------------------
 
 """
-    map_cuda(sr::StepResult, name="HdrColor")
-        -> (data::Ptr{Cvoid}, W, H, C, map_handle, wait_event::Csize_t)
+    map_cuda(sr::StepResult, name="HdrColor") -> CudaMapping
 
 Fetch results, find `name`, map as linear CUDA device memory
-(OVRTX_MAP_DEVICE_TYPE_CUDA).  Returns raw handles — does NOT copy or unmap:
+(OVRTX_MAP_DEVICE_TYPE_CUDA).  Returns an owning `CudaMapping`; close it with
+`unmap_cuda(mapping; stream, done_event)` after the device copy is done:
 
 - `data`       — live `CUdeviceptr` (as `Ptr{Cvoid}`); for `HdrColor`,
-                 `C*W*H` `Float16`s laid out `[C, W, H]` (channel-fastest).
-- `(W, H, C)`  — DLTensor dims (shape `[H, W, C]`; `C == 4` for RGBA).
-- `map_handle` — pass to `unmap_cuda`.
-- `wait_event` — `CUevent` (as `Csize_t`, may be 0); wait on it before
-                 reading.
+                 `channels*width*height` `Float16`s laid out `[C, W, H]`.
+- `width`, `height`, `channels` — DLTensor dims.
+- `wait_event` — `CUevent` (as `Csize_t`, may be 0); wait on it before reading.
 
 Buffer stays mapped until `unmap_cuda`; the caller unmaps gated on its own
 copy-done event, else ovrtx reclaims the buffer mid-copy.  No CUDA.jl dep —
 the CUDA pkg ext wraps `data` as a `CuArray` and `wait_event` as a `CuEvent`.
 """
+mutable struct CudaMapping
+    sr::StepResult
+    data::Ptr{Cvoid}
+    width::Int
+    height::Int
+    channels::Int
+    map_handle::LibOVRTX.ovrtx_map_handle_t
+    wait_event::Csize_t
+    open::Bool
+end
+
 function map_cuda(sr::StepResult, name::AbstractString="HdrColor")
     sr.r.alive || error("map_cuda on a closed Renderer")
     h = _fetch_find_var(sr, name)   # shared fetch/find; the map below escapes
@@ -446,16 +481,19 @@ function map_cuda(sr::StepResult, name::AbstractString="HdrColor")
     # DLTensor: shape [H,W,C], dtype kDLFloat/16/1 (HdrColor)
     t0  = unsafe_load(ro[].tensors, 1)   # ovrtx_render_var_tensor_t
     dlt = unsafe_load(t0.dl)             # DLTensor (CUdeviceptr in .data)
-    H   = Int(unsafe_load(dlt.shape, 1))
-    W   = Int(unsafe_load(dlt.shape, 2))
-    C   = Int(unsafe_load(dlt.shape, 3))
+    H, W, C = _dlt_hwc(dlt, "map_cuda($name)")
 
-    # raw handles; caller reads on-device then calls unmap_cuda
-    return (Ptr{Cvoid}(dlt.data), W, H, C, ro[].map_handle, ro[].cuda_sync.wait_event)
+    m = CudaMapping(sr, Ptr{Cvoid}(dlt.data + Int(dlt.byte_offset)), W, H, C,
+                    ro[].map_handle, ro[].cuda_sync.wait_event, true)
+    finalizer(m -> try
+        close(m)
+    catch
+    end, m)
+    return m
 end
 
 """
-    unmap_cuda(sr::StepResult, map_handle; stream=0, done_event=0)
+    unmap_cuda(mapping::CudaMapping; stream=0, done_event=0)
 
 Release a `map_cuda` mapping.  Builds `ovrtx_cuda_sync_t(stream, done_event)`
 (field order stream, then event) so ovrtx waits for `done_event` (recorded
@@ -463,6 +501,16 @@ after the caller's on-device copy) on `stream` before reclaiming the buffer —
 else it reclaims mid-copy.  Default `(0,0)` = NOSYNC (synchronous).  No-op if
 the Renderer is closed.
 """
+function unmap_cuda(m::CudaMapping; stream::Csize_t = Csize_t(0), done_event::Csize_t = Csize_t(0))
+    m.open || return nothing
+    sync = LibOVRTX.ovrtx_cuda_sync_t(stream, done_event)
+    m.sr.r.alive && LibOVRTX.check(LibOVRTX.ovrtx_unmap_render_var_output(m.sr.r.ptr, m.map_handle, sync),
+                                  "unmap_render_var_output(cuda)")
+    m.open = false
+    return nothing
+end
+Base.close(m::CudaMapping) = unmap_cuda(m)
+
 function unmap_cuda(sr::StepResult, map_handle; stream::Csize_t = Csize_t(0), done_event::Csize_t = Csize_t(0))
     sync = LibOVRTX.ovrtx_cuda_sync_t(stream, done_event)
     # Checked (the sibling CPU unmaps are): unmap_cuda is only ever called on
@@ -670,7 +718,7 @@ const PickHit = NamedTuple{(:primpath_id, :object_type, :instance_id, :world_pos
 function _pick_param_u32(out::LibOVRTX.ovrtx_render_var_output_t, name::AbstractString)
     for i in 1:out.num_params
         p = unsafe_load(out.params, i)   # ovrtx_render_var_param_t, by value
-        String(p.name) == name && return unsafe_load(Ptr{UInt32}(p.dl.data))
+        String(p.name) == name && return unsafe_load(_dlt_data_ptr(UInt32, p.dl, "pick param $name"))
     end
     error("pick-hit param '$name' not found")
 end
@@ -720,8 +768,11 @@ function read_pick_hit(sr::StepResult)::Vector{PickHit}
         inst = _pick_tensor(out, "geometryInstanceId")   # kDLUInt/64  [n]
         wpos = _pick_tensor(out, "worldPositionM")   # kDLFloat/64 [n,3]
         wnrm = _pick_tensor(out, "worldNormal")      # kDLFloat/32 [n,3]
-        pprim = Ptr{UInt64}(prim.data);  potyp = Ptr{UInt32}(otyp.data);  pinst = Ptr{UInt64}(inst.data)
-        pwp   = Ptr{Float64}(wpos.data); pwn   = Ptr{Float32}(wnrm.data)
+        pprim = _dlt_data_ptr(UInt64, prim, "pick tensor primPath")
+        potyp = _dlt_data_ptr(UInt32, otyp, "pick tensor objectType")
+        pinst = _dlt_data_ptr(UInt64, inst, "pick tensor geometryInstanceId")
+        pwp   = _dlt_data_ptr(Float64, wpos, "pick tensor worldPositionM")
+        pwn   = _dlt_data_ptr(Float32, wnrm, "pick tensor worldNormal")
         for i in 1:n
             base = (i - 1) * 3
             push!(hits, (primpath_id    = unsafe_load(pprim, i),

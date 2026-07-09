@@ -74,6 +74,11 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 `LibOVRTX`, `OVRTX_jll`, and `NanoVDBWriter` are path `[sources]` sub-packages under
 [`lib/`](lib) and resolve automatically.
 
+The root environment is enough for offscreen rendering and core package work. Interactive
+viewport examples need `GLMakie`; use the `examples` environment for the gallery and
+viewport snippets, or add `GLMakie` to your own environment. Add `CUDA` as well only when
+you want the GPU-direct viewport blit.
+
 ---
 
 ## Quickstart
@@ -117,6 +122,9 @@ samples-per-pixel — slower but higher quality than the default realtime `:rt2`
 `interactive_display` opens an orbit-able GLMakie window showing the live RTX render of a
 whole figure; drag orbits and scroll zooms. It needs GLMakie for the window and input; load
 CUDA too for the GPU-direct blit.
+
+Run this from an environment that has `GLMakie`, such as `--project=examples`, or add
+`GLMakie` to your active environment first.
 
 ```julia
 using OmniverseMakie, GLMakie              # GLMakie: window + input capture
@@ -362,8 +370,9 @@ black here and warns once. `:domelight` works natively. Tripwire test in
 ## Examples, benchmarks, and layout
 
 - **Example gallery** — [`examples/README.md`](examples/README.md): 14 ported RPRMakie
-  scenes rendered end-to-end through OmniverseMakie. The gallery is a self-contained Pkg
-  environment; [`examples/fetch_assets.jl`](examples/fetch_assets.jl) populates assets and
+  scenes rendered end-to-end through OmniverseMakie. The gallery has its own Pkg
+  environment with `GLMakie` and the gallery dependencies;
+  [`examples/fetch_assets.jl`](examples/fetch_assets.jl) populates assets and
   [`examples/run_all.jl`](examples/run_all.jl) renders each scene (in an isolated
   subprocess) into [`examples/renders/`](examples/renders) with per-scene asserts.
 - **Hot-path benchmark** — [`bench/hot_path.jl`](bench/hot_path.jl), results in

@@ -155,6 +155,21 @@ function _scene_for_camera(scene::Makie.Scene)
     return nothing
 end
 
+function _camera_scenes!(out::Vector{Makie.Scene}, scene::Makie.Scene)
+    Makie.cameracontrols(scene) isa Makie.Camera3D && push!(out, scene)
+    foreach(child -> _camera_scenes!(out, child), scene.children)
+    return out
+end
+_camera_scenes(scene::Makie.Scene) = _camera_scenes!(Makie.Scene[], scene)
+
+function _single_camera_scene(scene::Makie.Scene, context::AbstractString)
+    cams = _camera_scenes(scene)
+    length(cams) <= 1 || throw(ArgumentError(
+        "$context does not yet support root scenes with multiple 3D camera viewports. " *
+        "Render one `LScene`/`Axis3` scene directly, or use `replace_scene!` for hybrid figures."))
+    return isempty(cams) ? scene : only(cams)
+end
+
 # ------------------------------------------------------------------
 # add_scene! / insert! / insertplots! — imperative open-stage authoring
 # ------------------------------------------------------------------
@@ -399,7 +414,7 @@ flip/alpha-drop/conversion.
 function Makie.colorbuffer(screen::Screen; kw...)
     scene = screen.scene
     scene === nothing && error("OmniverseMakie.colorbuffer: screen has no scene")
-    cam_scene = something(_scene_for_camera(scene), scene)
+    cam_scene = _single_camera_scene(scene, "OmniverseMakie.colorbuffer")
 
     if !screen.authored
         # author the root once (camera + lights baked, plots added)
