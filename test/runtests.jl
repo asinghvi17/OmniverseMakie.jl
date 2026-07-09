@@ -1,11 +1,5 @@
 using Test
 
-# Set OVRTX_LIBRARY_PATH before any `using LibOVRTX` so __init__ can dlopen it.
-# The package itself does NOT hardcode this path; only the test harness sets
-# the default.
-get!(ENV, "OVRTX_LIBRARY_PATH",
-    "/home/juliahub/temp/omniverse-makie/references/ovrtx/examples/python/minimal/.venv/lib/python3.13/site-packages/ovrtx/bin/libovrtx-dynamic.so")
-
 # ==============================================================================
 # Suite layout: feature-grouped subdirectories; each file self-includes
 # ../helpers.jl so it also runs standalone.  Conventions every subprocess test

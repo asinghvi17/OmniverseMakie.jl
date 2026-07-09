@@ -8,6 +8,8 @@ using p7zip_jll
 export artifact_dir, ovrtx_root, ovrtx_bin, libovrtx_dynamic
 
 const _PKG_UUID = Base.UUID("1f3d2a3f-048b-4987-93b1-45f346dd13cd")
+const _ARTIFACT_NAME = "ovrtx"
+const _ARTIFACTS_TOML = joinpath(dirname(@__DIR__), "Artifacts.toml")
 
 const _RELEASE_VERSION = "0.3.0.312915"
 const _RELEASE_TAG = "v0.3.0"
@@ -56,6 +58,9 @@ end
 
 function _ensure_ovrtx_artifact()
     asset = _asset_for_host()
+    bound = artifact_hash(_ARTIFACT_NAME, _ARTIFACTS_TOML)
+    bound == asset.tree ||
+        error("OVRTX_jll: Artifacts.toml tree hash mismatch for $(_ARTIFACT_NAME): expected $(asset.tree), got $(bound)")
     artifact_exists(asset.tree) && return artifact_path(asset.tree)
     actual = create_artifact() do dir
         _download_verify_extract!(dir, asset)

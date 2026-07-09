@@ -1,0 +1,31 @@
+[[ovrtx]]
+arch = "x86_64"
+git-tree-sha1 = "b12569b960445ddaddce8779d60e224dc642cd17"
+lazy = true
+libc = "glibc"
+os = "linux"
+
+    [[ovrtx.download]]
+    sha256 = "5569e44b18d2d39f23f374c9352dac9c87b8115892209c243c98732085f1d5f9"
+    url = "https://github.com/NVIDIA-Omniverse/ovrtx/releases/download/v0.3.0/ovrtx%400.3.0.312915.cec773e1.manylinux_2_35_x86_64.zip"
+
+[[ovrtx]]
+arch = "aarch64"
+git-tree-sha1 = "02f5a1813034a0ae7c9a976a2243b911532b5b82"
+lazy = true
+libc = "glibc"
+os = "linux"
+
+    [[ovrtx.download]]
+    sha256 = "c0236bac497f720c251485891d72b1a57e75ca38ad5aa2350adcd3d948e44056"
+    url = "https://github.com/NVIDIA-Omniverse/ovrtx/releases/download/v0.3.0/ovrtx%400.3.0.312915.cec773e1.manylinux_2_35_aarch64.zip"
+
+[[ovrtx]]
+arch = "x86_64"
+git-tree-sha1 = "82023550c188bb5aed522d0ba676540bcbab2546"
+lazy = true
+os = "windows"
+
+    [[ovrtx.download]]
+    sha256 = "7fe420790fcd4c0a8609cadba73c7bb03a30fa47cd4ab7f130e3cf92a972063a"
+    url = "https://github.com/NVIDIA-Omniverse/ovrtx/releases/download/v0.3.0/ovrtx%400.3.0.312915.cec773e1.windows-x86_64.zip"
