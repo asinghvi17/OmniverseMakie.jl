@@ -32,6 +32,25 @@ handlers), writes the PNG to `examples/renders/`, and property-asserts the resul
 By default the in-repo `OVRTX_jll` artifact downloads the official ovrtx C archive on first
 use; set `OVRTX_LIBRARY_PATH` only to override that runtime with a manual install.
 
+## Standalone USD Asset Showcases
+
+Some examples reference large external NVIDIA USD assets and are not part of `run_all.jl`.
+
+```bash
+# NVIDIA ConceptCar01 in a TRON-like arena, with scripted driving and wheel bindings.
+CONCEPTCAR_USD=/path/to/ConceptCar01_Adjust.usd \
+julia --project=. examples/tron_conceptcar_drive.jl
+```
+
+`examples/tron_conceptcar_drive.jl` builds the arena from Makie primitives and uses
+`usdplot!` only for the ConceptCar01 asset, driving the car root and wheel subprims through
+`bind_usd!`. It defaults to the realtime `:rt2` renderer for faster iteration and writes
+to `recordings/conceptcar_tron_drive.mp4`; use `TRON_RENDER_MODE=pathtracing` plus
+`TRON_WARMUP`/`TRON_SAMPLES` for slower final-quality passes. Animation speed is physical:
+`TRON_SPEED_MPS=2.0` means a 2 m/s crawl, with scene units treated as centimetres to
+match the car asset. Clips default to 30 fps and `TRON_SECONDS=6.0`; `TRON_FRAMES` remains
+available as a low-level override.
+
 ## Gallery
 
 | Scene | Plots exercised | Render |

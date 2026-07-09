@@ -5,6 +5,7 @@ Manifest.toml
 *.jl.cov
 *.jl.*.cov
 *.jl.mem
+recordings/
 
 # subagent-driven-development scratch (briefs, reports, review packages, ledger)
 .superpowers/
