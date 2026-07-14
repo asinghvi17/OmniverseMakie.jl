@@ -57,6 +57,7 @@ include("live/scatter_positions_test.jl")  # positions route; materialized skip
 include("live/style_live_test.jl")         # markersize/rotation/linewidth diffs
 include("live/nan_lines_test.jl")          # NaN-split gap; frozen-size gate
 include("live/empty_fill_test.jl")         # empty→fill rebuild + pick regs
+include("live/gpu_direct_test.jl")         # gpu_update_mesh! device-tensor writes
 include("live/accumulate_config_test.jl")  # ScreenConfig field/default contract
 include("live/accumulate_render_test.jl")  # accumulate reset suppression
 include("live/usdplot_test.jl")            # usdplot recipe + bind_usd!

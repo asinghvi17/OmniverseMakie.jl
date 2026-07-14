@@ -61,7 +61,11 @@ function replace_scene! end
 # synchronous host frames on a STOPPED render loop and return the composited
 # figure image — see the `replace_scene!` docstring's recording recipe.
 function record_frame! end
-export interactive_display, replace_scene!, record_frame!
+# The CUDA-only ext (OmniverseMakieCUDADirectExt) defines
+# `gpu_update_mesh!(screen, plot; points)`: push mesh points straight from a
+# CUDA device array through the persistent binding (no host copy).
+function gpu_update_mesh! end
+export interactive_display, replace_scene!, record_frame!, gpu_update_mesh!
 
 # Error helpfully when no GLMakie extension is loaded (no method otherwise).
 interactive_display(::Any; kwargs...) =
@@ -70,6 +74,8 @@ replace_scene!(::Any; kwargs...) =
     error("replace_scene! requires GLMakie — run `using GLMakie` and display the figure first.")
 record_frame!(::Any; kwargs...) =
     error("record_frame! requires GLMakie — run `using GLMakie`; it records a replace_scene! session.")
+gpu_update_mesh!(::Any, ::Any; kwargs...) =
+    error("gpu_update_mesh! requires CUDA — run `using CUDA` to load the GPU-direct write extension.")
 
 # Re-export every exported Makie name (the standard backend pattern).
 for name in names(Makie, all = true)

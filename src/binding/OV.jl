@@ -1475,6 +1475,42 @@ function write_binding!(b::Binding, data::AbstractVector, shape::Vector{Int64})
     return nothing
 end
 
+"""
+    write_binding_device!(b::Binding, ptr::Ptr{Cvoid}, nelem::Integer, keepalive;
+                          device_id=0, ready_stream=0, ready_event=0)
+
+Write `nelem` elements of `b.dtype` through the persistent binding from CUDA
+device memory at `ptr` (kDLCUDA).  GPU inputs must use ASYNC access (ovrtx
+rejects SYNC for device buffers): the engine waits on `ready_event` /
+`ready_stream` before reading (both 0 = no wait — the caller must have
+synchronized the producer, e.g. `CUDA.synchronize()`).  Blocks until the
+engine has consumed the buffer, so it is reusable on return; `keepalive`
+(the owning array) is preserved across the wait.
+"""
+function write_binding_device!(b::Binding, ptr::Ptr{Cvoid}, nelem::Integer, keepalive;
+                               device_id::Integer=0, ready_stream::Integer=0,
+                               ready_event::Integer=0)
+    b.alive || error("write_binding_device! on a destroyed Binding")
+    b.r.alive || error("write_binding_device! on a closed Renderer")
+    shape   = Int64[nelem]
+    strides = Int64[1]
+    bdoh    = Ref(_desc_or_handle(b))
+    ready   = LibOVRTX.ovrtx_cuda_sync_t(Csize_t(ready_stream), Csize_t(ready_event))
+    GC.@preserve keepalive shape strides bdoh begin
+        dl = LibOVRTX.DLTensor(ptr, LibOVRTX.DLDevice(LibOVRTX.kDLCUDA, Int32(device_id)),
+                        Int32(1), b.dtype, pointer(shape), pointer(strides), UInt64(0))
+        dl_arr = LibOVRTX.DLTensor[dl]
+        GC.@preserve dl_arr begin
+            ibuf = Ref(LibOVRTX.ovrtx_input_buffer_t(pointer(dl_arr), UInt64(1),
+                       Ptr{UInt8}(C_NULL), Csize_t(0), ready, LibOVRTX.NOSYNC))
+            enqueue_wait(b.r, "write_attribute(device binding:$(b.attr_name))") do
+                LibOVRTX.ovrtx_write_attribute(b.r.ptr, bdoh, ibuf, LibOVRTX.OVRTX_DATA_ACCESS_ASYNC)
+            end
+        end
+    end
+    return nothing
+end
+
 # The ovrtx side of teardown: unmap if mapped, then destroy the handle,
 # waiting under `timeout_ns`.  No flag-clearing here — `destroy!` owns
 # `alive`/`map_handle`, so its throwing and swallowing paths share this.
