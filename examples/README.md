@@ -39,7 +39,10 @@ Some examples reference large external NVIDIA USD assets and are not part of `ru
 ```bash
 # NVIDIA ConceptCar01 in a TRON-like arena, with scripted driving and wheel bindings.
 CONCEPTCAR_USD=/path/to/ConceptCar01_Adjust.usd \
-julia --project=. examples/tron_conceptcar_drive.jl
+julia --project=examples examples/tron_conceptcar_drive.jl
+
+# Prototype: textured Tron road strip from X/Y/Z matrices.
+julia --project=examples examples/tron_textured_road_strip.jl
 ```
 
 `examples/tron_conceptcar_drive.jl` builds the arena from Makie primitives and uses
@@ -49,7 +52,14 @@ to `recordings/conceptcar_tron_drive.mp4`; use `TRON_RENDER_MODE=pathtracing` pl
 `TRON_WARMUP`/`TRON_SAMPLES` for slower final-quality passes. Animation speed is physical:
 `TRON_SPEED_MPS=2.0` means a 2 m/s crawl, with scene units treated as centimetres to
 match the car asset. Clips default to 30 fps and `TRON_SECONDS=6.0`; `TRON_FRAMES` remains
-available as a low-level override.
+available as a low-level override. Set `TRON_SKY_IMAGE=/path/to/panorama.jpg` to use a
+cloudy latlong panorama through Omniverse's native DomeLight background path; `TRON_SKY_ROTATION`,
+`TRON_SKY_EXPOSURE`, and `TRON_SKY_SATURATION` tune the orientation and neutral grade. The
+example environment includes `FileIO` and `ImageIO` for this optional texture path.
+
+`examples/tron_textured_road_strip.jl` is a smaller road-surface prototype. It generates
+slightly bumpy `X`, `Y`, and `Z` matrices, converts them into a UV'd mesh, then applies a
+baked cyan grid texture through the same image-texture path used by OmniverseMakie meshes.
 
 ## Gallery
 

@@ -9,16 +9,18 @@
 # Run it (GPU; serialize on the shared lock as every ovrtx job does):
 #   flock -w 3600 /tmp/omniversemakie-gpu.lock -c \
 #     'OVRTX_LIBRARY_PATH=<...>/libovrtx-dynamic.so JULIA_CUDA_USE_COMPAT=false \
-#      julia --project=. examples/tron_conceptcar_drive.jl'
+#      julia --project=examples examples/tron_conceptcar_drive.jl'
 #
 # Env overrides: CONCEPTCAR_USD (asset path), TRON_MP4 (output path),
 # TRON_SECONDS, TRON_FRAMES (low-level override), TRON_FPS, TRON_SPEED_MPS,
+# TRON_SKY_IMAGE, TRON_SKY_EXPOSURE, TRON_SKY_SATURATION, TRON_SKY_ROTATION,
 # TRON_RENDER_MODE (:rt2 or :pathtracing), TRON_WARMUP, TRON_SAMPLES.
 
 using OmniverseMakie, ColorTypes, FixedPointNumbers, GeometryBasics
+using FileIO, ImageIO
 const OM = OmniverseMakie
 using Makie: Scene, Vec3f, Point3f, Rect3f, RGBf, Observable, AbstractLight,
-             AmbientLight, DirectionalLight, EnvironmentLight, PointLight,
+             AmbientLight, DirectionalLight, EnvironmentLight, PointLight, RectLight,
              cam3d!, update_cam!, translationmatrix, rotationmatrix_x,
              rotationmatrix_y, rotationmatrix_z
 
@@ -35,6 +37,10 @@ const FRAMES = haskey(ENV, "TRON_FRAMES") ?
     parse(Int, ENV["TRON_FRAMES"]) :
     max(1, Int(round(DURATION_SECONDS * FPS)))
 const SPEED_MPS = parse(Float32, get(ENV, "TRON_SPEED_MPS", "2.0"))
+const SKY_IMAGE = get(ENV, "TRON_SKY_IMAGE", "")
+const SKY_EXPOSURE = parse(Float32, get(ENV, "TRON_SKY_EXPOSURE", "0.40"))
+const SKY_SATURATION = parse(Float32, get(ENV, "TRON_SKY_SATURATION", "0.16"))
+const SKY_ROTATION = parse(Float32, get(ENV, "TRON_SKY_ROTATION", "0.25"))
 const RENDER_MODE = let raw = lowercase(get(ENV, "TRON_RENDER_MODE", "rt2"))
     Symbol(startswith(raw, ":") ? raw[2:end] : raw)
 end
@@ -60,6 +66,8 @@ const GRID_LED_MAJOR_MATERIAL = (; emissive = RGBf(0.0f0, 0.46f0, 0.56f0),
                                  opacity = 0.74f0,
                                  metallic = 0.04f0,
                                  roughness = 0.004f0)
+const OCEAN_Z = -185f0
+const OCEAN_MATERIAL = (; metallic = 0.0f0, roughness = 0.032f0)
 const SCENE_UNITS_PER_METER = 100f0
 const CAMERA_RESPONSE_HZ = 5.0f0
 
@@ -159,6 +167,49 @@ function tron_sky(width = 768, height = 384)
     return img
 end
 
+function rotate_sky_image(img)
+    width = size(img, 2)
+    shift = Int(round(SKY_ROTATION * width))
+    return shift == 0 ? img : circshift(img, (0, shift))
+end
+
+function grade_sky_pixel(c; exposure, saturation)
+    r = Float32(red(c))
+    g = Float32(green(c))
+    b = Float32(blue(c))
+    l = clamp(0.2126f0 * r + 0.7152f0 * g + 0.0722f0 * b, 0f0, 1f0)
+    contrast = 1.08f0
+    gray = clamp((l - 0.5f0) * contrast + 0.5f0, 0f0, 1f0)
+    rr = clamp((r - 0.5f0) * contrast + 0.5f0, 0f0, 1f0)
+    gg = clamp((g - 0.5f0) * contrast + 0.5f0, 0f0, 1f0)
+    bb = clamp((b - 0.5f0) * contrast + 0.5f0, 0f0, 1f0)
+    sat = clamp(Float32(saturation), 0f0, 1f0)
+    gain = max(Float32(exposure), 0f0)
+    return RGBf(clamp(gain * ((1f0 - sat) * gray + sat * rr), 0f0, 1f0),
+                clamp(gain * ((1f0 - sat) * gray + sat * gg), 0f0, 1f0),
+                clamp(gain * ((1f0 - sat) * gray + sat * bb), 0f0, 1f0))
+end
+
+function grade_sky_image(img; exposure, saturation)
+    out = Matrix{RGBf}(undef, size(img, 1), size(img, 2))
+    @inbounds for j in axes(img, 1), i in axes(img, 2)
+        out[j, i] = grade_sky_pixel(img[j, i]; exposure = exposure, saturation = saturation)
+    end
+    return out
+end
+
+function load_sky_source()
+    isempty(SKY_IMAGE) && return tron_sky(1024, 512)
+    isfile(SKY_IMAGE) || error("TRON_SKY_IMAGE does not exist: $SKY_IMAGE")
+    return FileIO.load(SKY_IMAGE)
+end
+
+function scene_sky_image()
+    source = rotate_sky_image(load_sky_source())
+    return grade_sky_image(source; exposure = SKY_EXPOSURE,
+                           saturation = SKY_SATURATION)
+end
+
 function disk_mesh(center::Point3f, radius; n = 72)
     pts = Point3f[center]
     for k in 0:(n - 1)
@@ -175,6 +226,55 @@ function disk_mesh(center::Point3f, radius; n = 72)
     normal = Vec3f(0, center[2] >= 0 ? 1 : -1, 0)
     normals = fill(normal, length(pts))
     return GeometryBasics.Mesh(pts, faces; normal = normals)
+end
+
+function ocean_height(x, y)
+    xx = Float32(x)
+    yy = Float32(y)
+    return OCEAN_Z +
+           8.0f0 * sin(0.0045f0 * xx + 0.7f0) +
+           5.0f0 * sin(0.0037f0 * yy - 1.2f0) +
+           3.0f0 * sin(0.0028f0 * (xx + yy) + 1.9f0)
+end
+
+function ocean_normal(x, y)
+    xx = Float32(x)
+    yy = Float32(y)
+    dzdx = 8.0f0 * 0.0045f0 * cos(0.0045f0 * xx + 0.7f0) +
+           3.0f0 * 0.0028f0 * cos(0.0028f0 * (xx + yy) + 1.9f0)
+    dzdy = 5.0f0 * 0.0037f0 * cos(0.0037f0 * yy - 1.2f0) +
+           3.0f0 * 0.0028f0 * cos(0.0028f0 * (xx + yy) + 1.9f0)
+    n = Vec3f(-dzdx, -dzdy, 1f0)
+    return n / sqrt(n[1]^2 + n[2]^2 + n[3]^2)
+end
+
+function ocean_mesh(; half = 6800f0, n = 88)
+    pts = Point3f[]
+    normals = Vec3f[]
+    colors = RGBf[]
+    for iy in 0:n, ix in 0:n
+        x = -half + 2f0 * half * Float32(ix / n)
+        y = -half + 2f0 * half * Float32(iy / n)
+        z = ocean_height(x, y)
+        ripple = 0.5f0 + 0.5f0 * sin(0.006f0 * x - 0.004f0 * y)
+        push!(pts, Point3f(x, y, z))
+        push!(normals, ocean_normal(x, y))
+        push!(colors, RGBf(0.0020f0 + 0.0020f0 * ripple,
+                           0.0075f0 + 0.0045f0 * ripple,
+                           0.0100f0 + 0.0065f0 * ripple))
+    end
+
+    idx(ix, iy) = iy * (n + 1) + ix + 1
+    faces = TriangleFace{Int}[]
+    for iy in 0:(n - 1), ix in 0:(n - 1)
+        a = idx(ix, iy)
+        b = idx(ix + 1, iy)
+        c = idx(ix + 1, iy + 1)
+        d = idx(ix, iy + 1)
+        push!(faces, TriangleFace(a, b, c))
+        push!(faces, TriangleFace(a, c, d))
+    end
+    return GeometryBasics.Mesh(pts, faces; normal = normals, color = colors)
 end
 
 function box!(scene, center::Point3f, size::Vec3f; color, material = (;))
@@ -258,6 +358,12 @@ function add_floor!(scene)
                     color = major_color,
                     material = GRID_LED_MAJOR_MATERIAL)
     end
+end
+
+function add_ocean!(scene)
+    mesh!(scene, ocean_mesh();
+          color = RGBf(0.0030f0, 0.0100f0, 0.0140f0),
+          material = OCEAN_MATERIAL)
 end
 
 function add_bridge_deck!(scene, radius, width, a0, a1, z; n = 56)
@@ -368,17 +474,23 @@ function add_player_glow!(scene)
 end
 
 function build_scene(car_path)
+    sky = scene_sky_image()
     lights = AbstractLight[
-        EnvironmentLight(1.02f0, tron_sky()),
-        AmbientLight(RGBf(0.190f0, 0.198f0, 0.205f0)),
-        DirectionalLight(RGBf(0.78f0, 0.79f0, 0.80f0), Vec3f(-0.35, -0.35, -1.0), true),
-        PointLight(RGBf(0.40f0, 0.48f0, 0.52f0), Vec3f(-450, -340, 240)),
-        PointLight(RGBf(0.42f0, 0.43f0, 0.44f0), Vec3f(500, -590, 280)),
-        PointLight(RGBf(0.18f0, 0.20f0, 0.21f0), Vec3f(520, 360, 180)),
+        EnvironmentLight(1.0f0, sky),
+        AmbientLight(RGBf(0.46f0, 0.46f0, 0.46f0)),
+        DirectionalLight(RGBf(1.45f0, 1.45f0, 1.45f0), Vec3f(-0.35, -0.35, -1.0), true),
+        RectLight(RGBf(2.75f0, 2.75f0, 2.75f0), Point3f(0, -650, 760),
+                  Vec3f(1080, 0, 0), Vec3f(0, 520, 0), Vec3f(0.16, 0.32, -1.0)),
+        RectLight(RGBf(1.85f0, 1.85f0, 1.85f0), Point3f(820, -260, 510),
+                  Vec3f(0, 760, 0), Vec3f(0, 0, 320), Vec3f(-0.90, -0.22, -0.45)),
+        PointLight(RGBf(2.95f0, 2.95f0, 2.95f0), Vec3f(-520, -460, 420)),
+        PointLight(RGBf(2.25f0, 2.25f0, 2.25f0), Vec3f(620, -700, 380)),
+        PointLight(RGBf(1.15f0, 1.15f0, 1.15f0), Vec3f(140, 150, 520)),
     ]
     scene = Scene(size = (1280, 720); lights = lights)
     cam3d!(scene)
 
+    add_ocean!(scene)
     add_floor!(scene)
     add_arena!(scene)
     player_glow = add_player_glow!(scene)
