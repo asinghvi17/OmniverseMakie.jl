@@ -1,0 +1,12 @@
+name = "LibKitJL"
+uuid = "b98a91a1-1705-430f-9cd5-7db1437efb13"
+version = "0.1.0"
+authors = ["Anshul Singhvi <anshulsinghvi@gmail.com>"]
+
+[deps]
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+Libglvnd_jll = "7e76a0d4-f3c7-5321-8279-8d96eeed0f29"
+
+[compat]
+Libglvnd_jll = "1"
+julia = "1.10"

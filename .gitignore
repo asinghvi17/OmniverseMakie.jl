@@ -7,6 +7,12 @@ Manifest.toml
 *.jl.mem
 recordings/
 
+# LibKitJL: locally g++-built native shim + generated deps marker.
+# Kit is NVIDIA-proprietary and env-located (KIT_RELEASE_DIR) — never vendored,
+# exactly like the ovrtx runtime artifact.
+lib/LibKitJL/deps/libkitjl.so
+lib/LibKitJL/deps/deps.jl
+
 # subagent-driven-development scratch (briefs, reports, review packages, ledger)
 .superpowers/
 .worktrees/

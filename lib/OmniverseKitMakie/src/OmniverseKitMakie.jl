@@ -9,18 +9,22 @@
 # simply absorb the fix if a future ovrtx build ships the composite marker
 # path (see the seam analysis in that README).
 #
-# v1 surface:
-#   server  = start_kit_server()                    # persistent Kit subprocess
-#   screen  = KitScreen(scene; server)              # authors + opens the stage
-#   img     = Makie.colorbuffer(screen)             # camera sync + render
+# Surface (transport-agnostic):
+#   screen  = KitScreen(scene)                       # subprocess transport (default)
+#   screen  = KitScreen(scene; transport=:inprocess) # in-process Kit via LibKitJL
+#   img     = Makie.colorbuffer(screen)              # camera sync + render
 #   close(screen)
+# The subprocess spike surface is still available:
+#   server  = start_kit_server(); screen = KitScreen(scene; server)
 #
-# Design doc: docs/superpowers/specs/2026-07-15-omniverse-kit-makie-design.md
+# Design docs: docs/superpowers/specs/2026-07-15-omniverse-kit-makie-design.md
+#              docs/superpowers/specs/2026-07-15-libkitjl-design.md  (in-process)
 module OmniverseKitMakie
 
 import Makie
 import OmniverseMakie as OM
 import NanoVDBWriter
+import LibKitJL
 using LinearAlgebra: I
 
 export KitServer, KitScreen, start_kit_server, rpc, open_stage!, render!,
@@ -28,6 +32,7 @@ export KitServer, KitScreen, start_kit_server, rpc, open_stage!, render!,
 
 include("minijson.jl")
 include("server.jl")
+include("transport.jl")   # KitTransport: SubprocessTransport (default) + InProcessTransport (LibKitJL)
 include("authoring.jl")
 include("screen.jl")
 

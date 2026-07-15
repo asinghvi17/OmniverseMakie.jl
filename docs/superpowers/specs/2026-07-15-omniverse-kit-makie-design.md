@@ -67,15 +67,41 @@ its internals (`_vdb_volume_usda`, `_volume_colorrange`, `usda_light`,
   `colormap=Makie.to_colormap([:black, :white])` twin ≈ zero chroma.
   Server serializes on the shared GPU lock itself.
 
-### Phase 2 (specced, not built): `libkitjl` C shim, in-process
+### Phase 2 (IMPLEMENTED, opt-in — startup deadlock is the open seam): `libkitjl` C shim, in-process
 
-C ABI over Carbonite (headers ship in `kit/dev/include` + `kit/dev/fabric`):
-`IApp` lifecycle pumped from a Julia task, `ISettings`, Fabric
-`IStageReaderWriter` for CUDA-pointer geometry, `IAppScripting` escape hatch
-for stage/capture ops until native AOV readback lands. Replaces the
-subprocess; same `KitScreen` surface. Known hazards + mitigations: breakpad
-vs Julia GC signals (ovrtx fix pattern applies), no coexistence with
-in-process ovrtx (one backend per session).
+**Status: the in-process transport is fully implemented and opt-in, but does
+NOT yet render — Kit's in-process startup deadlocks (see below). The
+subprocess transport remains the default and the only working path.** Design +
+build order + deadlock analysis:
+[`docs/superpowers/specs/2026-07-15-libkitjl-design.md`](2026-07-15-libkitjl-design.md).
+
+Delivered + verified: `lib/LibKitJL` (a workspace subpackage mirroring
+`lib/LibOVRTX`) — a g++-built `libkitjl.so` flat `extern "C"` shim over
+Carbonite's ABI (`OMNI_APP_GLOBALS` + `acquireFrameworkAndRegisterBuiltins` +
+`carb::startupFramework(argv)` → load `omni.kit.app.plugin` →
+`acquireInterface<omni::kit::IApp>` → `startup(AppDesc)` with the SAME argv the
+subprocess uses). Native `IApp` lifecycle + `ISettings` + `carbGetSdkVersion`;
+`IAppScripting::executeString` hatch reuses `kit_server.py`'s handler bodies;
+`InProcessTransport` + transport abstraction wired under the same `KitScreen`
+surface (subprocess unchanged, regression-green). Hazards handled: breakpad-vs-
+GC signals (`SignalGuard` + `--/crashreporter/enabled=false`); no coexistence
+with in-process ovrtx, one Kit app per process. Build degrades gracefully when
+`KIT_RELEASE_DIR`/headers are absent. **Pure tier green** (`libkitjl.so` built,
+all 13 symbols resolve, `kitjl_sdk_version()` non-empty).
+
+**OPEN SEAM (blocks the in-process render):** `IApp::startup` **deadlocks**
+during the `omni.usd_resolver` Python-extension `dlopen` when Kit is co-hosted
+in the Julia process — the calling thread spins (~100% CPU) in a carb loader
+lock and never returns. Framework startup *initiates* (carb acquired, ~36
+extensions load, RTX GPU detected) before the hang. Reproduced identically
+with/without the signal guard, with `--handle-signals=no`, with the full
+`startupFramework` init, and with a system-`libstdc++` `LD_PRELOAD`. A fix
+likely needs the USD/Ar/TBB static-init to run outside Julia's co-hosted loader
+state, or an upstream carb/USD change.
+
+**Later v-seams (see the libkitjl spec):** Fabric `IStageReaderWriter`
+CUDA-pointer geometry (in), `omni.syntheticdata` CUDA AOV readback replacing
+the PNG capture (out), and a thread-pinned background pump for interactive use.
 
 ### Phase 3 (later): GPU data planes
 
