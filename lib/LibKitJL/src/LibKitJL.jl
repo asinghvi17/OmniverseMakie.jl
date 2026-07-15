@@ -19,6 +19,12 @@ end
 # LIBKITJL_KIT_RELEASE_DIR / LIBKITJL_UNAVAILABLE_REASON.  Missing (never
 # built) counts as unavailable.
 const _DEPS_JL = joinpath(@__DIR__, "..", "deps", "deps.jl")
+# Register deps.jl as a precompile dependency even when absent: this file is
+# written by `deps/build.jl` AFTER the first precompile (build runs post-
+# resolve), so without this the "unavailable" branch below stays baked into
+# the cache and a later successful build is never picked up.  include_dependency
+# invalidates on the file appearing/changing.
+include_dependency(_DEPS_JL)
 if isfile(_DEPS_JL)
     include(_DEPS_JL)
 else
