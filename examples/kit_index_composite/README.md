@@ -140,10 +140,24 @@ every component but one is present and responsive:
   always. Also tried and refuted: `/renderer/enabled = "rtx,index"` (no
   second engine), settings-only volume marking (no reader exists).
 
-So standalone full-color volumes are **one NVIDIA-shipped component away**
-(an ov-USD-built `nvindex:composite` reader, or a carb-settings fallback to
-mark all volumes) — worth an upstream request against ovrtx; until then,
-colors require this Kit runtime.
+Disassembly of the seam (stripped-binary analysis) sharpened the picture:
+`nvindex:composite` is read **only** by Kit's `omni.index.usd` plugin (a
+`omni::indexusd::IndexUsd` carb service whose `createVolume`/`createColormap`
+methods build IndeX scene elements for marked prims); `omni:rtx:skip` is read
+only by `librtx.hydra.so`; the composite consumer
+(`IndexCompositeRendererContext`) is compiled into **both** Kit's and ovrtx's
+`carb.scenerenderer-rtx` builds. ovrtx's bundled `carb.scenerenderer-index`
+even contains connector-bypassing test hooks (`/nvindex/test/loadVolume`,
+`/nvindex/test/disableIndexUsd`) — but they are unreachable: **nothing in
+standalone ovrtx ever instantiates that plugin** (verified empirically; it
+never loads under any settings combination tried, including
+`/renderer/enabled = "rtx,index"`).
+
+So standalone full-color volumes are **one NVIDIA-shipped step away** —
+instantiate the bundled IndeX scene renderer (its test hooks would then
+already suffice for a proof) or ship an ov-USD-built `nvindex:composite`
+reader — worth an upstream request against ovrtx; until then, colors require
+a Kit runtime.
 
 ## What this means for OmniverseMakie
 
@@ -154,6 +168,21 @@ re-checked 2026-07-15). Getting Makie volume colormaps to actually show
 means rendering through a Kit runtime like this probe's — a deployment
 change (Kit hosts the render loop; the current C FFI drives libovrtx
 directly), not a library fetch into ovrtx.
+
+## KitScreen: driving this from Julia (spike, PASSING)
+
+`src/kit/kitscreen.jl` + `src/kit/kit_server.py` wrap the proven launch in a
+**persistent render server**: Julia starts one headless Kit (same six-ext
+recipe, same GPU-lock/timeout hygiene), then issues line-JSON RPCs
+(`open_stage` / `render` / `set_attr` / `quit`) over a FIFO, with captures
+returned as files. Acceptance (`kitscreen_spike.jl`, run twice + once
+independently, identical results): server up in **1.5 s warm**, colored
+torus render 6.3 s (CHROMA_PX=322,046 — matches this README's proof), gray
+render through the *same* server 4.2 s (CHROMA_PX=0), live `set_attr`, clean
+0.6 s shutdown. The module is deliberately **not** wired into the package
+include chain yet — phase 2 is authoring Makie scenes through the existing
+`src/translation/*` emitters (plus composite renderSettings + Colormap from
+Makie colormaps) so `volume!` colors work behind the normal Screen interface.
 
 ## Files
 
