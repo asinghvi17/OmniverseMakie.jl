@@ -1,7 +1,7 @@
-# Persistent Kit-side render server for OmniverseMakie's KitScreen spike.
+# Persistent Kit-side render server for OmniverseKitMakie's KitScreen.
 #
-# Launched via `kit --exec kit_server.py` (see src/kit/kitscreen.jl for the
-# full launch: extension chain, /rtx/index settings, libGLU shim, GPU lock).
+# Launched via `kit --exec kit_server.py` (see server.jl for the full
+# launch: extension chain, /rtx/index settings, libGLU shim, GPU lock).
 # Runs an asyncio command loop for the lifetime of the Kit process so one
 # ~30-60 s Kit startup amortizes over many renders.
 #
@@ -101,8 +101,9 @@ async def _op_render(app, cmd):
 
 
 async def _op_set_attr(app, cmd):
-    # Best-effort typed attribute write on the open stage (spike scope:
-    # str/float/bool/int scalars).
+    # Typed attribute write on the open stage: scalars coerce to the
+    # attribute's existing type; "usd_type" selects a pxr Gf construction
+    # for the structured values the camera sync needs.
     ctx = omni.usd.get_context()
     stage = ctx.get_stage()
     if stage is None:
@@ -114,10 +115,22 @@ async def _op_set_attr(app, cmd):
     if not attr or not attr.IsValid():
         raise RuntimeError(f"prim {cmd['prim']!r} has no attribute {cmd['attr']!r}")
     value = cmd["value"]
-    cur = attr.Get()
-    if cur is not None and isinstance(cur, (bool, int, float, str)) \
-            and not isinstance(value, type(cur)):
-        value = type(cur)(value)  # e.g. JSON int -> float attr
+    usd_type = cmd.get("usd_type")
+    if usd_type == "matrix4d":  # 4 rows of 4 numbers (row-vector layout)
+        from pxr import Gf
+
+        value = Gf.Matrix4d(*(float(x) for row in value for x in row))
+    elif usd_type == "double3":
+        from pxr import Gf
+
+        value = Gf.Vec3d(*(float(x) for x in value))
+    elif usd_type is not None:
+        raise RuntimeError(f"unsupported usd_type {usd_type!r}")
+    else:
+        cur = attr.Get()
+        if cur is not None and isinstance(cur, (bool, int, float, str)) \
+                and not isinstance(value, type(cur)):
+            value = type(cur)(value)  # e.g. JSON int -> float attr
     if not attr.Set(value):
         raise RuntimeError(f"Set({value!r}) failed on {attr.GetPath()}")
     for _ in range(int(cmd.get("settle", 2))):
@@ -125,11 +138,38 @@ async def _op_set_attr(app, cmd):
     return {"prim": cmd["prim"], "attr": cmd["attr"]}
 
 
+async def _op_write_vdb(app, cmd):
+    # Dense Float32 payload (column-major raw file, Julia layout) -> classic
+    # OpenVDB .vdb via the omni.volume ext's pyopenvdb bindings.  Kit's IndeX
+    # composite importer reads OpenVDB reliably but FAILS to fetch data from
+    # NanoVDB files (proven against both NanoVDBWriter output and Warp's own
+    # sample .nvdb) — so volume payloads for this server must be .vdb.
+    import numpy as np
+    import openvdb
+
+    shape = tuple(int(x) for x in cmd["shape"])
+    arr = np.fromfile(cmd["raw"], dtype=np.float32)
+    if arr.size != shape[0] * shape[1] * shape[2]:
+        raise RuntimeError(f"raw payload has {arr.size} floats, expected {shape}")
+    arr = arr.reshape(shape, order="F")
+    grid = openvdb.FloatGrid()
+    grid.copyFromArray(np.ascontiguousarray(arr), tolerance=0.0)
+    vs = [float(x) for x in cmd["voxel_size"]]
+    o = [float(x) for x in cmd["origin"]]
+    grid.transform = openvdb.createLinearTransform(
+        [[vs[0], 0, 0, 0], [0, vs[1], 0, 0], [0, 0, vs[2], 0], [o[0], o[1], o[2], 1]])
+    grid.name = cmd.get("name", "density")
+    grid.gridClass = openvdb.GridClass.FOG_VOLUME
+    openvdb.write(cmd["out"], grids=[grid])
+    return {"out": cmd["out"], "voxels": int(arr.size)}
+
+
 _HANDLERS = {
     "ping": _op_ping,
     "open_stage": _op_open_stage,
     "render": _op_render,
     "set_attr": _op_set_attr,
+    "write_vdb": _op_write_vdb,
 }
 
 

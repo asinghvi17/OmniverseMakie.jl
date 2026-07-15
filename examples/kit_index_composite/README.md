@@ -169,20 +169,21 @@ means rendering through a Kit runtime like this probe's — a deployment
 change (Kit hosts the render loop; the current C FFI drives libovrtx
 directly), not a library fetch into ovrtx.
 
-## KitScreen: driving this from Julia (spike, PASSING)
+## KitScreen: driving this from Julia (the `lib/OmniverseKitMakie` subpackage)
 
-`src/kit/kitscreen.jl` + `src/kit/kit_server.py` wrap the proven launch in a
-**persistent render server**: Julia starts one headless Kit (same six-ext
-recipe, same GPU-lock/timeout hygiene), then issues line-JSON RPCs
-(`open_stage` / `render` / `set_attr` / `quit`) over a FIFO, with captures
-returned as files. Acceptance (`kitscreen_spike.jl`, run twice + once
+[`lib/OmniverseKitMakie`](../../lib/OmniverseKitMakie/README.md) wraps the
+proven launch in a **persistent render server**: Julia starts one headless
+Kit (same six-ext recipe, same GPU-lock/timeout hygiene), then issues
+line-JSON RPCs (`open_stage` / `render` / `set_attr` / `quit`) over a FIFO,
+with captures returned as files — and authors Makie scenes (volume plots,
+lights, camera) into composite-enabled stages so
+`Makie.colorbuffer(KitScreen(scene))` returns **colored** volume renders
+behind the normal interface. Original spike acceptance (run twice + once
 independently, identical results): server up in **1.5 s warm**, colored
 torus render 6.3 s (CHROMA_PX=322,046 — matches this README's proof), gray
 render through the *same* server 4.2 s (CHROMA_PX=0), live `set_attr`, clean
-0.6 s shutdown. The module is deliberately **not** wired into the package
-include chain yet — phase 2 is authoring Makie scenes through the existing
-`src/translation/*` emitters (plus composite renderSettings + Colormap from
-Makie colormaps) so `volume!` colors work behind the normal Screen interface.
+0.6 s shutdown. `kitscreen_spike.jl` here still runs the stage-backed
+acceptance against the subpackage.
 
 ## Files
 

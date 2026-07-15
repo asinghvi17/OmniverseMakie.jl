@@ -9,10 +9,9 @@
 #   3. render the gray-TF variant through the SAME server -> chroma < 1000
 #   4. bonus: set_attr smoke test on the open stage
 #
-# Run:  julia --project=<repo> examples/kit_index_composite/kitscreen_spike.jl
-include(joinpath(@__DIR__, "..", "..", "src", "kit", "kitscreen.jl"))
-
-import .OmniverseMakieKit as OMK
+# Run:  julia --project=<repo>/lib/OmniverseKitMakie examples/kit_index_composite/kitscreen_spike.jl
+# (the KitScreen transport lives in the lib/OmniverseKitMakie subpackage)
+import OmniverseKitMakie as OMK
 using ColorTypes: red, green, blue
 
 # --- assets -----------------------------------------------------------------

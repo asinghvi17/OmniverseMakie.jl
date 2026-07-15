@@ -1,0 +1,26 @@
+name = "OmniverseKitMakie"
+uuid = "5963ae98-1429-42d9-b622-2c626b179dc6"
+version = "0.1.0"
+authors = ["Anshul Singhvi <anshulsinghvi@gmail.com>"]
+
+[deps]
+ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+NanoVDBWriter = "96944c15-f0d2-433b-acbd-364d684ba75d"
+OmniverseMakie = "d60c73f4-20f1-48ea-a3b4-a683962494cb"
+
+[sources]
+NanoVDBWriter = {path = "../NanoVDBWriter"}
+OmniverseMakie = {path = "../.."}
+
+[compat]
+ColorTypes = "0.11, 0.12"
+Makie = "0.24"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
