@@ -1,0 +1,99 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            string boundCamera = "/World/Camera"
+        }
+        dictionary renderSettings = {
+            int "rtx:index:compositeDepthMode" = 3
+            bool "rtx:index:compositeEnabled" = 1
+        }
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Volume "Volume" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+        customData = {
+            dictionary "nvindex.renderSettings" = {
+                string filterMode = "trilinear"
+                double samplingDistance = 0.20000000298023224
+            }
+        }
+    )
+    {
+        rel field:fog = </World/Volume/fog>
+        rel material:binding = </World/Volume/Material>
+        custom bool nvindex:composite = 1
+        custom bool omni:rtx:skip = 1
+
+        def OpenVDBAsset "fog"
+        {
+            token fieldName = "torus_fog"
+            asset filePath = @VDB_PATH@
+        }
+
+        def Material "Material"
+        {
+            token outputs:nvindex:volume.connect = </World/Volume/Material/VolumeShader.outputs:volume>
+
+            def Colormap "Colormap"
+            {
+                custom token colormapSource = "rgbaPoints"
+                custom float2 domain = (0, 1)
+                uniform token domainBoundaryMode = "clampToTransparent"
+                custom token outputs:colormap
+                custom float4[] rgbaPoints = [(0, 0, 1, 0), (0, 1, 1, 0.2), (0, 1, 0, 0.4), (1, 1, 0, 0.55), (1, 0, 0, 0.7)]
+                custom float[] xPoints = [0, 0.25, 0.5, 0.75, 1]
+            }
+
+            def Shader "VolumeShader"
+            {
+                token inputs:colormap.connect = </World/Volume/Material/Colormap.outputs:colormap>
+                token outputs:volume
+            }
+        }
+    }
+
+    def DistantLight "defaultLight" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float angle = 0
+        float intensity = 3000
+        float shaping:cone:angle = 180
+        float shaping:cone:softness
+        float shaping:focus
+        color3f shaping:focusTint
+        asset shaping:ies:file
+        double3 xformOp:rotateXYZ = (315, 0, 0)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+
+    def Camera "Camera"
+    {
+        float2 clippingRange = (1, 10000000)
+        float exposure = 0
+        float focalLength = 18.147562
+        float focusDistance = 400
+        float fStop = 0
+        float horizontalAperture = 20.955
+        float horizontalApertureOffset = 0
+        custom vector3d omni:kit:centerOfInterest = (6.260609485760717e-15, 6.260609485760717e-15, -345.86587233433403)
+        token projection = "perspective"
+        uniform token purpose = "default"
+        float verticalAperture = 15.2908
+        float verticalApertureOffset = 0
+        token visibility = "inherited"
+        float3 xformOp:rotateYXZ = (80.320885, -1.0782819e-12, 149.87924)
+        float3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (23.116637717275065, 40.34599585848169, 9.516162167444032)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateYXZ", "xformOp:scale"]
+    }
+}
