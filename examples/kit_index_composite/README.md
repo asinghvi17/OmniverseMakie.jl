@@ -112,6 +112,39 @@ must be awaited — keep the returned object and
 `await cap.wait_for_result(completion_frames=60)`; fire-and-forget writes
 nothing (`probe.py` does it right).
 
+## How close standalone ovrtx is (in-process probe, 2026-07-15)
+
+Follow-up binary + runtime investigation of whether the same composite path
+can run **inside Julia-hosted ovrtx** (no Kit process). Result: *almost* —
+every component but one is present and responsive:
+
+- ovrtx's `libcarb.scenerenderer-rtx.plugin.so` carries the **full**
+  `/rtx/index/*` composite settings family and the composite machinery
+  (`rtx::index::IndexCompositeRendererContext`, composite-before-AA passes).
+  An earlier claim that these strings exist in zero ovrtx binaries was wrong.
+- ovrtx bundles `carb.scenerenderer-index.plugin` (the IndeX scene renderer,
+  self-contained, colormap-capable) and its dir is in the engine's plugin
+  search paths; `rtx.indexlib` (IndexInstance) loads.
+- Setting `/rtx/index/compositeEnabled=true` via the carb config **is
+  honored as a composite request**: with `/nvindex/compositeRenderingAvailable`
+  deliberately absent, ovrtx logs the same diagnostic Kit would
+  ("NVIDIA IndeX Compositing was requested but … is not set").
+- **The one missing link:** nothing in ovrtx reads the per-prim marker
+  `nvindex:composite` (or the layer `rtx:index:*` renderSettings). In Kit
+  that reader is `omni.index.usd`'s `libomni.index.usd.plugin.so` — the
+  "Use IndeX compositing" property toggle. It cannot be transplanted: it
+  links Kit's split USD (`libusd_*.so`) + `libpython3.12`, while ovrtx embeds
+  a monolithic `libov_25.11usd_ms.so` (different pxr inline namespace).
+- Net behavior in-process: composite requested + volume skipped → black
+  (empty composite); volume not skipped → IndeX **Direct** grayscale as
+  always. Also tried and refuted: `/renderer/enabled = "rtx,index"` (no
+  second engine), settings-only volume marking (no reader exists).
+
+So standalone full-color volumes are **one NVIDIA-shipped component away**
+(an ov-USD-built `nvindex:composite` reader, or a carb-settings fallback to
+mark all volumes) — worth an upstream request against ovrtx; until then,
+colors require this Kit runtime.
+
 ## What this means for OmniverseMakie
 
 `volume!` colors stay a documented grayscale degrade on the standalone-ovrtx
