@@ -62,6 +62,32 @@ reproduces it; a C++ main-exe with identical init works). Full evidence:
 The only in-process route would be inverting the host (a Kit-globals
 executable embedding `libjulia`).
 
+## GPU data plane
+
+Frames out of the server, three ways (`render!(screen; device = …)`;
+[design](../../docs/superpowers/specs/2026-07-16-kit-gpu-data-plane-design.md)):
+
+- **`:cpu`** (and `:auto`, which `Makie.colorbuffer` rides) — zero-disk
+  capture: the server memmoves the RGBA8 frame into POSIX shared memory and
+  Julia mmaps it. No PNG encode, no disk. Available whenever the server
+  reports `shm_out` in [`gpu_caps`](@ref).
+- **`:cuda`** — device-resident frames: `omni.syntheticdata`'s `LdrColorSDPtr`
+  node exposes the render var as a CUDA device pointer; the server copies it
+  device→device into a `cudaMalloc`'d buffer exported once over **CUDA IPC**,
+  and Julia (with CUDA.jl loaded — the `OmniverseKitMakieCUDAExt` extension)
+  wraps it as a `CuMatrix{RGBA{N0f8}}`. Zero host copies. Requires the same
+  GPU on both sides and the `omni.syntheticdata` extension (fetched once from
+  NVIDIA's registry; cached thereafter — the server launch enables it by
+  default, `syntheticdata = false` opts out).
+- **`:png`** — the original file round-trip, kept as the compatibility floor.
+
+Volumes in, live: `gpu_update_volume!(screen, plot; data::CuArray{Float32,3})`
+copies a GPU sim field device→device into a server-owned IPC staging buffer;
+the server writes a **fresh** `.vdb` (IndeX's importer is file-based) and
+swaps the prim's `filePath`. No Julia-side host copy — the Kit-backend
+symmetric of the standalone backend's `gpu_update_mesh!`. The grid size is
+frozen at author time.
+
 ## Requirements
 
 A built Kit runtime with the IndeX composite extensions resolved (default:

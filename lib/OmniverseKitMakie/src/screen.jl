@@ -31,11 +31,15 @@ mutable struct KitScreen <: Makie.MakieScreen
     stage_path::Union{Nothing, String}  # currently open stage
     framecount::Int                     # for default output naming
     frames::Int                         # convergence frames per colorbuffer
+    # authored volume prims (plot, prim, shape, origin, extent) — the
+    # in-plane's plot→prim map (gpu_plane.jl / gpu_update_volume!)
+    volumes::Vector{NamedTuple}
+    gpu::Dict{Any, Any}                 # ext-owned GPU-plane state (IPC wraps)
 end
 
 KitScreen(server::KitServer; size::Tuple{<:Integer, <:Integer} = (1280, 720)) =
     KitScreen(server, false, nothing, (Int(size[1]), Int(size[2])),
-              server.workdir, nothing, 0, 240)
+              server.workdir, nothing, 0, 240, NamedTuple[], Dict{Any, Any}())
 
 # Volume payloads for a LIVE screen: raw column-major Float32 file -> server
 # converts to classic OpenVDB .vdb via omni.volume's pyopenvdb (the composite
@@ -64,10 +68,21 @@ function KitScreen(scene::Makie.Scene; server::Union{Nothing, KitServer} = nothi
     srv = owns ? start_kit_server(; width = sz[1], height = sz[2], kwargs...) : server
     screen = KitScreen(srv, owns, scene, (Int(sz[1]), Int(sz[2])),
                        mktempdir(; prefix = "omk_screen_", cleanup = false),
-                       nothing, 0, Int(frames))
+                       nothing, 0, Int(frames), NamedTuple[], Dict{Any, Any}())
+    # Track plot→prim for the in-plane: plots in _collect_plots! order match
+    # the writer's index (and the authored "/World/Volume\$i" prim names).
+    vols = Makie.Volume[]
+    _collect_plots!(vols, Symbol[], scene.plots)
+    inner_writer = _vdb_volume_writer(srv, screen.workdir)
+    function recording_writer(i, scalars, origin, extent)
+        vol_path = inner_writer(i, scalars, origin, extent)
+        push!(screen.volumes, (; plot = vols[i], prim = "/World/Volume$(i)",
+                                 shape = size(scalars), origin, extent))
+        return vol_path
+    end
     path = joinpath(screen.workdir, "stage.usda")
     write(path, stage_usda(scene; workdir = screen.workdir,
-                           volume_writer = _vdb_volume_writer(srv, screen.workdir)))
+                           volume_writer = recording_writer))
     open_stage!(screen, path)
     return screen
 end
@@ -96,21 +111,36 @@ function open_stage!(screen::KitScreen, usda_path::AbstractString; timeout_s::Re
 end
 
 """
-    render!(screen::KitScreen; frames=screen.frames, out=...) -> image matrix
+    render!(screen::KitScreen; frames=screen.frames, device=:auto, out=...) -> image
 
-Converge the open stage for `frames` update frames, capture the viewport to
-`out` (PNG), and load it (via `Makie.FileIO`).
+Converge the open stage for `frames` update frames and capture the viewport.
+`device` selects the out-plane (see gpu_plane.jl): `:auto` (best CPU path —
+shared memory when the server supports it, else PNG), `:cpu`/`:shm`
+(zero-disk shared memory), `:png` (file round-trip via `out`), or `:cuda`
+(device-resident `CuArray`; requires CUDA.jl loaded).
 """
 function render!(screen::KitScreen; frames::Integer = screen.frames,
+        device::Symbol = :auto,
         out::AbstractString = joinpath(screen.workdir,
                                        "frame_$(screen.framecount + 1).png"),
         timeout_s::Real = 600)
     screen.stage_path === nothing && error("render!: no stage open; call open_stage! first")
-    rsp = _check(rpc(screen.server, "render"; frames, out = abspath(out), timeout_s),
-                 "render")
-    screen.framecount += 1
-    rsp.bytes > 0 || error("render: capture reported 0 bytes for $out")
-    return Makie.FileIO.load(abspath(out))
+    dev = _resolve_device(screen, device)
+    if dev === :png
+        rsp = _check(rpc(screen.server, "render"; frames, device = "png",
+                         out = abspath(out), timeout_s), "render(png)")
+        screen.framecount += 1
+        rsp.bytes > 0 || error("render: capture reported 0 bytes for $out")
+        return Makie.FileIO.load(abspath(out))
+    elseif dev === :cpu
+        rsp = _check(rpc(screen.server, "render"; frames, device = "shm", timeout_s),
+                     "render(shm)")
+        screen.framecount += 1
+        return _shm_frame(rsp)
+    elseif dev === :cuda
+        return _cuda_render(screen; frames, timeout_s)
+    end
+    error("render!: unknown device $(repr(device))")
 end
 
 """

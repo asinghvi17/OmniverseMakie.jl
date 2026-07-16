@@ -85,9 +85,10 @@ Full design, evidence, and the decisive experiments are preserved in
 in-process route is inverting the host (a Kit-globals executable embedding
 `libjulia`) — out of scope. **The subprocess transport is the design.**
 
-### Phase 3 (later): GPU data planes
+### Phase 3: GPU data planes — see `2026-07-16-kit-gpu-data-plane-design.md`
 
-In: CUDA IPC into the subprocess (same-GPU zero-host-copy handles). Out:
-`omni.syntheticdata` CUDA annotators → `CuArray` → existing CUDA-GL blit.
-Volume payloads stay file-based (`.vdb` via the server-side pyopenvdb
-conversion) — an IndeX data-import SDK integration is a separate project.
+Implemented as its own spec: frames out (`:cuda` via syntheticdata
+LdrColorSDPtr + CUDA IPC; `:cpu` via shared-memory capture; `:png` floor)
+and live volumes in (`gpu_update_volume!` — IPC staging + fresh-`.vdb`
+server-side write). Volume payloads stay file-based (IndeX importer) — an
+IndeX data-import SDK integration remains a separate project.

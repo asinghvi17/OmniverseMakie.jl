@@ -24,11 +24,12 @@ import NanoVDBWriter
 using LinearAlgebra: I
 
 export KitServer, KitScreen, start_kit_server, rpc, open_stage!, render!,
-    render_stage!, set_attr!, stage_usda
+    render_stage!, set_attr!, stage_usda, gpu_caps, gpu_update_volume!
 
 include("minijson.jl")
 include("server.jl")
 include("authoring.jl")
 include("screen.jl")
+include("gpu_plane.jl")   # out-plane device routing + in-plane entry points
 
 end # module OmniverseKitMakie

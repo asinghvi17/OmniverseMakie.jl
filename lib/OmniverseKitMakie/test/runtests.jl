@@ -2,14 +2,17 @@ using Test
 using OmniverseKitMakie
 import OmniverseKitMakie as OMK
 import Makie
+import CUDA
 using Makie: Scene, cam3d!, update_cam!, volume!, Point3f, Vec3f, RGBf,
     AmbientLight, DirectionalLight, (..)
-using ColorTypes: red, green, blue
+using ColorTypes: red, green, blue, alpha, RGBA
+using FixedPointNumbers: N0f8
 
-# Graded blob in one octant (uniform fields render IndeX-transparent).
-function blob(n)
+# Graded blob at a parameterizable center (uniform fields render
+# IndeX-transparent; a movable center backs the live-update tests).
+function blob(n; center = (0.7, 0.7, 0.35))
     vol = zeros(Float32, n, n, n)
-    cx = 0.7n; cy = 0.7n; cz = 0.35n; R = 0.3n
+    cx = center[1] * n; cy = center[2] * n; cz = center[3] * n; R = 0.3n
     for k in 1:n, j in 1:n, i in 1:n
         d = sqrt((i - cx)^2 + (j - cy)^2 + (k - cz)^2)
         vol[i, j, k] = d < R ? Float32(3 * (1 - d / R)) : 0.0f0
@@ -17,13 +20,14 @@ function blob(n)
     return vol
 end
 
-function volume_scene(; colormap = :viridis, n = 24, size = (512, 512))
+function volume_scene(; colormap = :viridis, n = 24, size = (512, 512),
+                      data = blob(n))
     lights = Makie.AbstractLight[
         AmbientLight(RGBf(0.3, 0.3, 0.3)),
         DirectionalLight(RGBf(1.5, 1.5, 1.4), Vec3f(-0.5, -0.5, -1.0))]
     scene = Scene(; size, lights)
     cam3d!(scene)
-    volume!(scene, 0 .. 1, 0 .. 1, 0 .. 1, blob(n); colormap)
+    volume!(scene, 0 .. 1, 0 .. 1, 0 .. 1, data; colormap)
     update_cam!(scene, Vec3f(2.4, 2.4, 1.6), Vec3f(0.5, 0.5, 0.4), Vec3f(0, 0, 1))
     return scene
 end
@@ -96,6 +100,36 @@ end
     @test_logs (:warn, r"volume plots only") stage_usda(scene2; workdir = mktempdir())
 end
 
+@testset "gpu plane: device resolution + shm frame decode (pure)" begin
+    caps = Dict{Symbol, Any}(:shm_out => true)
+    @test OMK._resolve_device(caps, :auto) === :cpu
+    @test OMK._resolve_device(Dict{Symbol, Any}(), :auto) === :png
+    @test OMK._resolve_device(caps, :shm) === :cpu
+    @test OMK._resolve_device(caps, :png) === :png
+    @test OMK._resolve_device(caps, :cuda) === :cuda
+
+    # shm decode: known 3×2 RGBA8 payload, row-major top-down -> (H, W) image
+    w, h = 3, 2
+    path = tempname()
+    bytes = UInt8[]
+    for row in 0:(h - 1), col in 0:(w - 1)
+        push!(bytes, UInt8(10row + col), UInt8(100 + col), UInt8(200 - 10row), 0xff)
+    end
+    write(path, bytes)
+    img = OMK._shm_frame((; shm_path = path, nbytes = length(bytes),
+                            width = w, height = h, format = "RGBA8"))
+    @test img isa Matrix{RGBA{N0f8}}
+    @test size(img) == (h, w)
+    p = img[2, 3]   # row 2, col 3 -> bytes (12, 102, 190, 255)
+    @test reinterpret(UInt8, red(p)) == 0x0c
+    @test reinterpret(UInt8, green(p)) == 0x66
+    @test reinterpret(UInt8, blue(p)) == 0xbe
+    @test reinterpret(UInt8, alpha(p)) == 0xff
+    # size mismatch is a loud error, not a garbled image
+    @test_throws ErrorException OMK._shm_frame((; shm_path = path,
+        nbytes = length(bytes), width = w + 1, height = h, format = "RGBA8"))
+end
+
 # ---------------------------------------------------------------------------
 # GPU: end-to-end colors through a live Kit server (skipped without a Kit
 # runtime).  The server serializes on the shared GPU lock itself.
@@ -137,6 +171,66 @@ kit_ok = isfile(joinpath(OMK._default_kit_release_dir(), "kit", "kit")) &&
             @info "kitscreen gray" nb3 ch3
             @test nb3 > 800
             @test ch3 < 0.02 * nb3
+
+            # ---------------------------------------------------------------
+            # GPU data plane (fresh screen: default camera, viridis blob)
+            # ---------------------------------------------------------------
+            @info "kit server caps" gpu_caps(screen)
+            screenP = KitScreen(volume_scene(); server)
+
+            # shm out-plane: parity vs PNG (accumulation drifts between the
+            # two captures — tolerance parity, not byte equality)
+            if get(gpu_caps(screenP), :shm_out, false)
+                t_png = @elapsed img_png = render!(screenP; device = :png)
+                t_shm = @elapsed img_shm = render!(screenP; device = :cpu, frames = 8)
+                @test img_shm isa Matrix{RGBA{N0f8}}
+                @test size(img_shm) == size(img_png)
+                ndrift = count(k -> abs(lum(img_png[k]) - lum(img_shm[k])) > 24 / 255,
+                               eachindex(img_png))
+                @info "shm parity" t_png t_shm ndrift
+                @test ndrift < 0.01 * length(img_png)
+            else
+                @test_skip "server lacks shm_out"
+            end
+
+            # cuda out-plane: device-resident frame, chroma oracle holds
+            if get(gpu_caps(screenP), :cuda_out, false) && CUDA.functional()
+                imgc = render!(screenP; device = :cuda, frames = 8)
+                @test imgc isa CUDA.CuArray
+                imgc_h = Array(imgc)
+                @test size(imgc_h) == (screenP.size[2], screenP.size[1])
+                chc = count(c -> chroma(c) > 0.15f0, imgc_h)
+                nbc = count(c -> lum(c) > 0.05f0, imgc_h)
+                @info "cuda frame" nbc chc
+                @test nbc > 800
+                @test chc > 500
+            else
+                @test_skip "cuda out-plane unavailable (syntheticdata or CUDA missing)"
+            end
+
+            # in-plane: live volume update from a CuArray (no Julia host copy)
+            if get(gpu_caps(screenP), :cuda_ipc, false) && CUDA.functional()
+                before = render!(screenP; device = :cpu, frames = 8)
+                shifted = blob(24; center = (0.3, 0.3, 0.65))
+                gpu_update_volume!(screenP, screenP.volumes[1].plot;
+                                   data = CUDA.CuArray(shifted))
+                after = render!(screenP; device = :cpu, frames = 24)
+                moved = count(k -> abs(lum(before[k]) - lum(after[k])) > 0.08f0,
+                              eachindex(before))
+                @info "gpu volume update" moved
+                @test moved > 300
+
+                # twin equivalence: a CPU-authored screen with the same
+                # shifted data must render ~the same image
+                screenT = KitScreen(volume_scene(data = shifted); server)
+                twin = render!(screenT; device = :cpu, frames = 24)
+                tdiff = count(k -> abs(lum(after[k]) - lum(twin[k])) > 0.12f0,
+                              eachindex(twin))
+                @info "gpu volume twin" tdiff
+                @test tdiff < 0.02 * length(twin)
+            else
+                @test_skip "cuda ipc unavailable"
+            end
         finally
             close(server)
         end

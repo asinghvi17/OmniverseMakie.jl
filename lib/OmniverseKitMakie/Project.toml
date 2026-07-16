@@ -4,9 +4,12 @@ version = "0.1.0"
 authors = ["Anshul Singhvi <anshulsinghvi@gmail.com>"]
 
 [deps]
+Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
+FixedPointNumbers = "53c48c17-4a7d-5ca2-90c5-79b7896eea93"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
 NanoVDBWriter = "96944c15-f0d2-433b-acbd-364d684ba75d"
 OmniverseMakie = "d60c73f4-20f1-48ea-a3b4-a683962494cb"
 
@@ -14,13 +17,24 @@ OmniverseMakie = "d60c73f4-20f1-48ea-a3b4-a683962494cb"
 NanoVDBWriter = {path = "../NanoVDBWriter"}
 OmniverseMakie = {path = "../.."}
 
+[weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+
+[extensions]
+OmniverseKitMakieCUDAExt = "CUDA"
+
 [compat]
+Base64 = "1.11.0"
+CUDA = "6.2"
 ColorTypes = "0.11, 0.12"
+FixedPointNumbers = "0.8.6"
 Makie = "0.24"
+Mmap = "1.11.0"
 julia = "1.10"
 
 [extras]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test"]
+test = ["Test", "CUDA"]

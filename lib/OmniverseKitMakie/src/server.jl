@@ -33,6 +33,9 @@ mutable struct KitServer
     rsp_offset::Int                    # bytes of the response file consumed
     log_path::String
     next_id::Int
+    # GPU-plane capabilities advertised in the ready message
+    # (:shm_out/:cuda_ipc/:cuda_out/:cuda_device); empty until ready.
+    caps::Dict{Symbol, Any}
 end
 
 Base.isopen(srv::KitServer) = srv.fifo_io !== nothing && process_running(srv.proc)
@@ -110,6 +113,7 @@ function start_kit_server(;
         width::Integer = 1280,
         height::Integer = 720,
         extra_settings::Vector{String} = String[],
+        syntheticdata::Bool = true,
         lifetime_s::Integer = 900,
         lock_wait_s::Integer = 3600,
         startup_timeout_s::Real = 600,
@@ -146,6 +150,14 @@ function start_kit_server(;
         "--/app/renderer/resolution/height=$height",
         extra_settings...,
     ]
+    # omni.syntheticdata backs the CUDA out-plane (LdrColorSDPtr device
+    # pointers).  It resolves from the local cache once fetched (first run
+    # pulls it from NVIDIA's ext registry — network) and requires a stage
+    # frame history >= 3.  Disable to skip both when a box can't resolve it;
+    # the server's caps then report cuda_out=false and shm/png carry.
+    sd_args = syntheticdata ?
+        ["--enable", "omni.syntheticdata",
+         "--/app/settings/fabricDefaultStageFrameHistoryCount=3"] : String[]
     cmd = `flock -w $lock_wait_s $GPU_LOCK timeout $lifetime_s
            $kit_bin --empty --no-window
            --ext-folder exts --ext-folder extscache
@@ -156,12 +168,14 @@ function start_kit_server(;
            --enable omni.rtx.index_composite
            --enable omni.kit.exec.core
            --enable omni.volume
+           $sd_args
            $settings
            --exec $_SERVER_PY`
     proc = run(pipeline(setenv(cmd, env; dir = kit_release_dir);
                         stdout = log_path, stderr = log_path); wait = false)
 
-    srv = KitServer(proc, String(workdir), fifo_path, nothing, rsp_path, 0, log_path, 0)
+    srv = KitServer(proc, String(workdir), fifo_path, nothing, rsp_path, 0, log_path, 0,
+                    Dict{Symbol, Any}())
 
     # Wait for the ready marker before touching the FIFO (opening the write
     # end would block until the server's reader thread exists anyway).
@@ -172,6 +186,9 @@ function start_kit_server(;
             if get(rsp, "op", "") == "ready"
                 get(rsp, "composite_enabled", false) == true ||
                     @warn "kit server ready but /rtx/index/compositeEnabled is not true" rsp
+                caps = get(rsp, "caps", nothing)
+                caps isa Dict &&
+                    merge!(srv.caps, Dict{Symbol, Any}(Symbol(k) => v for (k, v) in caps))
                 ready = true
             end
         end
