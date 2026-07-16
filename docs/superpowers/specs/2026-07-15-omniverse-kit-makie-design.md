@@ -67,45 +67,27 @@ its internals (`_vdb_volume_usda`, `_volume_colorrange`, `usda_light`,
   `colormap=Makie.to_colormap([:black, :white])` twin ≈ zero chroma.
   Server serializes on the shared GPU lock itself.
 
-### Phase 2 (IMPLEMENTED, opt-in — startup deadlock is the open seam): `libkitjl` C shim, in-process
+### Phase 2 (BUILT, ROOT-CAUSED AS IMPOSSIBLE, REMOVED): `libkitjl` C shim, in-process
 
-**Status: the in-process transport is fully implemented and opt-in, but does
-NOT yet render — Kit's in-process startup deadlocks (see below). The
-subprocess transport remains the default and the only working path.** Design +
-build order + deadlock analysis:
-[`docs/superpowers/specs/2026-07-15-libkitjl-design.md`](2026-07-15-libkitjl-design.md).
-
-Delivered + verified: `lib/LibKitJL` (a workspace subpackage mirroring
-`lib/LibOVRTX`) — a g++-built `libkitjl.so` flat `extern "C"` shim over
-Carbonite's ABI (`OMNI_APP_GLOBALS` + `acquireFrameworkAndRegisterBuiltins` +
-`carb::startupFramework(argv)` → load `omni.kit.app.plugin` →
-`acquireInterface<omni::kit::IApp>` → `startup(AppDesc)` with the SAME argv the
-subprocess uses). Native `IApp` lifecycle + `ISettings` + `carbGetSdkVersion`;
-`IAppScripting::executeString` hatch reuses `kit_server.py`'s handler bodies;
-`InProcessTransport` + transport abstraction wired under the same `KitScreen`
-surface (subprocess unchanged, regression-green). Hazards handled: breakpad-vs-
-GC signals (`SignalGuard` + `--/crashreporter/enabled=false`); no coexistence
-with in-process ovrtx, one Kit app per process. Build degrades gracefully when
-`KIT_RELEASE_DIR`/headers are absent. **Pure tier green** (`libkitjl.so` built,
-all 13 symbols resolve, `kitjl_sdk_version()` non-empty).
-
-**OPEN SEAM (blocks the in-process render):** `IApp::startup` **deadlocks**
-during the `omni.usd_resolver` Python-extension `dlopen` when Kit is co-hosted
-in the Julia process — the calling thread spins (~100% CPU) in a carb loader
-lock and never returns. Framework startup *initiates* (carb acquired, ~36
-extensions load, RTX GPU detected) before the hang. Reproduced identically
-with/without the signal guard, with `--handle-signals=no`, with the full
-`startupFramework` init, and with a system-`libstdc++` `LD_PRELOAD`. A fix
-likely needs the USD/Ar/TBB static-init to run outside Julia's co-hosted loader
-state, or an upstream carb/USD change.
-
-**Later v-seams (see the libkitjl spec):** Fabric `IStageReaderWriter`
-CUDA-pointer geometry (in), `omni.syntheticdata` CUDA AOV readback replacing
-the PNG capture (out), and a thread-pinned background pump for interactive use.
+**Status: the in-process transport was fully implemented (native shim + pure
+tier green + transport abstraction, 2026-07-15), then root-caused as
+architecturally impossible with Julia as the host and REMOVED (2026-07-16).**
+Kit's `IApp::startup` hangs in `omni.usd_resolver`'s static initializer
+because **`OMNI_APP_GLOBALS` (the omni-core client context) must live in the
+process main executable** — Kit resolves it via the main-program handle,
+which never searches a dlopened/preloaded library, and `julia`'s executable
+cannot carry it. Proven by controlled bisection: a Julia-free C harness hangs
+identically (not Julia); a C++ main-executable with identical init renders
+(not the init sequence); `LD_PRELOAD` doesn't help (not symbol-scope order).
+Full design, evidence, and the decisive experiments are preserved in
+[`docs/superpowers/specs/2026-07-15-libkitjl-design.md`](2026-07-15-libkitjl-design.md)
+— kept as the record so this is never re-attempted on the same axis. The only
+in-process route is inverting the host (a Kit-globals executable embedding
+`libjulia`) — out of scope. **The subprocess transport is the design.**
 
 ### Phase 3 (later): GPU data planes
 
-In: Fabric GPU attributes (in-process) / CUDA IPC (subprocess). Out:
+In: CUDA IPC into the subprocess (same-GPU zero-host-copy handles). Out:
 `omni.syntheticdata` CUDA annotators → `CuArray` → existing CUDA-GL blit.
-Volume payloads stay file-based (`.nvdb`) — an IndeX data-import SDK
-integration is a separate project.
+Volume payloads stay file-based (`.vdb` via the server-side pyopenvdb
+conversion) — an IndeX data-import SDK integration is a separate project.

@@ -1,5 +1,14 @@
 # libkitjl — in-process Kit runtime for KitScreen (design)
 
+> **STATUS (2026-07-16): IMPLEMENTATION REMOVED.** The transport was built to
+> spec and its native/pure tiers verified, then the startup hang was
+> root-caused as **architectural**: `OMNI_APP_GLOBALS` must live in the
+> process main executable (see "Implementation status" at the end), which
+> makes in-process Kit under a `julia` host impossible. The code
+> (`lib/LibKitJL`, `InProcessTransport`) was deleted; the subprocess
+> transport is the design. This document is kept as the evidence record so
+> the approach is not re-attempted on the same axis.
+
 2026-07-15. Short/medium-form spec (project practice). Expands "Phase 2" of
 `2026-07-15-omniverse-kit-makie-design.md` into a standalone, buildable plan.
 No code in this document; the numbered checklist at the end is the build order.

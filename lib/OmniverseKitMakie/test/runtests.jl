@@ -1,8 +1,6 @@
 using Test
 using OmniverseKitMakie
 import OmniverseKitMakie as OMK
-import LibKitJL
-import Libdl
 import Makie
 using Makie: Scene, cam3d!, update_cam!, volume!, Point3f, Vec3f, RGBf,
     AmbientLight, DirectionalLight, (..)
@@ -99,77 +97,6 @@ end
 end
 
 # ---------------------------------------------------------------------------
-# LibKitJL pure tier: the in-process shim built, symbols resolve, sdk version
-# non-empty.  Headers-present gated (unavailable is expected off a Kit machine).
-# ---------------------------------------------------------------------------
-@testset "LibKitJL: build + symbols (pure)" begin
-    if LibKitJL.LIBKITJL_AVAILABLE
-        @test isfile(LibKitJL.LIBKITJL_PATH)
-        @test LibKitJL.available()                       # dlopened in __init__
-        v = LibKitJL.sdk_version()
-        @info "libkitjl sdk_version" v
-        @test !isempty(v)                                # carbGetSdkVersion, no GPU
-        # every ABI entry point resolves via dlsym on the loaded handle
-        h = Libdl.dlopen(LibKitJL.LIBKITJL_PATH, Libdl.RTLD_LAZY | Libdl.RTLD_NOLOAD)
-        for sym in ("kitjl_startup", "kitjl_update", "kitjl_is_running", "kitjl_shutdown",
-                    "kitjl_post_quit", "kitjl_set_setting_bool", "kitjl_set_setting_int",
-                    "kitjl_set_setting_float", "kitjl_set_setting_string",
-                    "kitjl_get_setting_bool", "kitjl_exec_string", "kitjl_last_error",
-                    "kitjl_sdk_version")
-            @test Libdl.dlsym(h, sym; throw_error = false) !== nothing
-        end
-    else
-        @info "LibKitJL unavailable (no Kit headers at build) — in-process transport skipped" reason = LibKitJL.LIBKITJL_UNAVAILABLE_REASON
-        @test_skip "LibKitJL build unavailable (KIT_RELEASE_DIR/headers absent)"
-    end
-end
-
-# ---------------------------------------------------------------------------
-# Transport abstraction: KitScreen dispatches its ops to the transport (fake,
-# no runtime), and stage_usda is transport-agnostic (proven by the pure oracle
-# above).  Transport-kind resolution honors the kwarg / OMK_KIT_TRANSPORT env.
-# ---------------------------------------------------------------------------
-mutable struct FakeTransport <: OMK.KitTransport
-    calls::Vector{Any}
-    opened::Bool
-end
-FakeTransport() = FakeTransport(Any[], true)
-OMK._t_isopen(t::FakeTransport) = t.opened
-OMK._t_close(t::FakeTransport) = (push!(t.calls, (:close,)); t.opened = false; nothing)
-OMK._t_workdir(t::FakeTransport) = tempdir()
-OMK._t_open_stage!(t::FakeTransport, path; timeout_s) = push!(t.calls, (:open_stage, String(path)))
-OMK._t_set_attr!(t::FakeTransport, prim, attr, value; usd_type) =
-    push!(t.calls, (:set_attr, String(prim), String(attr), usd_type))
-OMK._t_write_vdb(t::FakeTransport; kwargs...) = push!(t.calls, (:write_vdb,))
-
-@testset "transport abstraction: KitScreen dispatch + kind resolution (pure)" begin
-    @test OMK._resolve_transport_kind(nothing) === :subprocess
-    @test OMK._resolve_transport_kind(:inprocess) === :inprocess
-    @test OMK._resolve_transport_kind("SubProcess") === :subprocess
-    @test_throws ErrorException OMK._resolve_transport_kind(:bogus)
-    withenv("OMK_KIT_TRANSPORT" => "inprocess") do
-        @test OMK._resolve_transport_kind(nothing) === :inprocess
-    end
-
-    # KitScreen built directly on a fake transport: ops route through it.
-    ft = FakeTransport()
-    scene = volume_scene()
-    scr = OMK.KitScreen(ft, true, scene, (64, 64), mktempdir(), nothing, 0, 4)
-    @test isopen(scr)
-    open_stage!(scr, "/tmp/fake_stage.usda")
-    @test scr.stage_path == abspath("/tmp/fake_stage.usda")
-    @test ft.calls[1][1] === :open_stage
-    # colorbuffer would render; exercise just the camera-sync set_attr dispatch
-    OMK._sync_camera!(scr)
-    setcall = ft.calls[findfirst(c -> c[1] === :set_attr, ft.calls)]
-    @test setcall[2] == "/World/Camera"
-    @test setcall[4] == "matrix4d"
-    close(scr)                                   # owns_transport=true -> _t_close
-    @test (:close,) in ft.calls
-    @test !isopen(scr)
-end
-
-# ---------------------------------------------------------------------------
 # GPU: end-to-end colors through a live Kit server (skipped without a Kit
 # runtime).  The server serializes on the shared GPU lock itself.
 # ---------------------------------------------------------------------------
@@ -213,40 +140,5 @@ kit_ok = isfile(joinpath(OMK._default_kit_release_dir(), "kit", "kit")) &&
         finally
             close(server)
         end
-    end
-end
-
-# ---------------------------------------------------------------------------
-# In-process GPU parity: spawned in its OWN Julia process (hazard b — must
-# never share a process with an ovrtx-in-process test), with its own `flock`
-# on the shared GPU lock (so runtests itself is NOT wrapped in an outer flock —
-# the subprocess test above flocks internally too).  The child
-# (inprocess_gpu.jl) runs the same viridis-vs-achromatic chroma oracle.
-#
-# KNOWN LIMITATION (opt-in via OMK_TEST_INPROCESS_GPU=1): Kit's in-process
-# startup currently DEADLOCKS during the `omni.usd_resolver` Python-extension
-# dlopen when co-hosted in the Julia process (main thread spins in a carb
-# loader lock; reproduced with/without the signal guard, with `startupFramework`,
-# and with a system-libstdc++ LD_PRELOAD).  The native shim, lifecycle,
-# settings, and startup path are all implemented and the pure tier is green,
-# but no in-process frame renders yet.  Default = documented skip so the suite
-# stays green on the proven subprocess transport; set the env var to reproduce
-# the seam (it will run to the ~900s timeout and fail).
-# ---------------------------------------------------------------------------
-@testset "KitScreen in-process GPU parity (spawned, isolated)" begin
-    if get(ENV, "OMK_TEST_INPROCESS_GPU", "") != "1"
-        @test_skip "in-process GPU render blocked by a Kit-startup co-hosting deadlock " *
-                   "(usd_resolver dlopen); opt in with OMK_TEST_INPROCESS_GPU=1 to reproduce"
-    elseif !kit_ok
-        @test_skip "Kit runtime absent (set KIT_RELEASE_DIR) or OMK_SKIP_GPU=1"
-    elseif !LibKitJL.LIBKITJL_AVAILABLE
-        @test_skip "LibKitJL unavailable ($(LibKitJL.LIBKITJL_UNAVAILABLE_REASON))"
-    else
-        proj = dirname(@__DIR__)
-        script = joinpath(@__DIR__, "inprocess_gpu.jl")
-        cmd = `flock -w 3600 $(OMK.GPU_LOCK) timeout 900 $(Base.julia_cmd()) --startup-file=no --project=$proj $script`
-        @info "spawning in-process GPU parity test (separate process)" cmd
-        p = run(ignorestatus(setenv(cmd, ENV)); wait = true)
-        @test p.exitcode == 0
     end
 end
