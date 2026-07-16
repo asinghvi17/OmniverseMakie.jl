@@ -10,3 +10,4 @@ recordings/
 # subagent-driven-development scratch (briefs, reports, review packages, ledger)
 .superpowers/
 .worktrees/
+__pycache__/
