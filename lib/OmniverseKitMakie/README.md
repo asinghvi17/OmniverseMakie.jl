@@ -50,19 +50,25 @@ Julia API (`KitScreen` / `colorbuffer` / `open_stage!` / `render!` /
 screen = KitScreen(scene; transport = :inprocess)   # or OMK_KIT_TRANSPORT=inprocess
 ```
 
-> **⚠ KNOWN LIMITATION (v1): in-process startup deadlocks.**
-> The native shim, lifecycle, settings, argv construction, the embedded
-> Python helper, and the whole transport op surface are implemented, the
-> `libkitjl.so` build + pure symbol tier is green, and in-process framework
-> startup *initiates* (carb framework acquired, ~36 Kit extensions load, the
-> RTX GPU is detected). But `IApp::startup` then **deadlocks** during the
-> `omni.usd_resolver` Python-extension `dlopen` when Kit is co-hosted in the
-> Julia process — the calling thread spins (~100% CPU) in a carb loader lock
-> and never returns. Reproduced identically with/without the signal guard,
-> with `--handle-signals=no`, with a full `carb::startupFramework` init, and
-> with a system-`libstdc++` `LD_PRELOAD`. **No in-process frame renders yet;
-> use the subprocess transport (the default) for working colored volumes.**
-> Details + the still-open seam are in
+> **⚠ ARCHITECTURAL LIMITATION: in-process Kit is not possible with Julia as
+> the host (root-caused 2026-07-16).**
+> The native shim, lifecycle, settings, argv, embedded Python helper, and the
+> transport op surface are all implemented, and the `libkitjl.so` build + pure
+> symbol tier is green. But `IApp::startup` **hangs** during the
+> `omni.usd_resolver` Python-extension load: its C++ static initializer calls
+> `carb::getCachedInterface<>`, whose by-name interface lookup spins forever.
+> A controlled-experiment bisection (a Julia-free C harness reproduces it in
+> ~2 s) established that the cause is **not** Julia, signals, gcov, the
+> libpython preload, libstdc++, or the framework-init sequence — it is that
+> **`OMNI_APP_GLOBALS` (Kit's omni-core client context) must live in the process
+> *main executable*, not in a dlopened/preloaded library.** A C++ *main
+> executable* with the identical init passes `omni.usd_resolver` and reaches the
+> render loop; the same code in `libkitjl.so` hangs, even under
+> `LD_PRELOAD`. Kit resolves those globals via the main-program handle, which
+> only searches the executable — and `julia`'s executable cannot carry them.
+> **Use the subprocess transport (the default) for working colored volumes.**
+> The only in-process route is to *invert* the host (a Kit-globals executable
+> that embeds `libjulia`). Full evidence + the decisive experiment are in
 > [`docs/superpowers/specs/2026-07-15-libkitjl-design.md`](../../docs/superpowers/specs/2026-07-15-libkitjl-design.md).
 
 **Hazard (b):** the in-process Kit app **cannot coexist with in-process

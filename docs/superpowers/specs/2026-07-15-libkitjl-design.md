@@ -435,22 +435,47 @@ Steps 1–9 + 11 landed and verified; step 12's in-process GPU parity is
   modified; libovrtx-dynamic.so was verified to export NO carb framework
   symbols (no global symbol clash), and the constraint is documented loudly.
 
-**BLOCKER (step 10): in-process startup deadlock.** `IApp::startup` spins
-(~100% CPU, ~106 threads, main thread in a carb loader lock) during the
-`omni.usd_resolver` **Python-extension `dlopen`** when Kit is co-hosted in the
-Julia process. Framework startup *initiates* — carb framework acquired, ~36
-extensions load, the RTX A5000 is detected — then hangs. SIGTERM backtrace:
-`kitjl_startup → libomni.kit.app.plugin → libomni.ext.plugin (ext manager) →
-libcarb.scripting-python → PyImport → libc dlopen(_omni_usd_resolver.cpython-312.so)
-→ (_dl_catch_exception ×3) → libcarb (pthread_rwlock)`. Reproduced identically
-in **four** configs: default (SignalGuard), `--handle-signals=no`,
-`+startupFramework`, and `LD_PRELOAD` of the system `libstdc++`/`libgcc_s`. So
-it is neither Julia's signal handling, nor missing framework config, nor a
-libstdc++-version mismatch. Most likely the USD `Ar` resolver / USD / TBB
-static initializers run during that `dlopen` interact fatally with Julia's
-co-hosted dynamic-loader/threading state. Candidate next steps: pre-`dlopen`
-the USD/resolver stack in a controlled order before `app->startup`; try
-`RTLD_DEEPBIND` on the offending loads; or split the USD/resolver init onto a
-dedicated pre-init thread. The **subprocess transport is unaffected** and
-remains the working default. The in-process GPU test is opt-in
-(`OMK_TEST_INPROCESS_GPU=1`) and otherwise a documented skip.
+**BLOCKER (step 10): in-process startup hang — ROOT-CAUSED 2026-07-16.**
+`IApp::startup` spins (main thread 95% CPU, state R) during the
+`omni.usd_resolver` Python-extension `dlopen`; the cpython ext's C++
+static-initializer calls `carb::getCachedInterface<ISettings/IDictionary>`,
+whose by-name interface lookup (an rwlock-guarded `unordered_map<string>`
+probe in libcarb) never terminates.
+
+The earlier explanation in this file (Julia co-hosting / signals / tokens
+not initialized / libstdc++) was **WRONG**. Root cause, established by
+controlled bisection (scripts in the session scratchpad; a Julia-free C
+harness reproduces the hang in ~2 s):
+
+- **NOT Julia.** A pure-C program that dlopens libcarb + calls `kitjl_startup`
+  hangs identically — no Julia in the process. (Invalidates all four prior
+  "fixes", which only varied Julia-side knobs.)
+- **NOT gcov / libpython-preload / libstdc++ / framework-init-sequence.**
+  Excluding the coverage-instrumented `libomni.kit.app.gcov.plugin.so` (which
+  a folder scan pulls in) only removed a ~9× *slowdown*; dropping the
+  libpython preload matched the real kit's timing; the C harness already uses
+  the system libstdc++; and our `acquireFrameworkAndRegisterBuiltins` +
+  `startupFramework` sequence is exactly what `OMNI_CORE_INIT` (the kit
+  binary's own macro) expands to. Each ruled out with a run.
+- **THE CAUSE: `OMNI_APP_GLOBALS` (the omni-core client context) must live in
+  the process *main executable*, not in a dlopened/preloaded library.** Decisive
+  experiment: a C++ **main executable** with `OMNI_APP_GLOBALS` + the identical
+  init + identical argv **passes `omni.usd_resolver` and reaches the running
+  update loop**, while the same logic in a dlopened `libkitjl.so` (called from
+  any host exe) hangs — *even with `LD_PRELOAD=libkitjl.so`*. Kit's client
+  mechanism resolves those globals via the main-program handle
+  (`dlsym(RTLD_DEFAULT)` / `dlopen(NULL)`), which searches the executable's
+  symbol table and never a library's. There is no way to add those symbols to
+  an already-running `julia` (or any non-Kit) executable.
+
+**Consequence (architectural, not a shim bug):** Kit **cannot** be hosted
+in-process with Julia (or any non-Kit binary) as the main executable — the
+`libkitjl.so`-in-a-library approach is fundamentally blocked by this
+requirement. Viable options: (a) the **subprocess transport** (shipped,
+working — the default `KitScreen` path); or (b) **invert the host**: a small
+Kit-globals main executable that embeds `libjulia` (Julia runs *inside* a
+Kit-host process) — a larger design change that gives up "Julia is the host."
+`LD_PRELOAD`, `RTLD_DEEPBIND`, pre-`dlopen` ordering, and pre-init threads
+were considered/tested and do **not** address the main-exe requirement. The
+in-process GPU test stays opt-in (`OMK_TEST_INPROCESS_GPU=1`, documented skip);
+`InProcessTransport` errors clearly rather than hanging where feasible.
